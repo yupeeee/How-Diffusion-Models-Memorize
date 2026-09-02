@@ -116,7 +116,7 @@ def generation_run_name(
     num_seeds: int,
     seed_start: int = 0,
 ) -> str:
-    """Return the only supported generation run-directory name."""
+    """Return the stable logical identity of one generation run."""
 
     if model_name not in MODEL_CHOICES:
         raise ValueError(f"unsupported model: {model_name}")
@@ -134,6 +134,58 @@ def generation_run_name(
         f"{model_name}_{scheduler_name}_g{stable_float(guidance_scale)}"
         f"_T{num_inference_steps}{seed_identity}"
     )
+
+
+def generation_cache_parent_name(
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+) -> str:
+    """Return the shared parent for every seed role of one base run."""
+
+    return generation_run_name(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start=0,
+    )
+
+
+def generation_cache_namespace(
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+    seed_start: int = 0,
+) -> str:
+    """Return a collision-free role namespace beneath a shared cache parent."""
+
+    generation_run_name(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start,
+    )
+    if seed_start == 0:
+        role = "experiment"
+    elif (
+        scheduler_name == "ddim"
+        and float(guidance_scale) == 7.5
+        and num_inference_steps == 50
+        and seed_start == 20
+        and num_seeds == 20
+    ):
+        role = "reference"
+    else:
+        role = "seed"
+    return f"{role}_S{seed_start}_N{num_seeds}"
 
 
 @dataclass(frozen=True, slots=True)

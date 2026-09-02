@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -57,34 +58,78 @@ def test_canonical_latent_distance_handles_terminal_endpoints() -> None:
     torch.testing.assert_close(distances.latent_rmse, torch.tensor([1.0, 2.0]))
 
 
-def test_scientific_output_namespaces_preserve_the_legacy_root(tmp_path: Path) -> None:
-    legacy_directory = tmp_path.resolve() / "outputs" / RUN_NAME / "proximity"
-    legacy_directory.mkdir(parents=True)
-    legacy_config = legacy_directory / "run_config.json"
+def test_scientific_output_namespaces_share_the_experiment_parent(tmp_path: Path) -> None:
+    proximity_directory = tmp_path.resolve() / "outputs" / RUN_NAME / "proximity"
+    proximity_directory.mkdir(parents=True)
+    legacy_config = proximity_directory / "run_config.json"
     legacy_config.write_text("legacy-schema-one", encoding="utf-8")
 
-    paths = ProximityPaths.build(tmp_path.resolve(), RUN_NAME)
-    reference_run = "sdv1_ddim_g7.5_T50_S20_N20"
+    experiment_run = Path(RUN_NAME) / "experiment_S0_N20"
+    paths = ProximityPaths.build(tmp_path.resolve(), experiment_run)
     reference = ProximityPaths.build(
         tmp_path.resolve(),
-        reference_run,
+        Path(RUN_NAME) / "reference_S20_N20",
+        output_run_name=RUN_NAME,
         role="reference",
         seed_start=20,
         num_seeds=20,
     )
 
-    assert paths.generation_run == tmp_path.resolve() / "logs" / RUN_NAME
-    assert paths.output_directory == legacy_directory / "experiment_S0_N20"
-    assert reference.output_directory == (
-        tmp_path.resolve()
-        / "outputs"
-        / reference_run
-        / "proximity"
-        / "reference_S20_N20"
+    assert paths.generation_run == tmp_path.resolve() / "logs" / experiment_run
+    assert reference.generation_run == (
+        tmp_path.resolve() / "logs" / RUN_NAME / "reference_S20_N20"
     )
+    assert paths.output_directory == proximity_directory / "experiment_S0_N20"
+    assert reference.output_directory == proximity_directory / "reference_S20_N20"
     assert paths.result_path("42") == paths.output_directory / "records/42.pt"
     assert legacy_config.read_text(encoding="utf-8") == "legacy-schema-one"
     assert paths.run_config_json != legacy_config
+
+
+def test_analysis_configuration_refreshes_audit_provenance_only_after_validation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "run_config.json"
+    existing = {
+        "analysis": "proximity",
+        "selection_hash": "a" * 64,
+        "source_provenance": {
+            "utils/data/selection.py": "b" * 64,
+            "utils/experiments/proximity.py": "c" * 64,
+        },
+    }
+    desired = {
+        **existing,
+        "source_provenance": {
+            **existing["source_provenance"],
+            "utils/data/selection.py": "d" * 64,
+        },
+    }
+    path.write_text(json.dumps(existing), encoding="utf-8")
+
+    proximity_module._write_or_validate_configuration(path, desired)
+    assert json.loads(path.read_text(encoding="utf-8")) == existing
+    proximity_module._write_or_validate_configuration(
+        path,
+        desired,
+        refresh_source_provenance=True,
+    )
+    assert json.loads(path.read_text(encoding="utf-8")) == desired
+
+    changed_core_source = {
+        **desired,
+        "source_provenance": {
+            **desired["source_provenance"],
+            "utils/experiments/proximity.py": "e" * 64,
+        },
+    }
+    proximity_module._write_or_validate_configuration(path, changed_core_source)
+    assert json.loads(path.read_text(encoding="utf-8")) == desired
+
+    changed_science = {**desired, "selection_hash": "f" * 64}
+    with pytest.raises(ProximityError, match="incompatible"):
+        proximity_module._write_or_validate_configuration(path, changed_science)
+
 
 def test_correlation_statistics_are_explicit_and_dimension_normalized() -> None:
     frame = pd.DataFrame(
@@ -223,7 +268,10 @@ def test_missing_prerequisites_report_seed_aware_commands(
     assert "./generate.sh --model sdv1 --scheduler ddim" in generation_message
     assert "--T 50 --N 20 --seed-start 20 --downscale 4" in generation_message
 
-    run_directory = tmp_path / "logs/sdv1_ddim_g7.5_T50_S20_N20"
+    run_directory = (
+        tmp_path
+        / "logs/sdv1_ddim_g7.5_T50_N20/reference_S20_N20"
+    )
     run_directory.mkdir(parents=True)
     (run_directory / "run_config.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(proximity_module, "require_generation_run", lambda _: {})

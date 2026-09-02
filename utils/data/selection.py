@@ -31,6 +31,7 @@ from utils.common.io import (
     canonical_hash,
     read_json,
 )
+from utils.experiments.cache import generation_log_relative_path
 
 TV_MEAN_SSCD_THRESHOLD = 0.25
 REFERENCE_SCHEDULER, REFERENCE_GUIDANCE_SCALE = "ddim", 7.5
@@ -73,6 +74,15 @@ DIAGNOSTIC_COLUMNS = tuple(
 _FILES = tuple(
     "selection.parquet selection.csv selected_tv.csv excluded_tv.csv "
     "threshold_diagnostics.csv config.json summary.json".split()
+)
+_FROZEN_COMPATIBILITY_CONFIG_FIELDS = tuple(
+    "schema_version selection_policy model_name dataset_model_name "
+    "reference_run_name reference_scheduler reference_guidance_scale "
+    "reference_num_inference_steps reference_seed_start reference_num_seeds "
+    "reference_seeds selection_seeds reference_validation_seeds threshold "
+    "decision_scope selection_metric reference_validation_values_affect_selection "
+    "proximity_affects_selection correlation_affects_selection "
+    "sscd_checkpoint_sha256 sscd_preprocessing_hash".split()
 )
 
 class TargetPairSelectionError(RuntimeError):
@@ -152,6 +162,15 @@ def reference_run_name(model_name: str) -> str:
         REFERENCE_NUM_SEEDS,
         seed_start=REFERENCE_SEED_START,
     )
+def reference_run_path(model_name: str) -> Path:
+    return generation_log_relative_path(
+        model_name=_model(model_name),
+        scheduler_name=REFERENCE_SCHEDULER,
+        guidance_scale=REFERENCE_GUIDANCE_SCALE,
+        num_inference_steps=REFERENCE_NUM_INFERENCE_STEPS,
+        num_seeds=REFERENCE_NUM_SEEDS,
+        seed_start=REFERENCE_SEED_START,
+    )
 def reference_selection_command(model_name: str) -> str:
     model = _model(model_name)
     return (
@@ -181,7 +200,7 @@ def build_target_pair_selection(
     """Build and freeze a selection from local reference SSCD rows."""
     project_root = Path(root).expanduser().resolve()
     model = _model(model_name)
-    run_directory = project_root / "logs" / reference_run_name(model)
+    run_directory = project_root / reference_run_path(model)
     run_config = _configuration(
         reference_run_config, run_directory / "run_config.json", "generation config"
     )
@@ -218,7 +237,9 @@ def build_target_pair_selection(
     destination = target_pair_selection_directory(project_root, model_name=model)
     if destination.exists():
         frozen = load_target_pair_selection(project_root, model_name=model)
-        if frozen.sha256 != digest:
+        if frozen.sha256 != digest and not _matches_frozen_selection_evidence(
+            frozen, selection
+        ):
             raise FrozenTargetPairSelectionError(
                 f"Reference evidence would change frozen selection {destination}: "
                 f"{frozen.sha256} != {digest}"
@@ -226,6 +247,30 @@ def build_target_pair_selection(
         return frozen
     _write_selection(selection, destination)
     return load_target_pair_selection(project_root, model_name=model)
+
+
+def _matches_frozen_selection_evidence(
+    frozen: TargetPairSelection,
+    candidate: TargetPairSelection,
+) -> bool:
+    """Accept aggregate-hash drift only when frozen decision evidence is exact."""
+
+    if any(
+        frozen.configuration.get(key) != candidate.configuration.get(key)
+        for key in _FROZEN_COMPATIBILITY_CONFIG_FIELDS
+    ):
+        return False
+    generation_hash = frozen.configuration.get("reference_generation_hash")
+    sscd_hash = frozen.configuration.get("reference_sscd_hash")
+    if not _is_hash(generation_hash) or not _is_hash(sscd_hash):
+        return False
+    compatible_digest = compute_target_pair_selection_hash(
+        candidate.frame,
+        model_name=candidate.model_name,
+        reference_generation_hash=str(generation_hash),
+        reference_sscd_hash=str(sscd_hash),
+    )
+    return compatible_digest == frozen.sha256
 def ensure_reference_target_pair_selection(
     root: str | Path,
     *,
@@ -643,7 +688,8 @@ def _selection_config(model: str, generation_hash: str, sscd_hash: str,
     return {
         "schema_version": SELECTION_SCHEMA_VERSION, "selection_policy": SELECTION_POLICY,
         "model_name": model, "dataset_model_name": _MODEL_DATASET[model],
-        "reference_run_name": reference_run_name(model), "reference_run_path": f"logs/{reference_run_name(model)}",
+        "reference_run_name": reference_run_name(model),
+        "reference_run_path": reference_run_path(model).as_posix(),
         "reference_scheduler": REFERENCE_SCHEDULER, "reference_guidance_scale": REFERENCE_GUIDANCE_SCALE,
         "reference_num_inference_steps": REFERENCE_NUM_INFERENCE_STEPS,
         "reference_seed_start": REFERENCE_SEED_START,
@@ -680,9 +726,10 @@ def _validate_reference_run(config: Mapping[str, object], model: str) -> str:
         raise TargetPairSelectionError("Reference generation differs at: " + ", ".join(wrong))
     return str(digest)
 def _validate_reference_sscd(config: Mapping[str, object], generation_hash: str) -> str:
-    digest, unhashed = config.get("configuration_hash"), dict(config)
-    unhashed.pop("configuration_hash", None)
-    if not _is_hash(digest) or canonical_hash(unhashed) != digest:
+    from utils.experiments.sscd import sscd_configuration_hash
+
+    digest = config.get("configuration_hash")
+    if not _is_hash(digest) or sscd_configuration_hash(config) != digest:
         raise TargetPairSelectionError("Reference SSCD configuration hash is invalid")
     expected = {
         "generation_scientific_config_hash": generation_hash,
@@ -958,7 +1005,7 @@ def _raise_missing(root: str | Path, model_name: str) -> None:
         )
     raise TargetPairSelectionMissingError(
         f"Frozen schema-2 target-pair selection is missing: {directory}\n"
-        f"Required reference run: logs/{reference_run_name(model)}\n"
+        f"Required reference run: {reference_run_path(model).as_posix()}\n"
         f"Create it with:\n{reference_selection_command(model)}"
         f"{legacy_note}"
     )

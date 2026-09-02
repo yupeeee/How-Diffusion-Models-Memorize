@@ -12,7 +12,10 @@ from typing import Any
 
 import torch
 
-from utils.common.cli import generation_run_name
+from utils.common.cli import (
+    generation_cache_namespace,
+    generation_cache_parent_name,
+)
 from utils.common.io import (
     CacheIOError,
     atomic_torch_save,
@@ -159,6 +162,35 @@ class DiskEstimate:
         return self.free_bytes >= self.estimated_remaining_bytes + self.safety_margin_bytes
 
 
+def generation_log_relative_path(
+    *,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+    seed_start: int = 0,
+) -> Path:
+    """Resolve one role-scoped generation cache path relative to the project."""
+
+    parent = generation_cache_parent_name(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+    )
+    namespace = generation_cache_namespace(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start,
+    )
+    return Path("logs") / parent / namespace
+
+
 def generation_paths(
     root: str | Path,
     *,
@@ -172,15 +204,15 @@ def generation_paths(
     """Resolve one generation run beneath ``logs``."""
 
     project = Path(root).expanduser().resolve()
-    name = generation_run_name(
-        model_name,
-        scheduler_name,
-        guidance_scale,
-        num_inference_steps,
-        num_seeds,
-        seed_start,
+    relative = generation_log_relative_path(
+        model_name=model_name,
+        scheduler_name=scheduler_name,
+        guidance_scale=guidance_scale,
+        num_inference_steps=num_inference_steps,
+        num_seeds=num_seeds,
+        seed_start=seed_start,
     )
-    return GenerationPaths(project / "logs" / name)
+    return GenerationPaths(project / relative)
 
 
 def require_generation_run(paths: GenerationPaths) -> dict[str, Any]:

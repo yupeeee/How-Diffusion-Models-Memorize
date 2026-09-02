@@ -74,7 +74,7 @@ def test_shared_cli_owns_generation_downscale_parsing() -> None:
     assert not hasattr(analysis_parser.parse_args([]), "downscale")
 
 
-def test_seed_blocks_have_collision_free_backward_compatible_run_names(
+def test_seed_blocks_have_collision_free_shared_log_namespaces(
     tmp_path: Path,
 ) -> None:
     common = ("sdv1", "ddim", 7.5, 50, 20)
@@ -101,9 +101,24 @@ def test_seed_blocks_have_collision_free_backward_compatible_run_names(
         num_seeds=20,
         seed_start=20,
     )
-    assert zero.run_directory.name == "sdv1_ddim_g7.5_T50_N20"
-    assert reference.run_directory.name == "sdv1_ddim_g7.5_T50_S20_N20"
+    parent = tmp_path.resolve() / "logs/sdv1_ddim_g7.5_T50_N20"
+    assert zero.run_directory == parent / "experiment_S0_N20"
+    assert reference.run_directory == parent / "reference_S20_N20"
+    assert zero.run_directory.parent == reference.run_directory.parent
     assert zero.run_directory != reference.run_directory
+    generic = generation_paths(
+        tmp_path,
+        model_name="sdv1",
+        scheduler_name="ddpm",
+        guidance_scale=7.5,
+        num_inference_steps=50,
+        num_seeds=20,
+        seed_start=20,
+    )
+    assert generic.run_directory == (
+        tmp_path.resolve()
+        / "logs/sdv1_ddpm_g7.5_T50_N20/seed_S20_N20"
+    )
     with pytest.raises(ValueError, match="seed block must end"):
         generation_run_name(*common[:-1], 2, seed_start=MAX_SEED)
 
@@ -530,6 +545,10 @@ def test_generation_reports_record_failure_immediately(
         ("generate.sh", "scripts/generate.py"),
         ("sscd.sh", "scripts/sscd.py"),
         ("compute_proximity.sh", "scripts/compute_proximity.py"),
+        (
+            "theorem1_loss_recovery.sh",
+            "scripts/theorem1_loss_recovery.py",
+        ),
     ],
 )
 def test_shell_wrappers_resolve_the_project_root_from_any_directory(
@@ -606,7 +625,11 @@ if [[ "$wrapper_name" == "download_webster.sh" ]]; then
 fi
 """
     wrappers = (
-        "download_webster.sh", "generate.sh", "sscd.sh", "compute_proximity.sh",
+        "download_webster.sh",
+        "generate.sh",
+        "sscd.sh",
+        "compute_proximity.sh",
+        "theorem1_loss_recovery.sh",
     )
     for wrapper in wrappers:
         path = project / wrapper
@@ -712,6 +735,53 @@ fi
     assert stage_offsets == sorted(stage_offsets)
     assert "Webster data preparation skipped" in skipped.stdout
     assert "download progress marker" not in skipped.stderr
+    assert "Theorem 1 loss–recovery skipped" in skipped.stdout
+
+    log.unlink()
+    canonical = subprocess.run(
+        ["bash", str(run_all), "--model", "realvis"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    canonical_lines = log.read_text(encoding="utf-8").splitlines()
+    assert canonical.returncode == 0, canonical.stderr
+    assert [line.split("\t", 1)[0] for line in canonical_lines] == [
+        "generate.sh",
+        "sscd.sh",
+        "compute_proximity.sh",
+        "generate.sh",
+        "sscd.sh",
+        "compute_proximity.sh",
+        "theorem1_loss_recovery.sh",
+    ]
+    assert canonical_lines[-1] == (
+        "theorem1_loss_recovery.sh\t--model\trealvis"
+    )
+    stage_offsets = [
+        canonical.stdout.index(f"[{stage}/7]")
+        for stage in range(1, 8)
+    ]
+    assert stage_offsets == sorted(stage_offsets)
+
+    log.unlink()
+    plot_only = subprocess.run(
+        ["bash", str(run_all), "--plot", "--model", "sdv2"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert plot_only.returncode == 0, plot_only.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "theorem1_loss_recovery.sh\t--model\tsdv2\t--plot"
+    ]
+    assert "[1/1]" in plot_only.stdout
 
     log.unlink()
     environment["DOWNLOAD_EXIT_CODE"] = "0"
@@ -789,6 +859,7 @@ def test_source_tree_has_no_legacy_modules_imports_or_dynamic_aliases() -> None:
     }
     assert script_files == {
         "compute_proximity.py", "download_webster.py", "generate.py", "sscd.py",
+        "theorem1_loss_recovery.py",
     }
     assert not (ROOT / "utils/runtime_provenance.py").exists()
 

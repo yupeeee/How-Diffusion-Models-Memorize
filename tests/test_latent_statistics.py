@@ -34,7 +34,9 @@ def _create_generation_run(
     *,
     latent_shape: tuple[int, int, int] = LATENT_SHAPE,
 ) -> tuple[GenerationPaths, str]:
-    paths = GenerationPaths(root / "logs" / "synthetic")
+    paths = GenerationPaths(
+        root / "logs" / "synthetic_N2" / "experiment_S0_N2"
+    )
     paths.create()
     science = {
         "latent_shape": list(latent_shape),
@@ -135,6 +137,9 @@ def test_exact_population_formulas_and_coordinate_artifacts(tmp_path: Path) -> N
 
     report = result.report
     assert report["schema_version"] == 1
+    assert report["run_directory"] == (
+        "logs/synthetic_N2/experiment_S0_N2"
+    )
     assert report["latent_shape"] == [4, 2, 2]
     assert report["dimensions_per_latent"] == 16
     assert report["accumulation_dtype"] == "float64"
@@ -188,6 +193,7 @@ def test_exact_population_formulas_and_coordinate_artifacts(tmp_path: Path) -> N
     for name, path in (("mean", mean_path), ("population_std", population_std_path)):
         metadata = artifacts[name]
         assert isinstance(metadata, Mapping)
+        assert metadata["path"] == path.relative_to(tmp_path).as_posix()
         assert Path(str(metadata["path"])).name == path.name
         assert metadata["sha256"] == file_sha256(path)
         assert metadata["shape"] == [4, 2, 2]

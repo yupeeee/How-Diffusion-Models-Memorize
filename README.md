@@ -28,15 +28,26 @@ Run all modeling and analysis stages from any directory with one command:
   --downscale 4
 ```
 
-By default, the orchestrator uses the existing Webster dataset and makes six
-stage invocations in order: reference generation for seeds 20–39; reference
-SSCD; cache-only reference proximity, which freezes the target-pair selection;
-experiment generation for seeds 0 through `N-1`; experiment SSCD; and
-cache-only experiment proximity. Pass `--download` to run or resume Webster
-preparation first, making it a seven-stage pipeline. A downloader exit status
+By default, the canonical orchestrator uses the existing Webster dataset and
+makes seven stage invocations in order: reference generation for seeds 20–39;
+reference SSCD; cache-only reference proximity, which freezes the target-pair
+selection; experiment generation for seeds 0 through `N-1`; experiment SSCD;
+cache-only experiment proximity; and the Theorem 1 loss–recovery experiment.
+Pass `--download` to run or resume Webster preparation first, making it an
+eight-stage pipeline. The Theorem 1 stage requires the canonical
+DDIM/g7.5/T50/N20 experiment and is explicitly skipped for other sampling
+settings. A downloader exit status
 of `2` means some records remain retryable; in that case the orchestrator
 continues with all currently available prompt–image pairs. Other data errors
 and failures in later stages stop it.
+
+Pass `--plot` to `run_all.sh` to skip every computational stage and regenerate
+only the Theorem 1 PDF from its saved CSV. The experiment wrapper exposes the
+same mode directly (with `--plot-only` retained as a compatibility alias):
+
+```bash
+./theorem1_loss_recovery.sh --model sdv1 --plot
+```
 
 `N` must be positive and at most 20, so experimental randomness never overlaps
 the fixed reference pool. All invoked stage wrappers use unbuffered Python
@@ -237,7 +248,7 @@ dedicated `tqdm` bar. It does not read the large trajectories or noise
 predictions and does not rerun the VAE. The report is written to:
 
 ```text
-logs/<run_name>/target_latent_statistics/
+logs/<base-run>/<role>_S<seed-start>_N<N>/target_latent_statistics/
 ├── report.json
 ├── mean.pt
 └── population_std.pt
@@ -258,11 +269,16 @@ is model-agnostic and loads no VAE, so the first scientifically valid time to
 report model-specific image latents is immediately after generation creates
 or resumes those cached target tensors.
 
-Experiment runs starting at seed 0 retain the existing path
-`logs/<model>_<scheduler>_g<g>_T<T>_N<N>/`; valid seed-0 caches are reused
-unchanged. A nonzero seed block adds `_S<seed-start>` before `_N<N>`, so the
-exact selection reference is
-`logs/<model>_ddim_g7.5_T50_S20_N20/`.
+Every seed role lives beneath one shared base-run directory. Experiment caches
+use `experiment_S0_N<N>`, the fixed selection reference uses
+`reference_S20_N20`, and any other nonzero seed block uses
+`seed_S<seed-start>_N<N>`. The canonical pair is therefore:
+
+```text
+logs/<model>_ddim_g7.5_T50_N20/
+├── experiment_S0_N20/
+└── reference_S20_N20/
+```
 
 A record is resumed only when its marker, configuration identity, file hashes,
 shapes, and dtypes validate. Existing valid scientific tensors are never
@@ -324,8 +340,10 @@ seed with its cached SSCD score, freezes or validates the reference selection,
 and writes:
 
 ```text
-outputs/<run_name>/proximity/
-└── <role>_S<seed-start>_N<N>/
+outputs/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/proximity/
+├── experiment_S0_N<N>/
+│   └── ...
+└── reference_S20_N20/
     ├── records/<original_index>.pt
     ├── paired_all.{csv,parquet}
     ├── paired_selected.{csv,parquet}
@@ -349,7 +367,9 @@ outputs/<run_name>/proximity/
 ```
 
 The fixed reference namespace is `reference_S20_N20`; experiment namespaces
-are `experiment_S0_N<N>`.
+are `experiment_S0_N<N>`. Both live under the experiment run's single
+`proximity/` directory. Their generation caches follow the same grouping under
+`logs/<model>_ddim_g7.5_T50_N20/`.
 
 `paired_all` contains every completed prompt and seed. For an experiment,
 `paired_selected` contains every experiment seed for every included prompt and
@@ -376,5 +396,6 @@ network requests and loads no real diffusion or SSCD model:
 ```bash
 python -m compileall scripts utils
 pytest -q
-bash -n run_all.sh download_webster.sh generate.sh sscd.sh compute_proximity.sh
+bash -n run_all.sh download_webster.sh generate.sh sscd.sh \
+  compute_proximity.sh theorem1_loss_recovery.sh
 ```

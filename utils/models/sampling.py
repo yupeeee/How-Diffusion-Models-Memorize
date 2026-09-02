@@ -146,6 +146,117 @@ def make_initial_noise(
     return noise
 
 
+def encode_prompt_condition(
+    prompt: str,
+    tokenizer: Any,
+    text_encoder: Any,
+    device: str | torch.device,
+    inference_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Encode exactly one prompt without constructing a null condition."""
+
+    if not isinstance(prompt, str):
+        raise SamplingError("prompt must be the exact raw string")
+    with torch.inference_mode():
+        return _encode_text_conditions(
+            [prompt],
+            tokenizer,
+            text_encoder,
+            device,
+            inference_dtype,
+        )
+
+
+def predict_conditional_epsilon(
+    samples: torch.Tensor,
+    timestep: int | torch.Tensor,
+    condition: torch.Tensor,
+    unet: Any,
+    scheduler: Any,
+    *,
+    conversion_sample: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Predict conditional epsilon once without CFG or a scheduler update.
+
+    The scheduler-scaled sample is used only as the UNet input. Native model
+    output is converted to epsilon against the original unscaled state.
+    The optional conversion sample can preserve a higher-precision
+    representation of that same conceptual state than the UNet input.
+    """
+
+    if not isinstance(samples, torch.Tensor) or samples.ndim != 4:
+        raise SamplingError("conditional samples must have shape [N, C, H, W]")
+    if samples.shape[0] < 1 or any(size <= 0 for size in samples.shape[1:]):
+        raise SamplingError("conditional sample dimensions must be positive")
+    if not samples.is_floating_point():
+        raise SamplingError("conditional samples must be floating point")
+    latent_shape = tuple(samples.shape[1:])
+    _validate_current_latents(
+        samples,
+        batch_size=samples.shape[0],
+        latent_shape=latent_shape,
+        expected_device=samples.device,
+        expected_dtype=samples.dtype,
+        name="conditional samples",
+    )
+    conceptual_sample = samples if conversion_sample is None else conversion_sample
+    if not isinstance(conceptual_sample, torch.Tensor) or conceptual_sample.ndim != 4:
+        raise SamplingError("conversion sample must have shape [N, C, H, W]")
+    if conceptual_sample.shape != samples.shape:
+        raise SamplingError("conversion sample shape must match conditional samples")
+    if conceptual_sample.device != samples.device:
+        raise SamplingError("conversion sample device must match conditional samples")
+    if not conceptual_sample.is_floating_point():
+        raise SamplingError("conversion sample must be floating point")
+    _require_finite(conceptual_sample, "conversion sample")
+
+    execution_device, execution_dtype = _unet_execution_device_and_dtype(
+        unet,
+        intended_device=samples.device,
+        inference_dtype=samples.dtype,
+    )
+    condition_batch = _condition_batch(
+        condition,
+        batch_size=samples.shape[0],
+        expected_device=execution_device,
+        expected_dtype=execution_dtype,
+    )
+    scale_model_input = getattr(scheduler, "scale_model_input", None)
+    if not callable(scale_model_input):
+        raise SamplingError("scheduler has no callable scale_model_input interface")
+
+    with torch.inference_mode():
+        scaled_input = scale_model_input(samples, timestep)
+        if not isinstance(scaled_input, torch.Tensor):
+            raise SamplingError("scheduler.scale_model_input must return a tensor")
+        _validate_current_latents(
+            scaled_input,
+            batch_size=samples.shape[0],
+            latent_shape=latent_shape,
+            expected_device=execution_device,
+            expected_dtype=execution_dtype,
+            name="scheduler-scaled conditional model input",
+        )
+        model_output = unet(
+            scaled_input,
+            timestep,
+            encoder_hidden_states=condition_batch,
+        )
+        native_prediction = _output_tensor(model_output, "sample", "UNet")
+        _validate_native_prediction(
+            native_prediction,
+            expected_shape=tuple(samples.shape),
+            expected_device=execution_device,
+            expected_dtype=execution_dtype,
+        )
+        return native_prediction_to_epsilon(
+            native_prediction.to(dtype=conceptual_sample.dtype),
+            conceptual_sample,
+            timestep,
+            scheduler,
+        )
+
+
 def sample_trajectory(
     *,
     prompt: str,
@@ -477,29 +588,60 @@ def _encode_cfg_conditions(
     device: torch.device,
     inference_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    embeddings = _encode_text_conditions(
+        ["", prompt],
+        tokenizer,
+        text_encoder,
+        device,
+        inference_dtype,
+    )
+    return embeddings[0:1], embeddings[1:2]
+
+
+def _encode_text_conditions(
+    prompts: Sequence[str],
+    tokenizer: Any,
+    text_encoder: Any,
+    device: str | torch.device,
+    inference_dtype: torch.dtype,
+) -> torch.Tensor:
+    prompt_values = list(prompts)
+    if not prompt_values or any(not isinstance(value, str) for value in prompt_values):
+        raise SamplingError("text conditions must be a non-empty string sequence")
+    if (
+        not isinstance(inference_dtype, torch.dtype)
+        or not torch.empty((), dtype=inference_dtype).is_floating_point()
+    ):
+        raise SamplingError("inference_dtype must be a floating-point torch dtype")
+    try:
+        selected_device = torch.device(device)
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise SamplingError("text condition device is invalid") from error
     maximum_length = getattr(tokenizer, "model_max_length", None)
     try:
         maximum_length = operator.index(maximum_length)
     except TypeError as error:
         raise SamplingError("tokenizer.model_max_length must be an integer") from error
     encoded = tokenizer(
-        ["", prompt],
+        prompt_values,
         padding="max_length",
         max_length=maximum_length,
         truncation=True,
         return_tensors="pt",
     )
-    input_ids = _token_tensor(encoded, "input_ids").to(device)
+    input_ids = _token_tensor(encoded, "input_ids").to(selected_device)
     encoder_arguments: dict[str, torch.Tensor] = {}
     encoder_config = getattr(text_encoder, "config", None)
     if bool(_config_value(encoder_config, "use_attention_mask")):
         encoder_arguments["attention_mask"] = _token_tensor(
             encoded, "attention_mask"
-        ).to(device)
+        ).to(selected_device)
     encoder_output = text_encoder(input_ids, **encoder_arguments)
     embeddings = _output_tensor(encoder_output, "last_hidden_state", "text encoder")
-    if embeddings.ndim != 3 or embeddings.shape[0] != 2:
-        raise SamplingError("Text embeddings must have shape [2, tokens, features]")
+    if embeddings.ndim != 3 or embeddings.shape[0] != len(prompt_values):
+        raise SamplingError(
+            f"Text embeddings must have shape [{len(prompt_values)}, tokens, features]"
+        )
     if embeddings.device != input_ids.device:
         raise SamplingError(
             "Text embeddings are on a different device from text encoder inputs"
@@ -508,7 +650,32 @@ def _encode_cfg_conditions(
         raise SamplingError("Text embeddings must be floating point")
     embeddings = embeddings.to(dtype=inference_dtype)
     _require_finite(embeddings, "text embeddings")
-    return embeddings[0:1], embeddings[1:2]
+    return embeddings
+
+
+def _condition_batch(
+    condition: torch.Tensor,
+    *,
+    batch_size: int,
+    expected_device: torch.device,
+    expected_dtype: torch.dtype,
+) -> torch.Tensor:
+    if not isinstance(condition, torch.Tensor) or condition.ndim != 3:
+        raise SamplingError("condition must have shape [1 or N, tokens, features]")
+    if condition.shape[0] not in (1, batch_size):
+        raise SamplingError("condition batch must contain either one or N embeddings")
+    if any(size <= 0 for size in condition.shape):
+        raise SamplingError("condition dimensions must be positive")
+    if condition.device != expected_device:
+        raise SamplingError(
+            f"condition is on {condition.device}; expected {expected_device}"
+        )
+    if not condition.is_floating_point() or condition.dtype != expected_dtype:
+        raise SamplingError("condition must use the UNet inference dtype")
+    _require_finite(condition, "condition")
+    if condition.shape[0] == batch_size:
+        return condition
+    return condition.expand(batch_size, *condition.shape[1:])
 
 
 def _noise_and_generators(

@@ -13,14 +13,13 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from utils.common.cli import stable_float
+from utils.common.cli import generation_run_name, stable_float
 from utils.common.io import (
     CacheIOError,
     atomic_copy,
     atomic_torch_save,
     atomic_write_frame_csv,
     atomic_write_json,
-    canonical_hash,
     canonical_json,
     file_sha256,
     read_json,
@@ -68,15 +67,28 @@ class ProximityPaths:
     def build(
         cls,
         root: Path,
-        run_name: str,
+        generation_run: str | Path,
         *,
+        output_run_name: str | None = None,
         role: str = "experiment",
         seed_start: int = 0,
         num_seeds: int = 20,
     ) -> "ProximityPaths":
         namespace = f"{role}_S{seed_start}_N{num_seeds}"
-        output = root / "outputs" / run_name / "proximity" / namespace
-        return cls(root, root / "logs" / run_name, output)
+        generation = Path(generation_run)
+        if not generation.is_absolute():
+            generation = root / "logs" / generation
+        if output_run_name is None:
+            try:
+                output_parent = generation.relative_to(root / "logs").parts[0]
+            except (ValueError, IndexError) as error:
+                raise ValueError(
+                    "output_run_name is required for a generation run outside logs"
+                ) from error
+        else:
+            output_parent = output_run_name
+        output = root / "outputs" / output_parent / "proximity" / namespace
+        return cls(root, generation, output)
 
     @property
     def records_directory(self) -> Path:
@@ -212,10 +224,26 @@ def run_proximity(
         num_seeds=num_seeds,
         seed_start=seed_start,
     )
-    run_name = cache_paths.run_directory.name
+    run_name = generation_run_name(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start,
+    )
+    output_run_name = generation_run_name(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start=0,
+    )
     paths = ProximityPaths.build(
         root,
-        run_name,
+        cache_paths.run_directory,
+        output_run_name=output_run_name,
         role=role,
         seed_start=seed_start,
         num_seeds=num_seeds,
@@ -330,7 +358,11 @@ def run_proximity(
         paths, run_name, generation_config, sscd_config, selection
     )
     # Validate the scientific identity before copying or publishing any tables.
-    _write_or_validate_configuration(paths.run_config_json, run_config)
+    _write_or_validate_configuration(
+        paths.run_config_json,
+        run_config,
+        refresh_source_provenance=True,
+    )
     _write_selection_outputs(paths.output_directory, selection)
     statistics = write_analysis_outputs(
         paths.output_directory,
@@ -378,14 +410,14 @@ def _validate_generation_invocation(config: Mapping[str, object], **expected: ob
 
 
 def _load_sscd_config(run: Path, generation: Mapping[str, object]) -> dict[str, Any]:
+    from utils.experiments.sscd import sscd_configuration_hash
+
     path = run / "sscd_config.json"
     if not path.is_file() or path.is_symlink():
         raise ProximityError(f"required cached SSCD configuration is absent: {path}")
     config = read_json(path)
     stored_hash = config.get("configuration_hash")
-    unhashed = dict(config)
-    unhashed.pop("configuration_hash", None)
-    if not _sha256(stored_hash) or canonical_hash(unhashed) != stored_hash:
+    if not _sha256(stored_hash) or sscd_configuration_hash(config) != stored_hash:
         raise ProximityError("SSCD configuration hash is invalid")
     science = generation["scientific_config"]
     assert isinstance(science, Mapping)
@@ -714,14 +746,37 @@ def _analysis_configuration(
     }
 
 
-def _write_or_validate_configuration(path: Path, desired: Mapping[str, object]) -> None:
+def _write_or_validate_configuration(
+    path: Path,
+    desired: Mapping[str, object],
+    *,
+    refresh_source_provenance: bool = False,
+) -> None:
     if path.exists() or path.is_symlink():
         if path.is_symlink() or not path.is_file():
             raise ProximityError(f"unsafe existing analysis configuration: {path}")
-        if canonical_json(read_json(path)) != canonical_json(desired):
-            raise ProximityError(f"existing analysis configuration is incompatible: {path}")
-        return
+        existing = read_json(path)
+        if canonical_json(existing) == canonical_json(desired):
+            return
+        if _same_analysis_contract(existing, desired):
+            if refresh_source_provenance:
+                atomic_write_json(path, desired)
+            return
+        raise ProximityError(f"existing analysis configuration is incompatible: {path}")
     atomic_write_json(path, desired)
+
+
+def _same_analysis_contract(
+    existing: Mapping[str, object],
+    desired: Mapping[str, object],
+) -> bool:
+    """Compare schema-versioned science while treating source hashes as audit data."""
+
+    existing_values = dict(existing)
+    desired_values = dict(desired)
+    existing_values.pop("source_provenance", None)
+    desired_values.pop("source_provenance", None)
+    return canonical_json(existing_values) == canonical_json(desired_values)
 
 
 def _complete_summary(

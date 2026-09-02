@@ -18,6 +18,8 @@ from utils.data.webster import (
     EXPECTED_ROWS_PER_MODEL,
     OriginalIndexError,
     WebsterDataset,
+    WebsterImageError,
+    WebsterManifestError,
     WebsterPaths,
     _resolve_huggingface_cache_file,
     canonicalize_original_index,
@@ -181,3 +183,20 @@ def test_dataset_exposes_every_local_pair_including_tv_and_empty_prompt(
     assert item["target_image_sha256"] == digest
     assert item["image"].mode == "RGB"
     assert complete_view[-1]["image"] is None
+
+
+def test_deferred_image_validation_reports_bad_target_when_item_is_loaded(
+    tmp_path: Path,
+) -> None:
+    paths, _ = _write_synthetic_model_view(tmp_path)
+    paths.model_images("sdv1").joinpath("1000.png").write_bytes(
+        _png_bytes((220, 10, 30))
+    )
+
+    with pytest.raises(WebsterManifestError, match="target image SHA-256 differs"):
+        WebsterDataset(tmp_path, "sdv1")
+
+    deferred = WebsterDataset(tmp_path, "sdv1", defer_image_validation=True)
+    assert len(list(deferred.iter_metadata())) == 1
+    with pytest.raises(WebsterImageError, match="target image SHA-256 differs"):
+        deferred[0]

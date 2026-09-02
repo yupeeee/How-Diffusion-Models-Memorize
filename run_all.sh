@@ -13,16 +13,18 @@ DIRECT_WORKERS="${WEBSTER_DIRECT_WORKERS:-24}"
 DIRECT_ATTEMPTS="${WEBSTER_DIRECT_ATTEMPTS:-2}"
 PER_HOST_CONCURRENCY="${WEBSTER_PER_HOST_CONCURRENCY:-4}"
 DOWNLOAD_WEBSTER=0
+PLOT_ONLY=0
 
 usage() {
     cat <<'EOF'
 Usage: ./run_all.sh [OPTIONS]
 
-Build the fixed selection reference and run one experiment. Webster data
-preparation is opt-in.
+Build the fixed selection reference, proximity analysis, and compatible
+Theorem 1 experiment. Webster data preparation is opt-in.
 
 Options:
   --download            Run/resume Webster data preparation first
+  --plot                Plot Theorem 1 from its saved CSV; run no computation
   --model MODEL         sdv1, sdv2, or realvis (default: sdv1)
   --scheduler NAME      ddim or ddpm (default: ddim)
   --g FLOAT             Classifier-free guidance scale (default: 7.5)
@@ -37,7 +39,8 @@ Options:
 The selection reference is always ddim/g7.5/T50 with seeds 20..39. The
 experiment always starts at seed 0, so its cache stays disjoint from the
 reference cache. Download tuning options have effect only when --download is
-present. The PYTHON environment variable is honored by each wrapper.
+present. The Theorem 1 stage runs only for the canonical ddim/g7.5/T50/N20
+experiment. The PYTHON environment variable is honored by each wrapper.
 EOF
 }
 
@@ -83,6 +86,10 @@ while (($# > 0)); do
     case "$1" in
         --download)
             DOWNLOAD_WEBSTER=1
+            shift
+            ;;
+        --plot)
+            PLOT_ONLY=1
             shift
             ;;
         --model)
@@ -186,6 +193,15 @@ case "$MODEL" in
         ;;
 esac
 
+if ((PLOT_ONLY)); then
+    if ((DOWNLOAD_WEBSTER)); then
+        invalid_value "--plot" "cannot be combined with --download"
+    fi
+    cd "$PROJECT_ROOT"
+    printf '[1/1] Plotting Theorem 1 loss–recovery from saved results\n'
+    exec "$PROJECT_ROOT/theorem1_loss_recovery.sh" --model "$MODEL" --plot
+fi
+
 case "$SCHEDULER" in
     ddim|ddpm) ;;
     *)
@@ -213,6 +229,15 @@ if ((DOWNLOAD_WEBSTER)); then
     fi
 fi
 
+RUN_THEOREM1=0
+if [[ "$SCHEDULER" == "ddim" \
+    && "$NUM_INFERENCE_STEPS" == "50" \
+    && "$NUM_SEEDS" == "20" ]] \
+    && awk -v value="$GUIDANCE_SCALE" \
+        'BEGIN { exit !((value + 0.0) == 7.5) }'; then
+    RUN_THEOREM1=1
+fi
+
 REFERENCE_ARGUMENTS=(
     --model "$MODEL"
     --scheduler ddim
@@ -234,9 +259,9 @@ EXPERIMENT_ARGUMENTS=(
 cd "$PROJECT_ROOT"
 
 STAGE_INDEX=1
-STAGE_TOTAL=6
+STAGE_TOTAL=$((6 + RUN_THEOREM1))
 if ((DOWNLOAD_WEBSTER)); then
-    STAGE_TOTAL=7
+    STAGE_TOTAL=$((STAGE_TOTAL + 1))
     printf '[%s/%s] Preparing Webster data\n' "$STAGE_INDEX" "$STAGE_TOTAL"
     if "$PROJECT_ROOT/download_webster.sh" \
         --direct-workers "$DIRECT_WORKERS" \
@@ -286,5 +311,15 @@ STAGE_INDEX=$((STAGE_INDEX + 1))
 printf '[%s/%s] Computing cache-only experiment proximity\n' \
     "$STAGE_INDEX" "$STAGE_TOTAL"
 "$PROJECT_ROOT/compute_proximity.sh" "${EXPERIMENT_ARGUMENTS[@]}"
+STAGE_INDEX=$((STAGE_INDEX + 1))
+
+if ((RUN_THEOREM1)); then
+    printf '[%s/%s] Running Theorem 1 loss–recovery experiment\n' \
+        "$STAGE_INDEX" "$STAGE_TOTAL"
+    "$PROJECT_ROOT/theorem1_loss_recovery.sh" --model "$MODEL"
+else
+    printf '%s\n' \
+        'Theorem 1 loss–recovery skipped; it requires ddim/g7.5/T50/N20.'
+fi
 
 printf 'Pipeline complete.\n'

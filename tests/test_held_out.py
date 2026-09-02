@@ -72,8 +72,10 @@ def _project(
     analysis_indices: tuple[str, ...] | None = None,
 ) -> SimpleNamespace:
     root = tmp_path.resolve()
-    run_name = f"sdv1_test_S{seeds[0]}_N{len(seeds)}"
-    paths = GenerationPaths(root / "logs" / run_name)
+    run_name = f"sdv1_test_N{len(seeds)}"
+    role = "experiment" if seeds[0] == 0 else "reference"
+    namespace = f"{role}_S{seeds[0]}_N{len(seeds)}"
+    paths = GenerationPaths(root / "logs" / run_name / namespace)
     paths.create()
     science = {
         "model_cli_name": "sdv1",
@@ -150,7 +152,7 @@ def _project(
         / "outputs"
         / run_name
         / "proximity"
-        / f"reference_S{seeds[0]}_N{len(seeds)}"
+        / namespace
     )
     output.mkdir(parents=True)
     atomic_write_json(
@@ -222,6 +224,15 @@ def test_export_is_prompt_level_and_keeps_exact_prompt_traceability(
     assert json.loads(manifest.at[0, "seeds"]) == list(range(20, 40))
     assert manifest.at[0, "prompt_raw"] == project.rows[0]["prompt_raw"]
     assert manifest.at[0, "selection_status"] == "excluded_tv_target_unsupported"
+    assert manifest.at[0, "source_preview_path"] == (
+        source.relative_to(project.root).as_posix()
+    )
+    config = json.loads(
+        (result.directory / "config.json").read_text(encoding="utf-8")
+    )
+    assert config["generation_run_path"] == (
+        project.paths.run_directory.relative_to(project.root).as_posix()
+    )
     gallery = result.gallery_path.read_text(encoding="utf-8")
     assert "held-out &lt;TV&gt; prompt" in gallery
     assert "validation seed half" in gallery

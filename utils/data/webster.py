@@ -890,10 +890,14 @@ class WebsterDataset(torch.utils.data.Dataset):
         recovered_only: bool = True,
         categories: str | None | Iterable[str | None] = None,
         statuses: str | RecoveryStatus | Iterable[str | RecoveryStatus] | None = None,
+        defer_image_validation: bool = False,
     ) -> None:
+        if not isinstance(defer_image_validation, bool):
+            raise TypeError("defer_image_validation must be a bool")
         self.paths = WebsterPaths.from_root(root)
         self.model = coerce_model(model)
         self.transform = transform
+        self.defer_image_validation = defer_image_validation
         metadata_path = self.paths.model_metadata_parquet(self.model)
         try:
             manifest = pd.read_parquet(metadata_path)
@@ -953,11 +957,14 @@ class WebsterDataset(torch.utils.data.Dataset):
                 if row.get("image_filename") != expected_filename:
                     raise WebsterManifestError(f"{record_id} image filename must be {expected_filename}")
                 image_path = self._resolve_image_path(record_id, expected_filename, row.get("image_path"))
-                observed_hash = file_sha256(image_path)
                 claimed = row.get("target_image_sha256")
-                if not _is_missing(claimed) and str(claimed) != observed_hash:
-                    raise WebsterManifestError(f"{record_id} target image SHA-256 differs")
-                target_hashes.append(observed_hash)
+                if self.defer_image_validation:
+                    target_hashes.append(None if _is_missing(claimed) else str(claimed))
+                else:
+                    observed_hash = file_sha256(image_path)
+                    if not _is_missing(claimed) and str(claimed) != observed_hash:
+                        raise WebsterManifestError(f"{record_id} target image SHA-256 differs")
+                    target_hashes.append(observed_hash)
             else:
                 if not _is_missing(row.get("image_filename")) or not _is_missing(row.get("image_path")):
                     raise WebsterManifestError(f"{record_id} unavailable row names an image")
@@ -991,6 +998,20 @@ class WebsterDataset(torch.utils.data.Dataset):
                 record_id, str(metadata["image_filename"]), metadata.get("image_path")
             )
             image = self._load_image(record_id, path)
+            if self.defer_image_validation:
+                observed_hash = file_sha256(path)
+                claimed_hash = metadata.get("target_image_sha256")
+                if (
+                    not _is_missing(claimed_hash)
+                    and str(claimed_hash) != observed_hash
+                ):
+                    raise WebsterImageError(
+                        record_id,
+                        path,
+                        "hash_mismatch",
+                        "target image SHA-256 differs",
+                    )
+                metadata["target_image_sha256"] = observed_hash
             if self.transform is not None:
                 image = self.transform(image)
         auxiliary = _decode_auxiliary_paths(metadata.get("auxiliary_asset_paths"))

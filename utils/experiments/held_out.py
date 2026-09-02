@@ -189,7 +189,7 @@ def export_held_out_tv_results(
         manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
         gallery = _gallery_html(
             model_name=model_name,
-            generation_run=run.name,
+            generation_run=_relative(run, root),
             seeds=seeds,
             rows=rows,
         )

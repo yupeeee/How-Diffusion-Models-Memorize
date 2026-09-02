@@ -95,7 +95,19 @@ def scheduler_config_dict(scheduler: Any) -> dict[str, object]:
             raise SchedulerConstructionError(
                 "Scheduler config cannot be serialized"
             ) from error
-    return {str(key): _json_value(value) for key, value in raw.items()}
+    result = {str(key): _json_value(value) for key, value in raw.items()}
+    defaulted_keys = result.get("_use_default_values")
+    if defaulted_keys is not None:
+        if not isinstance(defaulted_keys, list) or any(
+            not isinstance(key, str) for key in defaulted_keys
+        ):
+            raise SchedulerConstructionError(
+                "Scheduler config _use_default_values must be a string sequence"
+            )
+        # Diffusers constructs this private bookkeeping field from a set. Its
+        # iteration order is not scientific and can vary between processes.
+        result["_use_default_values"] = sorted(defaulted_keys)
+    return result
 
 
 def scheduler_step_kwargs(

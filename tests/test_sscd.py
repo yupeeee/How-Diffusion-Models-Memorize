@@ -34,6 +34,7 @@ from utils.experiments.sscd import (
     SSCDPaths,
     SSCDEvaluationError,
     _load_cached_scores,
+    sscd_configuration_hash,
 )
 from utils.metrics import sscd as sscd_metrics_module
 from utils.metrics.sscd import (
@@ -149,6 +150,42 @@ def test_sscd_rejects_an_out_of_range_seed_block_before_cache_lookup(
         )
 
     assert not (tmp_path / "logs").exists()
+
+
+@pytest.mark.parametrize(
+    ("legacy_run", "nested_run"),
+    [
+        (
+            "logs/sdv1_ddim_g7.5_T50_N20",
+            "logs/sdv1_ddim_g7.5_T50_N20/experiment_S0_N20",
+        ),
+        (
+            "logs/sdv1_ddim_g7.5_T50_S20_N20",
+            "logs/sdv1_ddim_g7.5_T50_N20/reference_S20_N20",
+        ),
+    ],
+)
+def test_sscd_configuration_hash_is_stable_across_cache_relocation(
+    legacy_run: str,
+    nested_run: str,
+) -> None:
+    legacy = {
+        "schema_version": SSCD_SCHEMA_VERSION,
+        "generation_run_path": legacy_run,
+        "generation_run_config_path": f"{legacy_run}/run_config.json",
+        "num_seeds": 20,
+    }
+    nested = {
+        **legacy,
+        "generation_run_path": nested_run,
+        "generation_run_config_path": f"{nested_run}/run_config.json",
+    }
+
+    assert sscd_configuration_hash(legacy) == canonical_hash(legacy)
+    assert sscd_configuration_hash(nested) == canonical_hash(legacy)
+
+    unrelated = {**nested, "num_seeds": 19}
+    assert sscd_configuration_hash(unrelated) != canonical_hash(legacy)
 
 
 def test_cached_scores_are_reused_only_with_matching_provenance(tmp_path: Path) -> None:
@@ -334,7 +371,7 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
         "sscd_preprocessing": sscd_preprocessing_policy(),
         "sscd_preprocessing_hash": sscd_preprocessing_hash(),
     }
-    configuration["configuration_hash"] = canonical_hash(configuration)
+    configuration["configuration_hash"] = sscd_configuration_hash(configuration)
     atomic_write_json(paths.config_json, configuration)
     for position, (index, record_id, source_row, *_rest) in enumerate(rows):
         offset = 0.1 * position

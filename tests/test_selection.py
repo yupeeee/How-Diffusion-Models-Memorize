@@ -41,6 +41,7 @@ from utils.data.selection import (
     is_reference_configuration,
     load_target_pair_selection,
     reference_run_name,
+    reference_run_path,
     reference_selection_command,
     target_pair_selection_directory,
 )
@@ -73,6 +74,24 @@ def _reference_configs(
     }
     sscd["configuration_hash"] = canonical_hash(sscd)
     return generation, sscd
+
+
+def _set_scheduler_default_order(
+    generation: dict[str, object],
+    sscd: dict[str, object],
+    defaulted_keys: tuple[str, ...],
+) -> None:
+    science = generation["scientific_config"]
+    assert isinstance(science, dict)
+    science["scheduler"] = {
+        "name": "ddim",
+        "config": {"_use_default_values": list(defaulted_keys)},
+    }
+    generation_hash = canonical_hash(science)
+    generation["scientific_config_hash"] = generation_hash
+    sscd["generation_scientific_config_hash"] = generation_hash
+    sscd.pop("configuration_hash", None)
+    sscd["configuration_hash"] = canonical_hash(sscd)
 
 
 def _records(
@@ -163,6 +182,9 @@ def test_fixed_constants_and_reference_identity_are_exact() -> None:
     assert SELECTION_POLICY == "target_pair_selection"
     assert SELECTION_SCHEMA_VERSION == 2
     assert reference_run_name("sdv1") == "sdv1_ddim_g7.5_T50_S20_N20"
+    assert reference_run_path("sdv1").as_posix() == (
+        "logs/sdv1_ddim_g7.5_T50_N20/reference_S20_N20"
+    )
     assert is_reference_configuration(
         model_name="sdv1",
         scheduler_name="ddim",
@@ -281,7 +303,9 @@ def test_missing_selection_names_reference_run_and_exact_command(tmp_path: Path)
     with pytest.raises(TargetPairSelectionMissingError) as captured:
         load_target_pair_selection(tmp_path, model_name="sdv2")
     message = str(captured.value)
-    assert "logs/sdv2_ddim_g7.5_T50_S20_N20" in message
+    assert (
+        "logs/sdv2_ddim_g7.5_T50_N20/reference_S20_N20" in message
+    )
     assert expected_command in message
 
 
@@ -325,6 +349,8 @@ def test_frozen_selection_reuses_identical_evidence_and_rejects_changes(
     tmp_path: Path,
 ) -> None:
     first = _build(tmp_path)
+    rebuilt = _build(tmp_path)
+    assert rebuilt.sha256 == first.sha256
     loaded = ensure_reference_target_pair_selection(tmp_path, model_name="sdv1")
     assert loaded.sha256 == first.sha256
 
@@ -332,6 +358,95 @@ def test_frozen_selection_reuses_identical_evidence_and_rejects_changes(
     changed = _paired(records, selection_means=(0.01, 0.30, 0.25, 0.30))
     with pytest.raises(FrozenTargetPairSelectionError):
         _build(tmp_path, records=records, paired=changed)
+
+
+def test_frozen_selection_reuses_exact_evidence_across_aggregate_hash_drift(
+    tmp_path: Path,
+) -> None:
+    records = _records()
+    paired = _paired(records)
+    first_generation, first_sscd = _reference_configs()
+    _set_scheduler_default_order(
+        first_generation,
+        first_sscd,
+        ("prediction_type", "thresholding", "sample_max_value"),
+    )
+    first = build_target_pair_selection(
+        tmp_path,
+        model_name="sdv1",
+        paired_frame=paired,
+        records_frame=records,
+        reference_run_config=first_generation,
+        sscd_config=first_sscd,
+    )
+    directory = target_pair_selection_directory(tmp_path, model_name="sdv1")
+    frozen_bytes = {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    }
+
+    second_generation, second_sscd = _reference_configs()
+    _set_scheduler_default_order(
+        second_generation,
+        second_sscd,
+        ("sample_max_value", "prediction_type", "thresholding"),
+    )
+    assert (
+        second_generation["scientific_config_hash"]
+        != first_generation["scientific_config_hash"]
+    )
+    assert second_sscd["configuration_hash"] != first_sscd["configuration_hash"]
+    reused = build_target_pair_selection(
+        tmp_path,
+        model_name="sdv1",
+        paired_frame=paired,
+        records_frame=records,
+        reference_run_config=second_generation,
+        sscd_config=second_sscd,
+    )
+    assert reused.sha256 == first.sha256
+    assert frozen_bytes == {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    }
+
+    changed = paired.copy(deep=True)
+    mask = changed["seed"].eq(SELECTION_SEEDS[0])
+    changed.loc[mask.idxmax(), "sscd_cosine_similarity"] += 1e-6
+    with pytest.raises(FrozenTargetPairSelectionError):
+        build_target_pair_selection(
+            tmp_path,
+            model_name="sdv1",
+            paired_frame=changed,
+            records_frame=records,
+            reference_run_config=second_generation,
+            sscd_config=second_sscd,
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("sscd_checkpoint_sha256", "sscd_preprocessing_hash"),
+)
+def test_frozen_selection_rejects_changed_sscd_contract_with_equal_scores(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    records = _records()
+    paired = _paired(records)
+    _build(tmp_path, records=records, paired=paired)
+    generation, sscd = _reference_configs()
+    sscd[field] = "d" * 64
+    sscd.pop("configuration_hash")
+    sscd["configuration_hash"] = canonical_hash(sscd)
+
+    with pytest.raises(FrozenTargetPairSelectionError):
+        build_target_pair_selection(
+            tmp_path,
+            model_name="sdv1",
+            paired_frame=paired,
+            records_frame=records,
+            reference_run_config=generation,
+            sscd_config=sscd,
+        )
 
 
 @pytest.mark.parametrize("mutation", ("extra", "missing"))

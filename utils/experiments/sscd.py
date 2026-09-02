@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pandas as pd
@@ -56,6 +57,10 @@ SCORE_DEFINITION = "cosine_similarity_of_l2_normalized_sscd_descriptors"
 SSCD_SELECTION_POLICY = "all_completed_generation_records"
 # Kept exact because it is part of the supplied reference configuration hash.
 _SSCD_CONFIGURATION_RECORD_POLICY = "completed_generation_cache_records"
+_SEED_NAMESPACE = re.compile(
+    r"(?:reference|seed)_S(?P<start>\d+)_N(?P<count>\d+)\Z"
+)
+_EXPERIMENT_NAMESPACE = re.compile(r"experiment_S0_N(?P<count>\d+)\Z")
 
 MANIFEST_COLUMNS = (
     "original_index",
@@ -86,6 +91,49 @@ MANIFEST_COLUMNS = (
 
 class SSCDEvaluationError(RuntimeError):
     """An SSCD cache cannot be validated or completed safely."""
+
+
+def _logical_generation_path(value: object, *, configuration: bool) -> object:
+    """Map a role-scoped physical path to its stable pre-nesting identity."""
+
+    if not isinstance(value, str):
+        return value
+    path = PurePosixPath(value)
+    run = path.parent if configuration else path
+    experiment = _EXPERIMENT_NAMESPACE.fullmatch(run.name)
+    seed_block = _SEED_NAMESPACE.fullmatch(run.name)
+    if experiment is not None:
+        logical_run = run.parent
+    elif seed_block is not None:
+        count = seed_block.group("count")
+        suffix = f"_N{count}"
+        parent_name = run.parent.name
+        if not parent_name.endswith(suffix):
+            return value
+        logical_name = (
+            parent_name[: -len(suffix)]
+            + f"_S{seed_block.group('start')}_N{count}"
+        )
+        logical_run = run.parent.with_name(logical_name)
+    else:
+        return value
+    return str(logical_run / path.name) if configuration else str(logical_run)
+
+
+def sscd_configuration_hash(configuration: Mapping[str, object]) -> str:
+    """Hash the scientific SSCD contract independently of cache placement."""
+
+    values = dict(configuration)
+    values.pop("configuration_hash", None)
+    if "generation_run_path" in values:
+        values["generation_run_path"] = _logical_generation_path(
+            values["generation_run_path"], configuration=False
+        )
+    if "generation_run_config_path" in values:
+        values["generation_run_config_path"] = _logical_generation_path(
+            values["generation_run_config_path"], configuration=True
+        )
+    return canonical_hash(values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,7 +301,7 @@ def run_sscd(
             if scores is None:
                 runtime = runtime or _load_runtime(project, run_configuration, configuration)
                 scores = _compute_record_scores(
-                    generation, paths, record, runtime, configuration, seed_values
+                    project, generation, paths, record, runtime, configuration, seed_values
                 )
                 newly_computed += 1
                 status = "computed"
@@ -303,9 +351,7 @@ def _load_or_create_configuration(
     if paths.config_json.is_file():
         configuration = read_json(paths.config_json)
         stored_hash = configuration.get("configuration_hash")
-        values = dict(configuration)
-        values.pop("configuration_hash", None)
-        if stored_hash != canonical_hash(values):
+        if stored_hash != sscd_configuration_hash(configuration):
             raise SSCDEvaluationError("SSCD configuration hash differs")
         expected = {
             "schema_version": SSCD_SCHEMA_VERSION,
@@ -388,7 +434,7 @@ def _load_or_create_configuration(
         "sscd_preprocessing": sscd_preprocessing_policy(),
         "sscd_preprocessing_hash": sscd_preprocessing_hash(),
     }
-    configuration["configuration_hash"] = canonical_hash(configuration)
+    configuration["configuration_hash"] = sscd_configuration_hash(configuration)
     atomic_write_json(paths.config_json, configuration)
     return configuration
 
@@ -460,6 +506,7 @@ def _load_runtime(
 
 
 def _compute_record_scores(
+    project: Path,
     generation: GenerationPaths,
     paths: SSCDPaths,
     record: CompletedGenerationRecord,
@@ -475,7 +522,6 @@ def _compute_record_scores(
         raise SSCDEvaluationError("generation trajectory has an invalid seed dimension")
     generated = decode_generated_latents(trajectory[:, -1], runtime.vae, runtime.device)
     target_path = Path(str(record.metadata["target_image_path"])).expanduser().resolve()
-    project = generation.run_directory.parent.parent.resolve()
     expected_target = (
         project
         / "data"
