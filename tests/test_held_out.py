@@ -1,4 +1,4 @@
-"""Offline tests for prompt-labeled held-out TV preview exports."""
+"""Offline tests for prompt-labeled held-out TV and N preview exports."""
 
 from __future__ import annotations
 
@@ -21,7 +21,10 @@ from utils.data import selection as selection_module
 from utils.experiments import held_out as held_out_module
 from utils.experiments.cache import GenerationPaths
 from utils.experiments.held_out import (
+    HeldOutNExportError,
+    HeldOutNExportResult,
     HeldOutTVExportError,
+    export_held_out_n_results,
     export_held_out_tv_results,
 )
 
@@ -42,10 +45,20 @@ def _selection_row(
         status = "included_tv_target_supported"
         reason = "tv_selection_mean_sscd_ge_0_25"
         semantics = "empirically_singleton_compatible_tv"
+    elif label == "N" and not included:
+        status = "excluded_n_target_unsupported"
+        reason = "n_selection_mean_sscd_lt_0_25"
+        semantics = "n_target_unsupported_under_frozen_reference_criterion"
+    elif label == "N":
+        status = "included_n_target_supported"
+        reason = "n_selection_mean_sscd_ge_0_25"
+        semantics = "n_target_supported_under_frozen_reference_criterion"
     else:
         status = "invalid_record"
         reason = "invalid_prompt_or_target"
         semantics = None
+    selection_mean = 0.40 if included else 0.10
+    validation_mean = 0.42 if included else 0.12
     return {
         "original_index": index,
         "record_id": f"sdv1-{index}",
@@ -58,8 +71,8 @@ def _selection_row(
         "selection_reason": reason,
         "target_semantics": semantics,
         "threshold": 0.25,
-        "selection_mean_sscd": 0.10 if not included else 0.40,
-        "reference_validation_mean_sscd": 0.12 if not included else 0.42,
+        "selection_mean_sscd": selection_mean,
+        "reference_validation_mean_sscd": validation_mean,
     }
 
 
@@ -111,7 +124,7 @@ def _project(
                 2,
                 label="N",
                 included=False,
-                prompt="invalid non-TV prompt",
+                prompt="held-out <N> target-unsupported prompt",
             ),
         ]
     for row in rows:
@@ -184,6 +197,20 @@ def _project(
         ),
         output / "paired_all.csv",
     )
+    selected_indices = [
+        str(row["original_index"])
+        for row in rows
+        if bool(row["include_target_pair"])
+    ]
+    atomic_write_frame_csv(
+        pd.DataFrame(
+            {
+                "original_index": selected_indices,
+                "seed": [seeds[0]] * len(selected_indices),
+            }
+        ),
+        output / "paired_selected.csv",
+    )
     return SimpleNamespace(
         root=root,
         paths=paths,
@@ -195,6 +222,15 @@ def _project(
 
 def _export(project: SimpleNamespace):
     return export_held_out_tv_results(
+        project.root,
+        model_name="sdv1",
+        generation_run=project.paths.run_directory,
+        output_directory=project.output,
+    )
+
+
+def _export_n(project: SimpleNamespace):
+    return export_held_out_n_results(
         project.root,
         model_name="sdv1",
         generation_run=project.paths.run_directory,
@@ -237,7 +273,7 @@ def test_export_is_prompt_level_and_keeps_exact_prompt_traceability(
     assert "held-out &lt;TV&gt; prompt" in gallery
     assert "validation seed half" in gallery
     assert "included TV prompt" not in gallery
-    assert "invalid non-TV prompt" not in gallery
+    assert "held-out &lt;N&gt; target-unsupported prompt" not in gallery
 
 
 @pytest.mark.parametrize(
@@ -258,6 +294,164 @@ def test_export_preserves_role_scoped_seed_provenance(
     assert config["seed_start"] == seeds[0]
     assert config["num_seeds"] == len(seeds)
     assert result.directory.parent == project.output
+
+
+def test_export_n_contains_only_excluded_n_and_is_diagnostic_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rows = [
+        _selection_row(
+            "100",
+            0,
+            label="TV",
+            included=False,
+            prompt="excluded TV prompt",
+        ),
+        _selection_row(
+            "102",
+            2,
+            label="N",
+            included=False,
+            prompt="target-unsupported <N> prompt",
+        ),
+        _selection_row(
+            "103",
+            3,
+            label="N",
+            included=True,
+            prompt="included N prompt",
+        ),
+    ]
+    project = _project(tmp_path, monkeypatch, rows=rows)
+    source = project.paths.image_path("102")
+    scientific_paths = (
+        project.paths.run_config,
+        project.output / "run_config.json",
+        project.output / "summary.json",
+        project.output / "paired_all.csv",
+        project.output / "paired_selected.csv",
+    )
+    before = {path: path.read_bytes() for path in scientific_paths}
+
+    result = _export_n(project)
+
+    assert isinstance(result, HeldOutNExportResult)
+    assert result.directory == project.output / "held_out_n"
+    assert result.prompt_count == 1
+    assert result.total_prompt_count == 1
+    assert result.missing_prompt_count == 0
+    assert result.reused is False
+    copied = result.directory / "prompts/102/generated.png"
+    assert copied.read_bytes() == source.read_bytes()
+    assert (
+        result.directory / "prompts/102/prompt.txt"
+    ).read_text(encoding="utf-8") == rows[1]["prompt_raw"]
+
+    manifest = pd.read_csv(
+        result.manifest_path,
+        dtype={
+            "original_index": str,
+            "target_image_sha256": str,
+        },
+    )
+    assert list(manifest.columns) == list(held_out_module.MANIFEST_COLUMNS)
+    assert manifest["original_index"].tolist() == ["102"]
+    assert manifest["webster_overfit_type_normalized"].tolist() == ["N"]
+    assert manifest.at[0, "record_id"] == rows[1]["record_id"]
+    assert manifest.at[0, "source_row_number"] == rows[1]["source_row_number"]
+    assert manifest.at[0, "prompt_raw"] == rows[1]["prompt_raw"]
+    assert manifest.at[0, "target_image_sha256"] == rows[1]["target_image_sha256"]
+    assert manifest["selection_reason"].tolist() == [
+        "n_selection_mean_sscd_lt_0_25"
+    ]
+    assert manifest.at[0, "selection_mean_sscd"] == pytest.approx(0.10)
+    assert manifest.at[0, "reference_validation_mean_sscd"] == pytest.approx(
+        0.12
+    )
+    assert manifest.at[0, "selection_hash"] == "a" * 64
+    assert json.loads(manifest.at[0, "seeds"]) == list(range(20, 40))
+    assert manifest.at[0, "source_preview_path"] == (
+        source.relative_to(project.root).as_posix()
+    )
+    assert manifest.at[0, "preview_image_sha256"] == file_sha256(source)
+
+    config = json.loads(
+        (result.directory / "config.json").read_text(encoding="utf-8")
+    )
+    assert config["artifact"] == "held_out_n_generation_previews"
+    assert config["frozen_held_out_n_prompt_count"] == 1
+    assert config["exported_prompt_count"] == 1
+    assert config["scientific_metric_input"] is False
+    assert config["affects_selection_or_analysis"] is False
+    summary = json.loads(
+        (result.directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["complete"] is True
+    assert summary["held_out_n_prompt_count"] == 1
+    assert summary["copied_preview_count"] == 1
+
+    gallery = result.gallery_path.read_text(encoding="utf-8")
+    assert "Held-out N prompt generations" in gallery
+    assert "target-unsupported &lt;N&gt; prompt" in gallery
+    assert "excluded TV prompt" not in gallery
+    assert "included N prompt" not in gallery
+    assert "[Held-out N] Preview gallery" in capsys.readouterr().err
+    assert {path: path.read_bytes() for path in scientific_paths} == before
+
+
+def test_empty_held_out_n_set_still_publishes_full_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        _selection_row(
+            "100",
+            0,
+            label="TV",
+            included=False,
+            prompt="excluded TV prompt",
+        ),
+        _selection_row(
+            "103",
+            3,
+            label="N",
+            included=True,
+            prompt="included N prompt",
+        ),
+    ]
+    project = _project(tmp_path, monkeypatch, rows=rows)
+
+    result = _export_n(project)
+
+    assert result.prompt_count == 0
+    assert result.total_prompt_count == 0
+    manifest = pd.read_csv(result.manifest_path)
+    assert list(manifest.columns) == list(held_out_module.MANIFEST_COLUMNS)
+    assert manifest.empty
+    summary = json.loads(
+        (result.directory / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["held_out_n_prompt_count"] == 0
+    assert "0 prompt(s)" in result.gallery_path.read_text(encoding="utf-8")
+
+
+def test_n_preview_error_uses_n_error_and_leaves_no_partial_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _project(tmp_path, monkeypatch)
+    marker = project.paths.record_path("102")
+    values = json.loads(marker.read_text(encoding="utf-8"))
+    values["preview_image_sha256"] = "f" * 64
+    atomic_write_json(marker, values)
+
+    with pytest.raises(HeldOutNExportError, match="preview hash differs"):
+        _export_n(project)
+
+    assert not (project.output / "held_out_n").exists()
+    assert not list(project.output.glob(".held_out_n.*.tmp"))
 
 
 def test_export_rerun_is_idempotent_and_detects_tampering(
@@ -366,8 +560,9 @@ def test_empty_held_out_set_still_publishes_browsable_headers(
     assert "0 prompt(s)" in result.gallery_path.read_text(encoding="utf-8")
 
 
-def test_proximity_cli_automatically_runs_export_after_complete_analysis(
+def test_proximity_cli_automatically_runs_both_exports_after_complete_analysis(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     output = Path("/tmp/output")
     generation = Path("/tmp/generation")
@@ -379,44 +574,66 @@ def test_proximity_cli_automatically_runs_export_after_complete_analysis(
             summary_json=output / "summary.json",
         ),
     )
-    calls: list[tuple[object, ...]] = []
+    calls: list[tuple[str, object, object]] = []
     monkeypatch.setattr(
         "utils.experiments.proximity.run_proximity",
         lambda *_args, **_kwargs: summary,
     )
+
+    def fake_export(category: str):
+        def export(root: object, **kwargs: object) -> SimpleNamespace:
+            calls.append((category, root, kwargs))
+            return SimpleNamespace(
+                reused=False,
+                prompt_count=7 if category == "TV" else 3,
+                total_prompt_count=7 if category == "TV" else 3,
+                missing_prompt_count=0,
+                gallery_path=output
+                / f"held_out_{category.casefold()}/gallery.html",
+            )
+
+        return export
+
     monkeypatch.setattr(
         held_out_module,
         "export_held_out_tv_results",
-        lambda root, **kwargs: (
-            calls.append((root, kwargs)),
-            SimpleNamespace(
-                reused=False,
-                prompt_count=7,
-                total_prompt_count=7,
-                missing_prompt_count=0,
-                gallery_path=output / "held_out_tv/gallery.html",
-            ),
-        )[1],
+        fake_export("TV"),
+    )
+    monkeypatch.setattr(
+        held_out_module,
+        "export_held_out_n_results",
+        fake_export("N"),
     )
 
     status = proximity_cli.main([])
 
+    captured = capsys.readouterr()
+    expected_kwargs = {
+        "model_name": "sdv1",
+        "generation_run": generation,
+        "output_directory": output,
+    }
     assert status == 0
     assert calls == [
-        (
-            proximity_cli.PROJECT_ROOT,
-            {
-                "model_name": "sdv1",
-                "generation_run": generation,
-                "output_directory": output,
-            },
-        )
+        ("TV", proximity_cli.PROJECT_ROOT, expected_kwargs),
+        ("N", proximity_cli.PROJECT_ROOT, expected_kwargs),
     ]
+    assert "Saved 7/7 held-out TV prompt previews" in captured.out
+    assert "Saved 3/3 held-out N prompt previews" in captured.out
 
 
-def test_proximity_cli_reports_gallery_failure_after_scientific_summary(
+@pytest.mark.parametrize(
+    ("failing_category", "error_type"),
+    (
+        ("TV", HeldOutTVExportError),
+        ("N", HeldOutNExportError),
+    ),
+)
+def test_proximity_cli_attempts_both_exports_and_reports_category_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    failing_category: str,
+    error_type: type[RuntimeError],
 ) -> None:
     output = Path("/tmp/output")
     summary = SimpleNamespace(
@@ -427,22 +644,52 @@ def test_proximity_cli_reports_gallery_failure_after_scientific_summary(
             summary_json=output / "summary.json",
         ),
     )
+    calls: list[str] = []
     monkeypatch.setattr(
         "utils.experiments.proximity.run_proximity",
         lambda *_args, **_kwargs: summary,
     )
 
-    def fail_export(*_args: object, **_kwargs: object) -> None:
-        raise HeldOutTVExportError("synthetic gallery failure")
+    def fake_export(category: str):
+        def export(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            calls.append(category)
+            if category == failing_category:
+                raise error_type("synthetic gallery failure")
+            return SimpleNamespace(
+                reused=True,
+                prompt_count=1,
+                total_prompt_count=2,
+                missing_prompt_count=1,
+                gallery_path=output
+                / f"held_out_{category.casefold()}/gallery.html",
+            )
 
-    monkeypatch.setattr(held_out_module, "export_held_out_tv_results", fail_export)
+        return export
+
+    monkeypatch.setattr(
+        held_out_module,
+        "export_held_out_tv_results",
+        fake_export("TV"),
+    )
+    monkeypatch.setattr(
+        held_out_module,
+        "export_held_out_n_results",
+        fake_export("N"),
+    )
 
     status = proximity_cli.main([])
 
     captured = capsys.readouterr()
     assert status == 1
+    assert calls == ["TV", "N"]
     assert f"Summary: {output / 'summary.json'}" in captured.out
     assert (
-        "Held-out TV gallery failed after scientific proximity completed: "
-        "synthetic gallery failure"
+        f"Held-out {failing_category} gallery failed after scientific "
+        "proximity completed: synthetic gallery failure"
     ) in captured.err
+    successful_category = "N" if failing_category == "TV" else "TV"
+    assert f"held-out {successful_category} prompt previews" in captured.out
+    assert (
+        f"see held_out_{successful_category.casefold()}/config.json"
+        in captured.err
+    )

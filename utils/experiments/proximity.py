@@ -40,8 +40,7 @@ from .cache import (
 )
 from .plotting import AnalysisStatistics, write_analysis_outputs
 
-SCHEMA_VERSION = 2
-SELECTION_POLICY = "target_pair_selection"
+SCHEMA_VERSION = 4
 
 PAIRED_COLUMNS = tuple(
     "original_index record_id source_row_number seed prompt_raw "
@@ -178,11 +177,16 @@ def _seed_role(
 
 
 def _preexisting_selection(
-    root: Path, *, model_name: str, role: str
+    root: Path,
+    *,
+    model_name: str,
+    role: str,
+    output_directory: Path,
 ) -> Any | None:
     """Load selection early so incompatible output config fails before writes."""
 
     from utils.data.selection import (
+        StaleTargetPairSelectionError,
         load_target_pair_selection,
         target_pair_selection_directory,
     )
@@ -190,7 +194,17 @@ def _preexisting_selection(
     directory = target_pair_selection_directory(root, model_name=model_name)
     if role == "reference" and not directory.exists():
         return None
-    return load_target_pair_selection(root, model_name=model_name)
+    try:
+        return load_target_pair_selection(root, model_name=model_name)
+    except StaleTargetPairSelectionError as error:
+        raise ProximityError(
+            "Stale frozen target-pair selection is incompatible with "
+            f"proximity schema {SCHEMA_VERSION}.\n"
+            "Archive or remove exactly these two derived locations before "
+            "rebuilding:\n"
+            f"- {directory}\n"
+            f"- {output_directory}"
+        ) from error
 
 
 def run_proximity(
@@ -279,7 +293,10 @@ def run_proximity(
         )
     sscd_config = _load_sscd_config(paths.generation_run, generation_config)
     preexisting_selection = _preexisting_selection(
-        root, model_name=model_name, role=role
+        root,
+        model_name=model_name,
+        role=role,
+        output_directory=paths.output_directory,
     )
     if preexisting_selection is not None:
         desired = _analysis_configuration(
@@ -288,8 +305,9 @@ def run_proximity(
         _write_or_validate_configuration(paths.run_config_json, desired)
     elif paths.run_config_json.exists() or paths.run_config_json.is_symlink():
         raise ProximityError(
-            "analysis configuration exists without its frozen reference selection: "
-            f"{paths.run_config_json}"
+            "A derived proximity output exists without its frozen reference "
+            "selection. Archive or remove exactly this derived location before "
+            f"rebuilding:\n- {paths.output_directory}"
         )
     paths.records_directory.mkdir(parents=True, exist_ok=True)
     records = list_completed_records(cache_paths)
@@ -681,7 +699,7 @@ def _selected_frame(frame: pd.DataFrame, selection: Any) -> pd.DataFrame:
 
 
 def _write_selection_outputs(output_directory: Path, selection: Any) -> None:
-    """Copy only validated schema-2 selection sidecars into this analysis."""
+    """Copy only validated current-schema selection sidecars into this analysis."""
 
     from utils.data.selection import target_pair_selection_directory
 
@@ -692,12 +710,28 @@ def _write_selection_outputs(output_directory: Path, selection: Any) -> None:
         "selection.csv",
         "selected_tv.csv",
         "excluded_tv.csv",
+        "selected_n.csv",
+        "excluded_n.csv",
         "threshold_diagnostics.csv",
     ):
         source = source_directory / filename
         if not source.is_file() or source.is_symlink():
             raise ProximityError(f"frozen selection sidecar is invalid: {source}")
         atomic_copy(source, output_directory / filename)
+
+
+def _selection_contract(selection: Any) -> dict[str, object]:
+    """Extract the validated scientific selection rule for run provenance."""
+
+    configuration = selection.configuration
+    return {
+        "schema_version": configuration["schema_version"],
+        "selection_policy": configuration["selection_policy"],
+        "boundary": configuration["boundary"],
+        "category_rules": configuration["category_rules"],
+        "selection_seeds": configuration["selection_seeds"],
+        "reference_validation_seeds": configuration["reference_validation_seeds"],
+    }
 
 
 def _analysis_configuration(
@@ -717,6 +751,7 @@ def _analysis_configuration(
         paths.project_root / "utils/data/selection.py",
         paths.project_root / "utils/models/latent.py",
     )
+    selection_contract = _selection_contract(selection)
     return {
         "schema_version": SCHEMA_VERSION,
         "analysis": "proximity",
@@ -725,8 +760,9 @@ def _analysis_configuration(
         "generation_run_path": _display_path(paths.generation_run, paths.project_root),
         "generation_scientific_config_hash": generation["scientific_config_hash"],
         "sscd_configuration_hash": sscd["configuration_hash"],
-        "selection_policy": SELECTION_POLICY,
+        "selection_policy": selection_contract["selection_policy"],
         "selection_hash": selection.sha256,
+        "selection_contract": selection_contract,
         "model_name": science["model_cli_name"],
         "scheduler_name": _scheduler_name(science),
         "guidance_scale": science["guidance_scale"],
@@ -762,8 +798,26 @@ def _write_or_validate_configuration(
             if refresh_source_provenance:
                 atomic_write_json(path, desired)
             return
+        if _uses_stale_selection_policy(existing, desired):
+            raise ProximityError(
+                "Existing derived proximity output uses an incompatible frozen "
+                "selection policy. Archive or remove exactly this derived "
+                f"location before rebuilding:\n- {path.parent}"
+            )
         raise ProximityError(f"existing analysis configuration is incompatible: {path}")
     atomic_write_json(path, desired)
+
+
+def _uses_stale_selection_policy(
+    existing: Mapping[str, object],
+    desired: Mapping[str, object],
+) -> bool:
+    """Return whether an old derived run predates the current selection contract."""
+
+    return existing.get("analysis") == "proximity" and any(
+        canonical_json(existing.get(key)) != canonical_json(desired.get(key))
+        for key in ("schema_version", "selection_policy", "selection_contract")
+    )
 
 
 def _same_analysis_contract(
@@ -779,6 +833,25 @@ def _same_analysis_contract(
     return canonical_json(existing_values) == canonical_json(desired_values)
 
 
+def _selection_prompt_counts(selection: Any) -> dict[str, int]:
+    """Count prompt-level outcomes and validation disagreements by category."""
+
+    frame = selection.frame
+    labels = frame["webster_overfit_type_normalized"]
+    included = frame["include_target_pair"].astype(bool)
+    agreement = frame["selection_validation_agree"]
+    tv = labels.eq("TV")
+    normal = labels.eq("N")
+    return {
+        "included_tv_prompts": int((tv & included).sum()),
+        "excluded_tv_prompts": int((tv & ~included).sum()),
+        "included_n_prompts": int((normal & included).sum()),
+        "excluded_n_prompts": int((normal & ~included).sum()),
+        "tv_selection_validation_disagreements": int((tv & agreement.eq(False)).sum()),
+        "n_selection_validation_disagreements": int((normal & agreement.eq(False)).sum()),
+    }
+
+
 def _complete_summary(
     paths: ProximityPaths,
     run_name: str,
@@ -792,17 +865,22 @@ def _complete_summary(
     assert isinstance(science, Mapping)
     seeds = science.get("seeds")
     is_experiment = isinstance(seeds, list) and bool(seeds) and seeds[0] == 0
+    selection_contract = _selection_contract(selection)
+    prompt_counts = _selection_prompt_counts(selection)
     return {
         "schema_version": SCHEMA_VERSION,
         "complete": True,
         "run_name": run_name,
         "generation_scientific_config_hash": generation["scientific_config_hash"],
         "sscd_configuration_hash": sscd["configuration_hash"],
-        "selection_policy": SELECTION_POLICY,
+        "selection_policy": selection_contract["selection_policy"],
         "selection_hash": selection.sha256,
+        "selection_contract": selection_contract,
         "included_prompts": len(selection.included_indices),
         "excluded_prompts": len(selection.excluded_indices),
-        "selected_tv_prompts": len(selection.selected_tv_indices),
+        "selected_tv_prompts": prompt_counts["included_tv_prompts"],
+        "selected_n_prompts": prompt_counts["included_n_prompts"],
+        **prompt_counts,
         "tables": {
             name: {"prompts": value.prompts, "points": value.points}
             for name, value in (

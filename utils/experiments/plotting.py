@@ -43,6 +43,31 @@ _TYPE_COLORS = {
     "N": "#CC79A7",
     "Other / unlabeled": "#7F7F7F",
 }
+FIGURE_SIZE = (4.0, 4.0)
+TEXT_FONT_SIZE = 15
+AXIS_NUMBER_FONT_SIZE = 12
+LEGEND_FONT_SIZE = 10
+CORRELATION_FONT_SIZE = 10
+LEGEND_MARKER_ALPHA = 1.0
+SCATTER_SIZE = 8
+SCATTER_ALPHA = 0.35
+FIGURE_PAD_INCHES = 0.05
+X_AXIS_LABEL = r"$\|\mathbf{x}_0-\mathbf{x}^{\star}\|_2/\sqrt{d}$"
+Y_AXIS_LABEL = "SSCD"
+
+PLOT_STYLE = {
+    "figure.figsize": FIGURE_SIZE,
+    "font.family": "STIXGeneral",
+    "font.size": TEXT_FONT_SIZE,
+    "mathtext.fontset": "stix",
+    "axes.labelsize": TEXT_FONT_SIZE,
+    "axes.titlesize": TEXT_FONT_SIZE,
+    "figure.titlesize": TEXT_FONT_SIZE,
+    "xtick.labelsize": AXIS_NUMBER_FONT_SIZE,
+    "ytick.labelsize": AXIS_NUMBER_FONT_SIZE,
+    "legend.fontsize": LEGEND_FONT_SIZE,
+    "legend.title_fontsize": LEGEND_FONT_SIZE,
+}
 
 
 class PlottingError(RuntimeError):
@@ -144,12 +169,13 @@ def write_analysis_outputs(
         statistics[name] = compute_correlations(frame)
         atomic_write_frame_csv(frame, output / f"paired_{name}.csv")
         atomic_write_frame_parquet(frame, output / f"paired_{name}.parquet")
-        figure = _scatter_figure(frame, statistics[name], name)
-        _save_figure_pair(
-            figure,
-            output / f"proximity_vs_sscd_{name}.png",
-            output / f"proximity_vs_sscd_{name}.pdf",
-        )
+        with matplotlib.rc_context(PLOT_STYLE):
+            figure = _scatter_figure(frame, statistics[name])
+            _save_figure_pair(
+                figure,
+                output / f"proximity_vs_sscd_{name}.png",
+                output / f"proximity_vs_sscd_{name}.pdf",
+            )
     selected_tv = _type_mask(paired_selected, "TV")
     diagnostic_subsets = {
         "non_tv_selected": compute_correlations(paired_selected.loc[~selected_tv]),
@@ -184,9 +210,8 @@ def _validate_frame(frame: pd.DataFrame) -> None:
 def _scatter_figure(
     frame: pd.DataFrame,
     statistics: CorrelationStatistics,
-    view_name: str,
 ) -> Figure:
-    figure, axes = plt.subplots(figsize=(7.0, 5.25), constrained_layout=True)
+    figure, axes = plt.subplots(figsize=FIGURE_SIZE)
     if frame.empty:
         plotted = pd.Series([], dtype="object")
     else:
@@ -206,35 +231,52 @@ def _scatter_figure(
         axes.scatter(
             subset["latent_rmse"].astype(float),
             subset["sscd_cosine_similarity"].astype(float),
-            s=8,
-            alpha=0.35,
+            s=SCATTER_SIZE,
+            alpha=SCATTER_ALPHA,
             color=_TYPE_COLORS[label],
             edgecolors="none",
             label=label,
             rasterized=True,
             zorder=1 if label in {"N", "Other / unlabeled"} else 2,
         )
-    axes.set_xlabel("Dimension-normalized terminal latent distance ||x₀ - x*||₂ / √d (lower is closer)")
-    axes.set_ylabel("SSCD cosine similarity (higher is more visually similar)")
-    title = view_name.replace("_", " ").title()
-    axes.set_title(f"Terminal latent proximity versus SSCD — {title}")
+    axes.set_xlabel(X_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
+    axes.set_ylabel(Y_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
+    axes.tick_params(
+        axis="both",
+        which="both",
+        labelsize=AXIS_NUMBER_FONT_SIZE,
+    )
     axes.text(
         0.02,
-        0.98,
+        0.02,
         (
-            f"Pearson r={_stat_text(statistics.pearson)}\n"
-            f"Spearman ρ={_stat_text(statistics.spearman)}\n"
-            f"points={statistics.points}"
+            f"PCC: {_stat_text(statistics.pearson)}\n"
+            f"Spearman rho: {_stat_text(statistics.spearman)}"
         ),
         transform=axes.transAxes,
         ha="left",
-        va="top",
-        fontsize=9,
-        bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+        va="bottom",
+        fontsize=CORRELATION_FONT_SIZE,
+        bbox={
+            "boxstyle": "round,pad=0.3",
+            "facecolor": "white",
+            "edgecolor": "0.75",
+            "alpha": 0.85,
+        },
     )
     if axes.collections:
-        axes.legend(title="Webster type", loc="best", frameon=True, markerscale=1.5)
-    axes.grid(True, linewidth=0.4, alpha=0.25)
+        legend = axes.legend(
+            title="Webster type",
+            loc="best",
+            frameon=False,
+            markerscale=1.5,
+            fontsize=LEGEND_FONT_SIZE,
+            title_fontsize=LEGEND_FONT_SIZE,
+        )
+        for handle in legend.legend_handles:
+            handle.set_alpha(LEGEND_MARKER_ALPHA)
+    axes.grid(True, which="both", linewidth=0.6, alpha=0.18)
+    figure.tight_layout()
     return figure
 
 
@@ -243,8 +285,19 @@ def _save_figure_pair(figure: Figure, png: Path, pdf: Path) -> None:
     temporary_png = _temporary_sibling(png)
     temporary_pdf = _temporary_sibling(pdf)
     try:
-        figure.savefig(temporary_png, format="png", dpi=300, bbox_inches="tight")
-        figure.savefig(temporary_pdf, format="pdf", bbox_inches="tight")
+        figure.savefig(
+            temporary_png,
+            format="png",
+            dpi=300,
+            bbox_inches="tight",
+            pad_inches=FIGURE_PAD_INCHES,
+        )
+        figure.savefig(
+            temporary_pdf,
+            format="pdf",
+            bbox_inches="tight",
+            pad_inches=FIGURE_PAD_INCHES,
+        )
         for temporary in (temporary_png, temporary_pdf):
             with temporary.open("rb") as handle:
                 os.fsync(handle.fileno())
@@ -288,7 +341,7 @@ def _finite_or_none(value: object) -> float | None:
 
 
 def _stat_text(value: float | None) -> str:
-    return "undefined" if value is None else f"{value:.6f}"
+    return "undefined" if value is None else f"{value:.3f}"
 
 
 def _temporary_sibling(path: Path) -> Path:

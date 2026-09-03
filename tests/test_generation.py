@@ -623,6 +623,12 @@ if [[ "$wrapper_name" == "download_webster.sh" ]]; then
     printf 'download progress marker\n' >&2
     exit "${DOWNLOAD_EXIT_CODE:-0}"
 fi
+if [[ -n "${FAIL_WRAPPER:-}" \
+    && "$wrapper_name" == "$FAIL_WRAPPER" \
+    && " $* " == *" --model ${FAIL_MODEL:-} "* ]]; then
+    printf 'injected failure for %s\n' "${FAIL_MODEL:-}" >&2
+    exit "${FAIL_EXIT_CODE:-17}"
+fi
 """
     wrappers = (
         "download_webster.sh",
@@ -707,7 +713,10 @@ fi
 
     log.unlink()
     skipped = subprocess.run(
-        ["bash", str(run_all), "--N", "1"],
+        [
+            "bash", str(run_all), "--scheduler", "ddpm", "--g", "3.25",
+            "--T", "12", "--N", "1", "--downscale", "8",
+        ],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -717,7 +726,7 @@ fi
     )
     skipped_lines = log.read_text(encoding="utf-8").splitlines()
     assert skipped.returncode == 0, skipped.stderr
-    assert [line.split("\t", 1)[0] for line in skipped_lines] == [
+    expected_stage_wrappers = [
         "generate.sh",
         "sscd.sh",
         "compute_proximity.sh",
@@ -725,17 +734,35 @@ fi
         "sscd.sh",
         "compute_proximity.sh",
     ]
+    expected_skipped_lines = []
+    for model in ("sdv1", "sdv2", "realvis"):
+        model_reference = (
+            f"\t--model\t{model}\t--scheduler\tddim\t--g\t7.5"
+            "\t--T\t50\t--N\t20\t--seed-start\t20"
+        )
+        model_experiment = (
+            f"\t--model\t{model}\t--scheduler\tddpm\t--g\t3.25"
+            "\t--T\t12\t--N\t1\t--seed-start\t0"
+        )
+        expected_skipped_lines.extend(
+            [
+                f"generate.sh{model_reference}\t--downscale\t8",
+                f"sscd.sh{model_reference}",
+                f"compute_proximity.sh{model_reference}",
+                f"generate.sh{model_experiment}\t--downscale\t8",
+                f"sscd.sh{model_experiment}",
+                f"compute_proximity.sh{model_experiment}",
+            ]
+        )
+    assert skipped_lines == expected_skipped_lines
     assert all(
         not line.startswith("download_webster.sh") for line in skipped_lines
     )
-    stage_offsets = [
-        skipped.stdout.index(f"[{stage}/6]")
-        for stage in range(1, 7)
-    ]
-    assert stage_offsets == sorted(stage_offsets)
-    assert "Webster data preparation skipped" in skipped.stdout
+    assert all(skipped.stdout.count(f"[{stage}/6]") == 3 for stage in range(1, 7))
+    assert skipped.stdout.count("Webster data preparation skipped") == 3
     assert "download progress marker" not in skipped.stderr
-    assert "Theorem 1 loss–recovery skipped" in skipped.stdout
+    assert skipped.stdout.count("Theorem 1 loss–recovery skipped") == 3
+    assert "All-model pipeline complete." in skipped.stdout
 
     log.unlink()
     canonical = subprocess.run(
@@ -784,7 +811,96 @@ fi
     assert "[1/1]" in plot_only.stdout
 
     log.unlink()
+    all_plots = subprocess.run(
+        ["bash", str(run_all), "--plot"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert all_plots.returncode == 0, all_plots.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "theorem1_loss_recovery.sh\t--model\tsdv1\t--plot",
+        "theorem1_loss_recovery.sh\t--model\tsdv2\t--plot",
+        "theorem1_loss_recovery.sh\t--model\trealvis\t--plot",
+    ]
+    assert all_plots.stdout.count("[1/1]") == 3
+    assert "All-model pipeline complete." in all_plots.stdout
+
+    log.unlink()
+    all_canonical = subprocess.run(
+        ["bash", str(run_all)],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert all_canonical.returncode == 0, all_canonical.stderr
+    canonical_lines = log.read_text(encoding="utf-8").splitlines()
+    expected_canonical_wrappers = [
+        *expected_stage_wrappers,
+        "theorem1_loss_recovery.sh",
+    ]
+    assert [line.split("\t", 1)[0] for line in canonical_lines] == (
+        expected_canonical_wrappers * 3
+    )
+    assert [line.split("\t")[2] for line in canonical_lines] == (
+        ["sdv1"] * 7 + ["sdv2"] * 7 + ["realvis"] * 7
+    )
+
+    log.unlink()
+    failure_environment = dict(
+        environment,
+        FAIL_WRAPPER="generate.sh",
+        FAIL_MODEL="sdv2",
+        FAIL_EXIT_CODE="17",
+    )
+    failed_model = subprocess.run(
+        ["bash", str(run_all), "--N", "1"],
+        cwd=tmp_path,
+        env=failure_environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    failed_model_lines = log.read_text(encoding="utf-8").splitlines()
+    assert failed_model.returncode == 17
+    assert [line.split("\t", 1)[0] for line in failed_model_lines] == [
+        *expected_stage_wrappers,
+        "generate.sh",
+    ]
+    assert [line.split("\t")[2] for line in failed_model_lines] == (
+        ["sdv1"] * 6 + ["sdv2"]
+    )
+    assert "pipeline failed for model sdv2 (exit 17)" in failed_model.stderr
+    assert "\t--model\trealvis\t" not in log.read_text(encoding="utf-8")
+
+    log.unlink()
     environment["DOWNLOAD_EXIT_CODE"] = "0"
+    downloaded = subprocess.run(
+        ["bash", str(run_all), "--download", "--N", "1"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    downloaded_lines = log.read_text(encoding="utf-8").splitlines()
+    assert downloaded.returncode == 0, downloaded.stderr
+    assert [line.split("\t", 1)[0] for line in downloaded_lines].count(
+        "download_webster.sh"
+    ) == 1
+    assert [line.split("\t")[2] for line in downloaded_lines[1:]] == (
+        ["sdv1"] * 6 + ["sdv2"] * 6 + ["realvis"] * 6
+    )
+
+    log.unlink()
     for invalid_n in ("0", "21"):
         invalid = subprocess.run(
             ["bash", str(run_all), "--N", invalid_n],

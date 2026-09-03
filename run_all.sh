@@ -2,8 +2,10 @@
 set -Eeuo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ORIGINAL_ARGUMENTS=("$@")
 
 MODEL="sdv1"
+MODEL_OPTION_PROVIDED=0
 SCHEDULER="ddim"
 GUIDANCE_SCALE="7.5"
 NUM_INFERENCE_STEPS="50"
@@ -25,7 +27,7 @@ Theorem 1 experiment. Webster data preparation is opt-in.
 Options:
   --download            Run/resume Webster data preparation first
   --plot                Plot Theorem 1 from its saved CSV; run no computation
-  --model MODEL         sdv1, sdv2, or realvis (default: sdv1)
+  --model MODEL         Run only sdv1, sdv2, or realvis (default: all three)
   --scheduler NAME      ddim or ddpm (default: ddim)
   --g FLOAT             Classifier-free guidance scale (default: 7.5)
   --T INTEGER           Number of inference steps (default: 50)
@@ -36,6 +38,7 @@ Options:
   --per-host INT        Concurrent requests to one host (default: 4)
   -h, --help            Show this help message
 
+Without --model, the pipeline runs sequentially for sdv1, sdv2, and realvis.
 The selection reference is always ddim/g7.5/T50 with seeds 20..39. The
 experiment always starts at seed 0, so its cache stays disjoint from the
 reference cache. Download tuning options have effect only when --download is
@@ -95,10 +98,12 @@ while (($# > 0)); do
         --model)
             (($# >= 2)) || missing_value "$1"
             MODEL="$2"
+            MODEL_OPTION_PROVIDED=1
             shift 2
             ;;
         --model=*)
             MODEL="${1#*=}"
+            MODEL_OPTION_PROVIDED=1
             shift
             ;;
         --scheduler)
@@ -184,6 +189,33 @@ while (($# > 0)); do
             ;;
     esac
 done
+
+if ((!MODEL_OPTION_PROVIDED)); then
+    ALL_MODELS=(sdv1 sdv2 realvis)
+    ARGUMENTS_WITHOUT_DOWNLOAD=()
+    for argument in "${ORIGINAL_ARGUMENTS[@]}"; do
+        if [[ "$argument" != "--download" ]]; then
+            ARGUMENTS_WITHOUT_DOWNLOAD+=("$argument")
+        fi
+    done
+
+    for position in "${!ALL_MODELS[@]}"; do
+        model="${ALL_MODELS[$position]}"
+        child_arguments=("${ORIGINAL_ARGUMENTS[@]}")
+        if ((position > 0 && DOWNLOAD_WEBSTER)); then
+            child_arguments=("${ARGUMENTS_WITHOUT_DOWNLOAD[@]}")
+        fi
+        if "$PROJECT_ROOT/run_all.sh" --model "$model" "${child_arguments[@]}"; then
+            :
+        else
+            status=$?
+            printf 'run_all.sh: pipeline failed for model %s (exit %s)\n' "$model" "$status" >&2
+            exit "$status"
+        fi
+    done
+    printf 'All-model pipeline complete.\n'
+    exit 0
+fi
 
 case "$MODEL" in
     sdv1|sdv2|realvis) ;;

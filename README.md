@@ -16,11 +16,11 @@ python -m pip install -r requirements-dev.txt
 
 ## Workflow
 
-Run all modeling and analysis stages from any directory with one command:
+Run all modeling and analysis stages for all three supported models from any
+directory with one command:
 
 ```bash
 ./run_all.sh \
-  --model sdv1 \
   --scheduler ddim \
   --g 7.5 \
   --T 50 \
@@ -28,22 +28,26 @@ Run all modeling and analysis stages from any directory with one command:
   --downscale 4
 ```
 
-By default, the canonical orchestrator uses the existing Webster dataset and
-makes seven stage invocations in order: reference generation for seeds 20–39;
-reference SSCD; cache-only reference proximity, which freezes the target-pair
-selection; experiment generation for seeds 0 through `N-1`; experiment SSCD;
-cache-only experiment proximity; and the Theorem 1 loss–recovery experiment.
-Pass `--download` to run or resume Webster preparation first, making it an
-eight-stage pipeline. The Theorem 1 stage requires the canonical
-DDIM/g7.5/T50/N20 experiment and is explicitly skipped for other sampling
-settings. A downloader exit status
-of `2` means some records remain retryable; in that case the orchestrator
-continues with all currently available prompt–image pairs. Other data errors
-and failures in later stages stop it.
+When `--model` is omitted, `run_all.sh` runs `sdv1`, `sdv2`, and
+`realvis` sequentially in that order. Pass, for example, `--model sdv1` to
+run only one model. For each model, the canonical orchestrator uses the
+existing Webster dataset and makes seven stage invocations in order: reference
+generation for seeds 20–39; reference SSCD; cache-only reference proximity,
+which freezes the target-pair selection; experiment generation for seeds 0
+through `N-1`; experiment SSCD; cache-only experiment proximity; and the
+Theorem 1 loss–recovery experiment. Thus the default all-model run has 21
+model stages. Pass `--download` to run or resume the shared Webster
+preparation once before the first model. The Theorem 1 stage requires the
+canonical DDIM/g7.5/T50/N20 experiment and is explicitly skipped for other
+sampling settings. A downloader exit status of `2` means some records remain
+retryable; in that case the orchestrator continues with all currently
+available prompt–image pairs. Other data errors and failures in later stages
+stop the sequence before the next model.
 
 Pass `--plot` to `run_all.sh` to skip every computational stage and regenerate
-only the Theorem 1 PDF from its saved CSV. The experiment wrapper exposes the
-same mode directly (with `--plot-only` retained as a compatibility alias):
+only the Theorem 1 PDFs from saved CSVs. It follows the same all-model default;
+combine it with `--model` to plot one model. The experiment wrapper exposes
+the same mode directly (with `--plot-only` retained as a compatibility alias):
 
 ```bash
 ./theorem1_loss_recovery.sh --model sdv1 --plot
@@ -53,8 +57,8 @@ same mode directly (with `--plot-only` retained as a compatibility alias):
 the fixed reference pool. All invoked stage wrappers use unbuffered Python
 output, and their `tqdm` progress stays visible in redirected logs: generation
 records, denoising steps, and previews; SSCD records and checkpoint bytes; and
-proximity records, analysis views, and the held-out TV preview gallery. When
-`--download` is present, Webster's ten local phases are also shown.
+proximity records, analysis views, and the held-out TV and N preview galleries.
+When `--download` is present, Webster's ten local phases are also shown.
 
 To prepare or retry Webster data independently:
 
@@ -300,29 +304,46 @@ sampler.
 ### Frozen target-pair selection
 
 Target-pair selection happens only during cache-based proximity analysis. The
-policy is fixed and model-specific:
+frozen reference selection is model-specific, while its boundary and rules are
+fixed across all supported models:
 
-- every non-TV prompt remains included under the current non-TV policy;
-- a TV prompt is included when its mean reference SSCD over seeds 20–29 is at
-  least `0.25`;
-- reference seeds 30–39 are validation-only and never affect inclusion;
+- a TV prompt is included iff its arithmetic mean paired-target SSCD over
+  reference seeds 20–29 is greater than or equal to `0.25`;
+- an N prompt is included iff its arithmetic mean paired-target SSCD over
+  reference seeds 20–29 is greater than or equal to `0.25`;
+- MV and RV retain their prior unconditional-inclusion behavior;
+- reference seeds 30–39 compute validation diagnostics only and never affect
+  inclusion;
 - experimental seeds 0–19 affect neither selection nor reference validation;
   and
-- latent proximity, Pearson/Spearman correlation, and plot appearance never
-  affect inclusion.
+- terminal latent proximity, latent-distance thresholds, Pearson/Spearman
+  correlation, and plot appearance never affect inclusion.
 
-The threshold is fixed across models. It is not re-optimized per run. Each
-model builds its one frozen selection only from the exact reference run
-`<model>_ddim_g7.5_T50_S20_N20`, containing seeds 20–39, and stores it in the
-scientifically named directory
+Thus both TV and N prompts exactly at `0.25` are included. The boundary is
+never re-optimized per model or per run.
+Selection artifacts record schema version 4 and policy
+`target_pair_selection_tv_ge_0_25_n_ge_0_25`; N decisions use
+`included_n_target_supported` and `excluded_n_target_unsupported` status
+vocabulary.
+Each model builds one frozen selection only from the exact reference run
+`<model>_ddim_g7.5_T50_S20_N20`, containing seeds 20–39, and stores it in
 `data/webster/selection/<dataset-model>/reference_S20_N20/`. Experiment runs
 starting at seed 0 with `N <= 20` reuse that frozen model-specific selection.
 If it is missing, proximity exits with the exact three reference commands
 required to create it.
 
-Cached TV records below the threshold remain in the generation and SSCD caches;
-selection removes whole prompts only from selected analysis tables. Later
-mechanism experiments use the same API:
+The selection unit is the whole prompt–target pair. Excluded TV and N prompts
+below the boundary remain intact as target-unsupported diagnostics:
+generation trajectories, noise predictions, target latents, generated
+previews, and SSCD tensors are all preserved. Every seed for those prompts is
+removed only from the target-supported selected analysis. Older or wrong-policy
+frozen selections—including schema-2 TV-only selections and schema-3 selections
+with the reversed N rule—are rejected rather than overwritten. Through
+proximity, the incompatibility reports only the exact frozen-selection and
+current derived proximity directories that must be archived or removed before
+rebuilding; no raw cache directory should be changed.
+
+Later mechanism experiments use the same API:
 
 ```python
 from utils.data.selection import load_target_pair_selection
@@ -331,7 +352,8 @@ selection = load_target_pair_selection(root, model_name="sdv1")
 ```
 
 The returned object exposes `included_indices`, `excluded_indices`,
-`selected_tv_indices`, `frame`, `configuration`, and `sha256`.
+`selected_tv_indices`, `excluded_tv_indices`, `selected_n_indices`,
+`excluded_n_indices`, `frame`, `configuration`, and `sha256`.
 
 ### Proximity outputs
 
@@ -350,8 +372,18 @@ outputs/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/proximity/
     ├── selection.csv
     ├── selected_tv.csv
     ├── excluded_tv.csv
+    ├── selected_n.csv
+    ├── excluded_n.csv
     ├── threshold_diagnostics.csv
     ├── held_out_tv/
+    │   ├── gallery.html
+    │   ├── manifest.csv
+    │   ├── config.json
+    │   ├── summary.json
+    │   └── prompts/<original_index>/
+    │       ├── generated.png
+    │       └── prompt.txt
+    ├── held_out_n/
     │   ├── gallery.html
     │   ├── manifest.csv
     │   ├── config.json
@@ -371,22 +403,26 @@ are `experiment_S0_N<N>`. Both live under the experiment run's single
 `proximity/` directory. Their generation caches follow the same grouping under
 `logs/<model>_ddim_g7.5_T50_N20/`.
 
-`paired_all` contains every completed prompt and seed. For an experiment,
-`paired_selected` contains every experiment seed for every included prompt and
-is the sole paper-facing table and correlation view. There is no
-`paired_evaluation` artifact: reference seeds 30–39 are selection diagnostics,
-not an experimental half-split. Reference proximity output itself is also not
-paper-facing. Scientific hashes are recorded in `run_config.json` inside the
+`paired_all` contains every completed prompt and seed; selection never removes
+rows from `paired_all`. For an experiment, `paired_selected` contains every
+experiment seed for every included prompt. It is the sole paper-facing,
+target-supported selected table and correlation view. There is no
+`paired_evaluation` artifact:
+reference seeds 30–39 are diagnostics, not an experimental half-split.
+Reference proximity output itself is also not paper-facing. The frozen
+selection hash and its explicit TV/N category rules, fixed boundary, selection
+seeds, and validation seeds are recorded in `run_config.json` inside each
 seed-role namespace.
 
-`held_out_tv/` is a visual diagnostic for whole TV prompts excluded by the
-frozen target-pair rule (`TV` and `include_target_pair == false`). It does not
-refer to the held-out reference-validation seeds 30–39. `gallery.html` shows
-each exact prompt beside its seed-ascending generated montage; `manifest.csv`
-records the prompt, selection and validation SSCD means, seeds, source path,
-and hashes. A reference run therefore shows seeds 20–39, while an experiment
-run shows that experiment's seeds (normally 0–19). These copied previews do not
-affect selection, tables, correlations, or scientific hashes.
+`held_out_tv/` and `held_out_n/` are non-scientific visual diagnostics for,
+respectively, whole excluded TV prompts and whole excluded N prompts. They do
+not refer to the validation seeds as “held out.” Each `gallery.html` shows the
+exact prompt beside its seed-ascending generated montage. Each `manifest.csv`
+records identity, normalized category, selection reason, selection and
+validation SSCD means, seeds, source path, and hashes. A reference run therefore
+shows seeds 20–39, while an experiment run shows that experiment's seeds
+(normally 0–19). Missing or copied previews and gallery creation never affect
+selection, paired tables, correlations, or scientific hashes.
 
 ## Offline validation
 
