@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import re
 import traceback
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -41,6 +43,13 @@ from utils.metrics.sscd import (
     sscd_preprocessing_policy,
     validate_sscd_scores,
 )
+from utils.models.devices import (
+    DeviceSelectionError,
+    configure_worker_cpu_threads,
+    resolve_devices,
+    round_robin_shard,
+    worker_count_for_tasks,
+)
 
 from .cache import (
     CompletedGenerationRecord,
@@ -54,13 +63,11 @@ from .cache import (
 
 SSCD_SCHEMA_VERSION = 1
 SCORE_DEFINITION = "cosine_similarity_of_l2_normalized_sscd_descriptors"
-SSCD_SELECTION_POLICY = "all_completed_generation_records"
-# Kept exact because it is part of the supplied reference configuration hash.
-_SSCD_CONFIGURATION_RECORD_POLICY = "completed_generation_cache_records"
-_SEED_NAMESPACE = re.compile(
-    r"(?:reference|seed)_S(?P<start>\d+)_N(?P<count>\d+)\Z"
+SSCD_SELECTION_POLICY = "completed_generation_cache_records"
+_GENERATION_CACHE_NAMESPACE = re.compile(
+    r"(?:experiment|reference|seed)_S(?P<start>\d+)_N(?P<count>\d+)\Z"
 )
-_EXPERIMENT_NAMESPACE = re.compile(r"experiment_S0_N(?P<count>\d+)\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 MANIFEST_COLUMNS = (
     "original_index",
@@ -93,30 +100,34 @@ class SSCDEvaluationError(RuntimeError):
     """An SSCD cache cannot be validated or completed safely."""
 
 
-def _logical_generation_path(value: object, *, configuration: bool) -> object:
-    """Map a role-scoped physical path to its stable pre-nesting identity."""
+def _install_tqdm_lock(lock: Any) -> None:
+    """Install the one inter-process lock shared by all progress bars."""
+
+    tqdm.set_lock(lock)
+
+
+def _stable_generation_run_path(value: object, *, configuration: bool) -> object:
+    """Return the logical run identity for a current role-scoped cache path."""
 
     if not isinstance(value, str):
         return value
     path = PurePosixPath(value)
     run = path.parent if configuration else path
-    experiment = _EXPERIMENT_NAMESPACE.fullmatch(run.name)
-    seed_block = _SEED_NAMESPACE.fullmatch(run.name)
-    if experiment is not None:
+    namespace = _GENERATION_CACHE_NAMESPACE.fullmatch(run.name)
+    if namespace is None:
+        return value
+    seed_start = int(namespace.group("start"))
+    seed_count = namespace.group("count")
+    if seed_start == 0:
         logical_run = run.parent
-    elif seed_block is not None:
-        count = seed_block.group("count")
-        suffix = f"_N{count}"
+    else:
+        suffix = f"_N{seed_count}"
         parent_name = run.parent.name
         if not parent_name.endswith(suffix):
             return value
-        logical_name = (
-            parent_name[: -len(suffix)]
-            + f"_S{seed_block.group('start')}_N{count}"
+        logical_run = run.parent.with_name(
+            parent_name[: -len(suffix)] + f"_S{seed_start}_N{seed_count}"
         )
-        logical_run = run.parent.with_name(logical_name)
-    else:
-        return value
     return str(logical_run / path.name) if configuration else str(logical_run)
 
 
@@ -126,11 +137,11 @@ def sscd_configuration_hash(configuration: Mapping[str, object]) -> str:
     values = dict(configuration)
     values.pop("configuration_hash", None)
     if "generation_run_path" in values:
-        values["generation_run_path"] = _logical_generation_path(
+        values["generation_run_path"] = _stable_generation_run_path(
             values["generation_run_path"], configuration=False
         )
     if "generation_run_config_path" in values:
-        values["generation_run_config_path"] = _logical_generation_path(
+        values["generation_run_config_path"] = _stable_generation_run_path(
             values["generation_run_config_path"], configuration=True
         )
     return canonical_hash(values)
@@ -149,10 +160,6 @@ class SSCDPaths:
     @property
     def record_directory(self) -> Path:
         return self.run_directory / "sscd_record"
-
-    @property
-    def stale_directory(self) -> Path:
-        return self.run_directory / "stale" / "sscd"
 
     @property
     def traceback_directory(self) -> Path:
@@ -188,8 +195,6 @@ class SSCDPaths:
         for path in (
             self.score_directory,
             self.record_directory,
-            self.stale_directory,
-            self.traceback_directory,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -215,6 +220,13 @@ class _Runtime:
     device: torch.device
 
 
+@dataclass(frozen=True, slots=True)
+class _ShardResult:
+    rows: tuple[dict[str, object], ...]
+    failures: tuple[dict[str, object], ...]
+    newly_computed: int
+
+
 def run_sscd(
     root: str | Path,
     *,
@@ -223,7 +235,8 @@ def run_sscd(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
-    seed_start: int = 0,
+    seed_start: int,
+    device: str | torch.device,
 ) -> SSCDResult:
     """Score every completed record, reusing valid per-prompt score tensors."""
 
@@ -232,6 +245,10 @@ def run_sscd(
     try:
         seed_start, num_seeds = validate_seed_block(seed_start, num_seeds)
     except ValueError as error:
+        raise SSCDEvaluationError(str(error)) from error
+    try:
+        devices = resolve_devices(device)
+    except DeviceSelectionError as error:
         raise SSCDEvaluationError(str(error)) from error
     generation = generation_paths(
         project,
@@ -253,6 +270,10 @@ def run_sscd(
         seed_start,
     )
     records = list_completed_records(generation)
+    if not records:
+        raise SSCDEvaluationError(
+            f"generation run has no completed records: {generation.record_directory}"
+        )
     paths = SSCDPaths(generation.run_directory)
     paths.create()
     configuration = _load_or_create_configuration(
@@ -262,80 +283,403 @@ def run_sscd(
 
     rows: list[dict[str, object]] = []
     failures: list[dict[str, object]] = []
-    runtime: _Runtime | None = None
-    newly_computed = 0
-    for record in tqdm(
+    pending: list[CompletedGenerationRecord] = []
+    validation_progress = tqdm(
         records,
         total=len(records),
-        desc="[SSCD] Scoring prompts",
+        desc="[SSCD] Validating cache",
         unit="prompt",
         dynamic_ncols=True,
         leave=True,
         disable=False,
-    ):
+    )
+    for record in validation_progress:
+        status = "validating"
+        validation_progress.set_postfix(
+            id=record.original_index,
+            status=status,
+            resumed=len(rows),
+            pending=len(pending),
+            failed=len(failures),
+        )
         try:
-            generation_validation = validate_generation_record(
+            scores = _validated_cached_scores(
                 generation,
-                record.original_index,
-                expected_scientific_hash=str(
-                    run_configuration["scientific_config_hash"]
-                ),
-                load_tensors=False,
+                paths,
+                record,
+                run_configuration,
+                configuration_hash,
+                seed_values,
             )
-            if not generation_validation.valid:
-                raise SSCDEvaluationError(
-                    "invalid completed generation record: "
-                    + "; ".join(generation_validation.errors)
-                )
-            if (
-                record.metadata.get("num_seeds") != len(seed_values)
-                or record.metadata.get("seeds") != list(seed_values)
-            ):
-                raise SSCDEvaluationError(
-                    "generation record seed block differs from generation configuration"
-                )
-            scores = _load_cached_scores(
-                paths, generation, record, configuration_hash, seed_values
-            )
-            status = "resumed"
             if scores is None:
-                runtime = runtime or _load_runtime(project, run_configuration, configuration)
-                scores = _compute_record_scores(
-                    project, generation, paths, record, runtime, configuration, seed_values
+                pending.append(record)
+                status = "pending"
+            else:
+                rows.append(
+                    _manifest_row(
+                        project, record, scores, paths, configuration, "resumed"
+                    )
                 )
-                newly_computed += 1
-                status = "computed"
-            rows.append(_manifest_row(project, record, scores, paths, configuration, status))
+                status = "resumed"
         except Exception as error:
-            trace_path = paths.traceback_directory / f"{record.original_index}.txt"
-            atomic_write_text(trace_path, traceback.format_exc())
             failures.append(
-                {
-                    "original_index": record.original_index,
-                    "record_id": record.metadata.get("record_id"),
-                    "source_row_number": record.source_row_number,
-                    "webster_overfit_type": record.metadata.get("webster_overfit_type"),
-                    "exception_type": type(error).__name__,
-                    "exception_message": str(error),
-                    "traceback_path": _relative(trace_path, project),
-                }
+                _failure_row(project, paths, record, error, traceback.format_exc())
+            )
+            status = "error"
+        finally:
+            validation_progress.set_postfix(
+                id=record.original_index,
+                status=status,
+                resumed=len(rows),
+                pending=len(pending),
+                failed=len(failures),
+                refresh=False,
             )
 
+    computed = _compute_pending_records(
+        project,
+        generation,
+        paths,
+        tuple(pending),
+        run_configuration,
+        configuration,
+        seed_values,
+        devices,
+    )
+    rows.extend(computed.rows)
+    failures.extend(computed.failures)
+    newly_computed = computed.newly_computed
+
     manifest = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
+    if not manifest.empty:
+        manifest = manifest.sort_values(
+            ["source_row_number", "original_index"], kind="stable"
+        ).reset_index(drop=True)
     failure_columns = (
-        "original_index", "record_id", "source_row_number", "webster_overfit_type",
-        "exception_type", "exception_message", "traceback_path",
+        "original_index",
+        "record_id",
+        "source_row_number",
+        "webster_overfit_type",
+        "exception_type",
+        "exception_message",
+        "traceback_path",
     )
     failed = pd.DataFrame(failures, columns=failure_columns)
+    if not failed.empty:
+        failed = failed.sort_values(
+            ["source_row_number", "original_index"], kind="stable"
+        ).reset_index(drop=True)
     atomic_write_frame_parquet(manifest, paths.manifest_parquet)
     atomic_write_frame_csv(manifest, paths.manifest_csv)
     atomic_write_frame_csv(failed, paths.failed_csv)
     summary = _summary(
-        project, generation, paths, manifest, failures, configuration,
-        len(records), newly_computed, started,
+        project,
+        generation,
+        paths,
+        manifest,
+        failures,
+        configuration,
+        len(records),
+        newly_computed,
+        started,
+    )
+    worker_count = worker_count_for_tasks(devices, len(pending))
+    summary.update(
+        {
+            "requested_device": str(device),
+            "execution_devices": [str(selected) for selected in devices[:worker_count]],
+            "worker_count": worker_count,
+        }
     )
     atomic_write_json(paths.summary_json, summary)
     return SSCDResult(paths.summary_json, len(rows), len(failures))
+
+
+def _validated_cached_scores(
+    generation: GenerationPaths,
+    paths: SSCDPaths,
+    record: CompletedGenerationRecord,
+    run_configuration: Mapping[str, Any],
+    configuration_hash: str,
+    seed_values: Sequence[int],
+) -> torch.Tensor | None:
+    generation_validation = validate_generation_record(
+        generation,
+        record.original_index,
+        expected_scientific_hash=str(run_configuration["scientific_config_hash"]),
+        expected_record_identity=_generation_record_identity(record),
+        load_tensors=False,
+        tensor_names=("latent",),
+        require_preview=False,
+        verify_file_hashes=False,
+    )
+    if not generation_validation.valid:
+        raise SSCDEvaluationError(
+            "invalid completed generation record: "
+            + "; ".join(generation_validation.errors)
+        )
+    if record.metadata.get("num_seeds") != len(seed_values) or record.metadata.get(
+        "seeds"
+    ) != list(seed_values):
+        raise SSCDEvaluationError(
+            "generation record seed block differs from generation configuration"
+        )
+    return _load_cached_scores(paths, record, configuration_hash, seed_values)
+
+
+def _compute_pending_records(
+    project: Path,
+    generation: GenerationPaths,
+    paths: SSCDPaths,
+    records: Sequence[CompletedGenerationRecord],
+    run_configuration: Mapping[str, Any],
+    configuration: Mapping[str, Any],
+    seed_values: Sequence[int],
+    devices: Sequence[torch.device],
+) -> _ShardResult:
+    if not records:
+        return _ShardResult((), (), 0)
+    worker_count = worker_count_for_tasks(devices, len(records))
+    active_devices = tuple(devices[:worker_count])
+    shards = tuple(
+        round_robin_shard(
+            records,
+            worker_index=worker_index,
+            worker_count=worker_count,
+        )
+        for worker_index in range(worker_count)
+    )
+    if worker_count == 1:
+        return _score_record_shard(
+            project,
+            generation,
+            paths,
+            shards[0],
+            run_configuration,
+            configuration,
+            tuple(seed_values),
+            active_devices[0],
+            0,
+            worker_count,
+        )
+    if not all(selected.type == "cuda" for selected in active_devices):
+        raise SSCDEvaluationError("multiple SSCD workers require concrete CUDA devices")
+
+    print(
+        "SSCD worker plan: "
+        + "; ".join(
+            f"{selected}={len(shard)} pending prompt(s)"
+            for selected, shard in zip(active_devices, shards, strict=True)
+        )
+        + "."
+    )
+
+    context = multiprocessing.get_context("spawn")
+    progress_lock = context.RLock()
+    tqdm.set_lock(progress_lock)
+    futures: list[tuple[torch.device, Any]] = []
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=context,
+        initializer=_install_tqdm_lock,
+        initargs=(progress_lock,),
+    ) as executor:
+        for worker_index, (selected, shard) in enumerate(
+            zip(active_devices, shards, strict=True)
+        ):
+            future = executor.submit(
+                _score_record_shard,
+                project,
+                generation,
+                paths,
+                shard,
+                run_configuration,
+                configuration,
+                tuple(seed_values),
+                selected,
+                worker_index,
+                worker_count,
+            )
+            futures.append((selected, future))
+
+        results: list[_ShardResult] = []
+        for selected, future in futures:
+            try:
+                results.append(future.result())
+            except Exception as error:
+                raise SSCDEvaluationError(
+                    f"SSCD worker on {selected} failed: {error}"
+                ) from error
+
+    rows = sorted(
+        (row for result in results for row in result.rows),
+        key=lambda row: (row["source_row_number"], str(row["original_index"])),
+    )
+    failures = sorted(
+        (failure for result in results for failure in result.failures),
+        key=lambda row: (row["source_row_number"], str(row["original_index"])),
+    )
+    return _ShardResult(
+        tuple(rows),
+        tuple(failures),
+        sum(result.newly_computed for result in results),
+    )
+
+
+def _score_record_shard(
+    project: Path,
+    generation: GenerationPaths,
+    paths: SSCDPaths,
+    records: Sequence[CompletedGenerationRecord],
+    run_configuration: Mapping[str, Any],
+    configuration: Mapping[str, Any],
+    seed_values: Sequence[int],
+    device: torch.device,
+    progress_position: int,
+    worker_count: int,
+) -> _ShardResult:
+    configure_worker_cpu_threads(worker_count)
+    rows: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
+    runtime: _Runtime | None = None
+    runtime_failure: Exception | None = None
+    newly_computed = 0
+    progress = tqdm(
+        records,
+        total=len(records),
+        desc=(
+            f"[SSCD {device} shard {progress_position + 1}/{worker_count}] "
+            "Computing prompts"
+        ),
+        unit="prompt",
+        dynamic_ncols=True,
+        leave=True,
+        disable=False,
+        position=progress_position,
+    )
+    for record in progress:
+        status = "validating-latent"
+        progress.set_postfix(
+            id=record.original_index,
+            status=status,
+            completed=newly_computed,
+            failed=len(failures),
+        )
+        try:
+            _validate_generation_latent(
+                generation,
+                record,
+                run_configuration,
+            )
+            if runtime is None:
+                if runtime_failure is not None:
+                    raise SSCDEvaluationError(
+                        f"model runtime is unavailable on {device}: {runtime_failure}"
+                    ) from runtime_failure
+                try:
+                    runtime = _load_runtime(
+                        project, run_configuration, configuration, device
+                    )
+                except Exception as error:
+                    runtime_failure = error
+                    raise
+            status = "scoring"
+            progress.set_postfix(
+                id=record.original_index,
+                status=status,
+                completed=newly_computed,
+                failed=len(failures),
+            )
+            scores = _compute_record_scores(
+                project,
+                generation,
+                paths,
+                record,
+                runtime,
+                configuration,
+                seed_values,
+            )
+            newly_computed += 1
+            rows.append(
+                _manifest_row(project, record, scores, paths, configuration, "computed")
+            )
+            status = "computed"
+        except Exception as error:
+            failures.append(
+                _failure_row(project, paths, record, error, traceback.format_exc())
+            )
+            status = "error"
+        finally:
+            progress.set_postfix(
+                id=record.original_index,
+                status=status,
+                completed=newly_computed,
+                failed=len(failures),
+                refresh=False,
+            )
+    return _ShardResult(tuple(rows), tuple(failures), newly_computed)
+
+
+def _generation_record_identity(
+    record: CompletedGenerationRecord,
+) -> dict[str, object]:
+    return {
+        "record_id": record.metadata.get("record_id"),
+        "source_row_number": record.source_row_number,
+        "prompt_raw": record.metadata.get("prompt_raw"),
+        "target_image_sha256": record.metadata.get("target_image_sha256"),
+    }
+
+
+def _validate_generation_latent(
+    generation: GenerationPaths,
+    record: CompletedGenerationRecord,
+    run_configuration: Mapping[str, Any],
+) -> None:
+    """Physically verify only the generation artifact consumed by SSCD."""
+
+    validation = validate_generation_record(
+        generation,
+        record.original_index,
+        expected_scientific_hash=str(run_configuration["scientific_config_hash"]),
+        expected_record_identity=_generation_record_identity(record),
+        load_tensors=False,
+        tensor_names=("latent",),
+        require_preview=False,
+        verify_file_hashes=True,
+    )
+    if not validation.valid:
+        raise SSCDEvaluationError(
+            "invalid generation latent for SSCD: " + "; ".join(validation.errors)
+        )
+
+
+def _generation_latent_sha256(record: CompletedGenerationRecord) -> str:
+    hashes = record.metadata.get("tensor_file_sha256")
+    digest = hashes.get("latent") if isinstance(hashes, Mapping) else None
+    if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+        raise SSCDEvaluationError("generation latent SHA-256 is missing or invalid")
+    return digest
+
+
+def _failure_row(
+    project: Path,
+    paths: SSCDPaths,
+    record: CompletedGenerationRecord,
+    error: Exception,
+    formatted_traceback: str,
+) -> dict[str, object]:
+    trace_path = paths.traceback_directory / f"{record.original_index}.txt"
+    atomic_write_text(trace_path, formatted_traceback)
+    return {
+        "original_index": record.original_index,
+        "record_id": record.metadata.get("record_id"),
+        "source_row_number": record.source_row_number,
+        "webster_overfit_type": record.metadata.get("webster_overfit_type"),
+        "exception_type": type(error).__name__,
+        "exception_message": str(error),
+        "traceback_path": _relative(trace_path, project),
+    }
 
 
 def _load_or_create_configuration(
@@ -358,7 +702,7 @@ def _load_or_create_configuration(
             "generation_run_path": _relative(generation.run_directory, project),
             "generation_run_config_path": _relative(generation.run_config, project),
             "generation_scientific_config_hash": run["scientific_config_hash"],
-            "selection_policy": _SSCD_CONFIGURATION_RECORD_POLICY,
+            "selection_policy": SSCD_SELECTION_POLICY,
             "num_seeds": num_seeds,
             "seeds": list(seed_values),
             "terminal_latent_index": -1,
@@ -386,8 +730,7 @@ def _load_or_create_configuration(
             "sscd_preprocessing_hash": sscd_preprocessing_hash(),
         }
         wrong = [
-            key for key, value in expected.items()
-            if configuration.get(key) != value
+            key for key, value in expected.items() if configuration.get(key) != value
         ]
         checkpoint_hash = configuration.get("sscd_checkpoint_sha256")
         if not (
@@ -398,8 +741,7 @@ def _load_or_create_configuration(
             wrong.append("sscd_checkpoint_sha256")
         if wrong:
             raise SSCDEvaluationError(
-                "existing SSCD scientific contract differs at: "
-                + ", ".join(wrong)
+                "existing SSCD scientific contract differs at: " + ", ".join(wrong)
             )
         return configuration
 
@@ -409,7 +751,7 @@ def _load_or_create_configuration(
         "generation_run_path": _relative(generation.run_directory, project),
         "generation_run_config_path": _relative(generation.run_config, project),
         "generation_scientific_config_hash": run["scientific_config_hash"],
-        "selection_policy": _SSCD_CONFIGURATION_RECORD_POLICY,
+        "selection_policy": SSCD_SELECTION_POLICY,
         "num_seeds": num_seeds,
         "seeds": list(seed_values),
         "terminal_latent_index": -1,
@@ -420,8 +762,11 @@ def _load_or_create_configuration(
         "decode_dtype": "float32",
         "score_definition": SCORE_DEFINITION,
         "score_tensor_schema": {
-            "shape": ["num_seeds"], "dtype": "float32", "device": "cpu",
-            "contiguous": True, "order": score_order,
+            "shape": ["num_seeds"],
+            "dtype": "float32",
+            "device": "cpu",
+            "contiguous": True,
+            "order": score_order,
         },
         "duplicates_images_or_features": False,
         "feature_normalization": "explicit_l2_p2_dim1",
@@ -441,7 +786,6 @@ def _load_or_create_configuration(
 
 def _load_cached_scores(
     paths: SSCDPaths,
-    generation: GenerationPaths,
     record: CompletedGenerationRecord,
     configuration_hash: str,
     seed_values: Sequence[int],
@@ -465,9 +809,7 @@ def _load_cached_scores(
         "seeds": list(seed_values),
         "sscd_configuration_hash": configuration_hash,
         "generation_record_sha256": file_sha256(record.marker_path),
-        "generation_latent_sha256": file_sha256(
-            generation.latent_path(record.original_index)
-        ),
+        "generation_latent_sha256": _generation_latent_sha256(record),
     }
     for key, value in expected.items():
         if marker.get(key) != value:
@@ -475,7 +817,9 @@ def _load_cached_scores(
                 f"cached SSCD {key} differs for {record.original_index}"
             )
     if marker.get("score_sha256") != file_sha256(score_path):
-        raise SSCDEvaluationError(f"cached SSCD hash differs for {record.original_index}")
+        raise SSCDEvaluationError(
+            f"cached SSCD hash differs for {record.original_index}"
+        )
     try:
         scores = safe_torch_load(score_path)
     except CacheIOError as error:
@@ -487,10 +831,16 @@ def _load_runtime(
     project: Path,
     run_configuration: Mapping[str, Any],
     configuration: Mapping[str, Any],
+    device: torch.device,
 ) -> _Runtime:
     from utils.models.loading import load_vae_from_generation_config, select_runtime
 
-    selected = select_runtime()
+    concrete_device = torch.device(device)
+    if concrete_device.type == "cuda":
+        if concrete_device.index is None:
+            raise SSCDEvaluationError("worker CUDA device must have a concrete index")
+        torch.cuda.set_device(concrete_device)
+    selected = select_runtime(concrete_device)
     checkpoint_path = project / str(configuration["sscd_checkpoint_path"])
     checkpoint = SSCDCheckpoint(
         SSCD_MODEL_NAME,
@@ -499,9 +849,7 @@ def _load_runtime(
         str(configuration["sscd_checkpoint_sha256"]),
     )
     descriptor = load_sscd_model(checkpoint, selected.device)
-    loaded = load_vae_from_generation_config(
-        run_configuration, runtime=selected
-    )
+    loaded = load_vae_from_generation_config(run_configuration, runtime=selected)
     return _Runtime(checkpoint, descriptor, loaded.vae, selected.device)
 
 
@@ -560,9 +908,7 @@ def _compute_record_scores(
         "generation_record_path": str(record.marker_path),
         "generation_record_sha256": file_sha256(record.marker_path),
         "generation_latent_path": str(generation.latent_path(record.original_index)),
-        "generation_latent_sha256": file_sha256(
-            generation.latent_path(record.original_index)
-        ),
+        "generation_latent_sha256": _generation_latent_sha256(record),
         "generation_scientific_config_hash": record.metadata.get(
             "scientific_config_hash"
         ),
@@ -683,8 +1029,13 @@ def _summary(
 
 
 def _validate_invocation(
-    run: Mapping[str, Any], model: str, scheduler: str, guidance: float,
-    steps: int, seeds: int, seed_start: int,
+    run: Mapping[str, Any],
+    model: str,
+    scheduler: str,
+    guidance: float,
+    steps: int,
+    seeds: int,
+    seed_start: int,
 ) -> tuple[int, ...]:
     science = _science(run)
     expected = {
@@ -697,7 +1048,9 @@ def _validate_invocation(
         if science.get(key) != value:
             raise SSCDEvaluationError(f"generation {key} differs")
     scheduler_value = science.get("scheduler")
-    observed = scheduler_value.get("name") if isinstance(scheduler_value, Mapping) else None
+    observed = (
+        scheduler_value.get("name") if isinstance(scheduler_value, Mapping) else None
+    )
     if observed != scheduler:
         raise SSCDEvaluationError("generation scheduler differs")
     expected_seeds = tuple(range(seed_start, seed_start + seeds))
@@ -705,7 +1058,10 @@ def _validate_invocation(
     if (
         isinstance(observed_seeds, (str, bytes))
         or not isinstance(observed_seeds, Sequence)
-        or any(isinstance(value, bool) or not isinstance(value, int) for value in observed_seeds)
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in observed_seeds
+        )
     ):
         raise SSCDEvaluationError("generation seeds are invalid")
     seed_values = tuple(observed_seeds)

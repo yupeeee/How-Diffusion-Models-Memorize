@@ -1431,16 +1431,16 @@ def test_terminal_status_cannot_be_silently_reopened(tmp_path: Path) -> None:
             state.set_status("sdv1-0000", RecoveryStatus.PENDING)
 
 
-def test_old_or_partial_database_is_rejected_without_migration(tmp_path: Path) -> None:
+def test_incomplete_database_is_rejected(tmp_path: Path) -> None:
     paths = WebsterPaths.from_root(tmp_path)
     paths.state.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(paths.database) as connection:
         connection.execute("CREATE TABLE records(record_id TEXT PRIMARY KEY)")
-    with pytest.raises(StateSchemaError, match="current schema v2"):
+    with pytest.raises(StateSchemaError, match="current recovery schema"):
         RecoveryState(paths)
 
 
-def test_final_state_module_defines_no_migration_function() -> None:
+def test_state_module_defines_no_migration_function() -> None:
     source_path = Path(__file__).resolve().parents[1] / "utils/data/state.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     names = {
@@ -1633,12 +1633,12 @@ def test_arquivo_outage_breaker_is_cache_first_and_defers_after_three(
         )
 
 
-def test_legacy_unresolved_record_reopens_once_for_new_mirror_stage(
+def test_unresolved_record_reopens_once_for_updated_mirror_strategy(
     tmp_path: Path,
 ) -> None:
     manifest = _manifest()
     paths = WebsterPaths.from_root(tmp_path)
-    old_stages = (
+    completed_stages = (
         RecoveryStage.EXACT_REUSE,
         RecoveryStage.OFFICIAL_ASSETS,
         RecoveryStage.DIRECT,
@@ -1671,12 +1671,12 @@ def test_legacy_unresolved_record_reopens_once_for_new_mirror_stage(
 
     with RecoveryState(paths) as state:
         state.initialize_records(manifest)
-        for stage in old_stages:
+        for stage in completed_stages:
             state.begin_stage("sdv1-0000", stage)
             state.finish_stage(
                 "sdv1-0000",
                 stage,
-                StageResult(StageOutcome.MISS, "legacy miss"),
+                StageResult(StageOutcome.MISS, "completed miss"),
             )
         state.begin_stage(
             "sdv1-0000", RecoveryStage.FINAL_RESOLUTION
@@ -1684,12 +1684,12 @@ def test_legacy_unresolved_record_reopens_once_for_new_mirror_stage(
         state.set_status(
             "sdv1-0000",
             RecoveryStatus.UNRESOLVED,
-            reason="legacy sources exhausted",
+            reason="sources exhausted before strategy update",
         )
         state.finish_stage(
             "sdv1-0000",
             RecoveryStage.FINAL_RESOLUTION,
-            StageResult(StageOutcome.MISS, "legacy sources exhausted"),
+            StageResult(StageOutcome.MISS, "sources exhausted before strategy update"),
         )
 
         recovery_module.RecoveryEngine(
@@ -1730,7 +1730,7 @@ def test_legacy_unresolved_record_reopens_once_for_new_mirror_stage(
         assert arquivo_calls == []
 
 
-def test_legacy_unresolved_reactivation_rejects_partial_or_wrong_stage(
+def test_updated_strategy_reactivation_rejects_incomplete_or_wrong_stage(
     tmp_path: Path,
 ) -> None:
     paths = WebsterPaths.from_root(tmp_path)
@@ -1739,7 +1739,7 @@ def test_legacy_unresolved_reactivation_rejects_partial_or_wrong_stage(
         state.set_status(
             "sdv1-0000",
             RecoveryStatus.UNRESOLVED,
-            reason="partial legacy state",
+            reason="incomplete strategy state",
         )
 
         assert not state.reactivate_unresolved_for_stage(
@@ -1765,7 +1765,7 @@ def test_arquivo_strategy_version_bump_retries_only_prior_unresolved_miss(
 ) -> None:
     manifest = _manifest()
     paths = WebsterPaths.from_root(tmp_path)
-    old_source_stages = (
+    completed_source_stages = (
         RecoveryStage.EXACT_REUSE,
         RecoveryStage.OFFICIAL_ASSETS,
         RecoveryStage.DIRECT,
@@ -1787,18 +1787,18 @@ def test_arquivo_strategy_version_bump_retries_only_prior_unresolved_miss(
 
     with RecoveryState(paths) as state:
         state.initialize_records(manifest)
-        for stage in old_source_stages:
+        for stage in completed_source_stages:
             state.begin_stage("sdv1-0000", stage)
             state.finish_stage(
                 "sdv1-0000",
                 stage,
-                StageResult(StageOutcome.MISS, "old miss"),
+                StageResult(StageOutcome.MISS, "completed miss"),
             )
         state.begin_stage("sdv1-0000", RecoveryStage.ARQUIVO)
         state.finish_stage(
             "sdv1-0000",
             RecoveryStage.ARQUIVO,
-            StageResult(StageOutcome.MISS, "strategy v1 miss"),
+            StageResult(StageOutcome.MISS, "previous strategy miss"),
         )
         state.begin_stage(
             "sdv1-0000", RecoveryStage.FINAL_RESOLUTION
@@ -1806,12 +1806,12 @@ def test_arquivo_strategy_version_bump_retries_only_prior_unresolved_miss(
         state.set_status(
             "sdv1-0000",
             RecoveryStatus.UNRESOLVED,
-            reason="all v1 sources exhausted",
+            reason="sources exhausted before strategy update",
         )
         state.finish_stage(
             "sdv1-0000",
             RecoveryStage.FINAL_RESOLUTION,
-            StageResult(StageOutcome.MISS, "all v1 sources exhausted"),
+            StageResult(StageOutcome.MISS, "sources exhausted before strategy update"),
         )
         state.set_run_metadata("arquivo_strategy_version", 1)
         state.set_run_metadata(
@@ -1835,8 +1835,8 @@ def test_arquivo_strategy_version_bump_retries_only_prior_unresolved_miss(
         )
         assert all(
             state.stage_result("sdv1-0000", stage).message
-            == "old miss"
-            for stage in old_source_stages
+            == "completed miss"
+            for stage in completed_source_stages
         )
         assert (
             state.stage_result(

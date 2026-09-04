@@ -9,9 +9,11 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import torch
 from PIL import Image
 
-from utils.common.io import CacheIOError, atomic_copy
+from utils.common import io as common_io
+from utils.common.io import CacheIOError, atomic_copy, atomic_torch_save
 from utils.data.images import normalized_png_bytes, validate_image_bytes
 from utils.data.webster import (
     DownloadError,
@@ -87,8 +89,60 @@ def test_original_indices_are_stable_filename_components() -> None:
 
 
 @pytest.mark.parametrize(
+    "payload",
+    (
+        torch.arange(12, dtype=torch.float32).reshape(3, 4),
+        {
+            "first": torch.tensor([1, 2, 3], dtype=torch.int64),
+            "nested": (torch.zeros(2), torch.ones(2)),
+        },
+    ),
+)
+def test_atomic_torch_save_hashes_the_persisted_stream_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
+) -> None:
+    destination = tmp_path / "payload.pt"
+
+    def forbidden_reread(_path: object) -> str:
+        raise AssertionError("atomic_torch_save must not reread its output")
+
+    monkeypatch.setattr(common_io, "file_sha256", forbidden_reread)
+    observed = atomic_torch_save(payload, destination)
+
+    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    assert observed == digest
+    assert len(observed) == 64
+
+
+def test_atomic_torch_save_failure_preserves_destination_and_removes_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "payload.pt"
+    destination.write_bytes(b"existing")
+
+    def partial_failure(_value: object, handle: object) -> None:
+        handle.write(b"partial")  # type: ignore[attr-defined]
+        raise RuntimeError("synthetic save failure")
+
+    monkeypatch.setattr(common_io.torch, "save", partial_failure)
+    with pytest.raises(RuntimeError, match="synthetic save failure"):
+        atomic_torch_save(torch.ones(1), destination)
+
+    assert destination.read_bytes() == b"existing"
+    assert tuple(tmp_path.iterdir()) == (destination,)
+
+
+@pytest.mark.parametrize(
     ("raw", "expected"),
-    [("template-verbatim", "TV"), (" memorized ", "MV"), ("normal", "N"), (None, "UNKNOWN")],
+    [
+        ("template-verbatim", "TV"),
+        (" memorized ", "MV"),
+        ("normal", "N"),
+        (None, "UNKNOWN"),
+    ],
 )
 def test_webster_labels_are_normalized_without_selection(
     raw: object, expected: str

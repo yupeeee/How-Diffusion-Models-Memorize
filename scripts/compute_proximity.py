@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Compute terminal latent proximity from local caches only.",
         allow_abbrev=False,
     )
-    return add_run_arguments(parser)
+    return add_run_arguments(parser, include_device=False)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -40,49 +40,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed_start=arguments.seed_start,
     )
     print(f"Summary: {summary.paths.summary_json}")
-    if summary.exit_code == 0:
-        from utils.experiments.held_out import (
-            HeldOutNExportError,
-            HeldOutTVExportError,
-            export_held_out_n_results,
-            export_held_out_tv_results,
-        )
-
-        exporters = (
-            ("TV", "held_out_tv", export_held_out_tv_results),
-            ("N", "held_out_n", export_held_out_n_results),
-        )
-        gallery_failed = False
-        for category, directory_name, export_results in exporters:
-            try:
-                held_out = export_results(
-                    PROJECT_ROOT,
-                    model_name=arguments.model,
-                    generation_run=summary.paths.generation_run,
-                    output_directory=summary.paths.output_directory,
-                )
-            except (HeldOutTVExportError, HeldOutNExportError) as error:
-                print(
-                    f"Held-out {category} gallery failed after scientific "
-                    f"proximity completed: {error}",
-                    file=sys.stderr,
-                )
-                gallery_failed = True
-                continue
-            action = "Reused" if held_out.reused else "Saved"
-            print(
-                f"{action} {held_out.prompt_count}/{held_out.total_prompt_count} "
-                f"held-out {category} prompt previews: {held_out.gallery_path}"
-            )
-            if held_out.missing_prompt_count:
-                print(
-                    f"Warning: {held_out.missing_prompt_count} frozen held-out "
-                    f"{category} prompt(s) had no generation in this run; see "
-                    f"{directory_name}/config.json.",
-                    file=sys.stderr,
-                )
-        if gallery_failed:
-            return 1
     return summary.exit_code
 
 

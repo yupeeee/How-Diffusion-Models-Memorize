@@ -57,7 +57,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--per-host-concurrency",
-        "--per-host",
         type=_bounded_integer(1, MAX_PER_HOST_CONCURRENCY),
         default=DEFAULT_PER_HOST_CONCURRENCY,
         help=(
@@ -83,7 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as error:
         print(f"Webster recovery failed: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
-    return int(getattr(result, "exit_code", 0))
+    return int(result.exit_code)
 
 
 if __name__ == "__main__":

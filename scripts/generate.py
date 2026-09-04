@@ -40,6 +40,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_seeds=arguments.N,
         seed_start=arguments.seed_start,
         downscale=arguments.downscale,
+        device=arguments.device,
     )
     print(f"Summary: {result.summary_path}")
     if result.completed_rows < 1:

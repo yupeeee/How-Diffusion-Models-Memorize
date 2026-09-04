@@ -29,6 +29,7 @@ from utils.common.io import (
 GENERATION_SCHEMA_VERSION = 1
 SAMPLER_CONTRACT_VERSION = 2
 GENERATION_SELECTION_POLICY = "all_available_canonical_pairs_label_independent"
+GENERATION_TENSOR_NAMES = ("latent", "noise_prediction", "target_latent")
 
 
 class GenerationCacheError(RuntimeError):
@@ -104,8 +105,6 @@ class GenerationPaths:
             self.noise_prediction_directory,
             self.target_latent_directory,
             self.record_directory,
-            self.stale_directory,
-            self.traceback_directory,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -159,7 +158,9 @@ class DiskEstimate:
 
     @property
     def sufficient(self) -> bool:
-        return self.free_bytes >= self.estimated_remaining_bytes + self.safety_margin_bytes
+        return (
+            self.free_bytes >= self.estimated_remaining_bytes + self.safety_margin_bytes
+        )
 
 
 def generation_log_relative_path(
@@ -169,7 +170,7 @@ def generation_log_relative_path(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
-    seed_start: int = 0,
+    seed_start: int,
 ) -> Path:
     """Resolve one role-scoped generation cache path relative to the project."""
 
@@ -199,7 +200,7 @@ def generation_paths(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
-    seed_start: int = 0,
+    seed_start: int,
 ) -> GenerationPaths:
     """Resolve one generation run beneath ``logs``."""
 
@@ -218,7 +219,7 @@ def generation_paths(
 def require_generation_run(paths: GenerationPaths) -> dict[str, Any]:
     """Load the immutable generation configuration or raise a useful error."""
 
-    if not paths.run_config.is_file():
+    if not paths.run_config.is_file() or paths.run_config.is_symlink():
         raise GenerationCacheError(f"generation run is missing: {paths.run_directory}")
     try:
         configuration = read_json(paths.run_config)
@@ -262,7 +263,9 @@ def list_completed_records(paths: GenerationPaths) -> list[CompletedGenerationRe
         seen_indices.add(index)
         seen_rows.add(row)
         records.append(CompletedGenerationRecord(index, row, marker, metadata))
-    return sorted(records, key=lambda item: (item.source_row_number, item.original_index))
+    return sorted(
+        records, key=lambda item: (item.source_row_number, item.original_index)
+    )
 
 
 def validate_generation_record(
@@ -272,9 +275,13 @@ def validate_generation_record(
     expected_scientific_hash: str | None = None,
     expected_record_identity: Mapping[str, object] | None = None,
     load_tensors: bool = True,
+    tensor_names: Sequence[str] = GENERATION_TENSOR_NAMES,
+    require_preview: bool = True,
+    verify_file_hashes: bool = True,
 ) -> CacheValidation:
-    """Validate a completion marker and all scientific tensor identities."""
+    """Validate a completion marker and the requested cached artifacts."""
 
+    selected_tensor_names = _validated_tensor_names(tensor_names)
     original_index = safe_index(index)
     marker = paths.record_path(original_index)
     if not marker.is_file() or marker.is_symlink():
@@ -283,7 +290,9 @@ def validate_generation_record(
         metadata = read_json(marker)
     except CacheIOError as error:
         return CacheValidation(False, (str(error),))
-    errors = _validate_record_metadata(metadata, original_index, expected_scientific_hash)
+    errors = _validate_record_metadata(
+        metadata, original_index, expected_scientific_hash
+    )
     if expected_record_identity is not None:
         for key in (
             "record_id",
@@ -299,14 +308,17 @@ def validate_generation_record(
         "target_latent": paths.target_latent_path(original_index),
     }
     expected_hashes = metadata.get("tensor_file_sha256")
-    for name, tensor_path in tensor_paths.items():
+    for name in selected_tensor_names:
+        tensor_path = tensor_paths[name]
         if not tensor_path.is_file() or tensor_path.is_symlink():
             errors.append(f"{name} file is missing")
             continue
         expected_hash = (
             expected_hashes.get(name) if isinstance(expected_hashes, Mapping) else None
         )
-        if not _is_sha256(expected_hash) or file_sha256(tensor_path) != expected_hash:
+        if not _is_sha256(expected_hash) or (
+            verify_file_hashes and file_sha256(tensor_path) != expected_hash
+        ):
             errors.append(f"{name} SHA-256 differs")
             continue
         if load_tensors:
@@ -315,12 +327,15 @@ def validate_generation_record(
                 errors.extend(_validate_tensor_schema(name, payload, metadata))
             except CacheIOError as error:
                 errors.append(str(error))
-    preview = paths.image_path(original_index)
-    expected_preview = metadata.get("preview_image_sha256")
-    if not preview.is_file() or preview.is_symlink():
-        errors.append("preview image is missing")
-    elif not _is_sha256(expected_preview) or file_sha256(preview) != expected_preview:
-        errors.append("preview image SHA-256 differs")
+    if require_preview:
+        preview = paths.image_path(original_index)
+        expected_preview = metadata.get("preview_image_sha256")
+        if not preview.is_file() or preview.is_symlink():
+            errors.append("preview image is missing")
+        elif not _is_sha256(expected_preview) or (
+            verify_file_hashes and file_sha256(preview) != expected_preview
+        ):
+            errors.append("preview image SHA-256 differs")
     return CacheValidation(not errors, tuple(errors), metadata)
 
 
@@ -396,7 +411,9 @@ def estimate_disk_space(
     paths.run_directory.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(paths.run_directory).free
     margin = max(1024**3, int(remaining * 0.05))
-    return DiskEstimate(max(0, int(remaining_records)), per_record, remaining, margin, free)
+    return DiskEstimate(
+        max(0, int(remaining_records)), per_record, remaining, margin, free
+    )
 
 
 def quarantine_record(paths: GenerationPaths, index: object) -> tuple[Path, ...]:
@@ -429,7 +446,11 @@ def quarantine_record(paths: GenerationPaths, index: object) -> tuple[Path, ...]
 def safe_index(value: object) -> str:
     """Validate an original index before using it as a filename component."""
 
-    text = str(value) if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+    text = (
+        str(value)
+        if isinstance(value, (str, int)) and not isinstance(value, bool)
+        else ""
+    )
     if not text or text in {".", ".."} or Path(text).name != text:
         raise GenerationCacheError(f"unsafe original index: {value!r}")
     if "/" in text or "\\" in text or "\x00" in text:
@@ -449,7 +470,10 @@ def _validate_record_metadata(
         errors.append("sampler contract differs")
     if metadata.get("selection_policy") != GENERATION_SELECTION_POLICY:
         errors.append("generation selection policy differs")
-    if science_hash is not None and metadata.get("scientific_config_hash") != science_hash:
+    if (
+        science_hash is not None
+        and metadata.get("scientific_config_hash") != science_hash
+    ):
         errors.append("scientific configuration hash differs")
     return errors
 
@@ -485,9 +509,31 @@ def _validate_tensor_schema(
     return errors
 
 
+def _validated_tensor_names(tensor_names: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(tensor_names, (str, bytes)):
+        raise ValueError("tensor_names must be a sequence of generation tensor names")
+    selected = tuple(tensor_names)
+    unknown = tuple(name for name in selected if name not in GENERATION_TENSOR_NAMES)
+    if unknown:
+        rendered = ", ".join(repr(name) for name in unknown)
+        raise ValueError(f"unknown generation tensor name(s): {rendered}")
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for name in selected:
+        if name in seen and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        rendered = ", ".join(repr(name) for name in duplicates)
+        raise ValueError(f"duplicate generation tensor name(s): {rendered}")
+    return selected
+
+
 def _is_sha256(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 

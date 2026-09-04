@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Mapping, Sequence
+import inspect
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,9 @@ from scripts import theorem1_loss_recovery as experiment
 EXPECTED_COLUMNS = (
     "record_id",
     "model_name",
+    "scheduler_name",
+    "guidance_scale",
+    "num_inference_steps",
     "timestep",
     "alpha_t",
     "sigma_t",
@@ -43,30 +47,11 @@ EXPECTED_COLUMNS = (
 )
 
 
-def _field(result: object, name: str, index: int | None = None) -> object:
-    if isinstance(result, Mapping):
-        return result[name]
-    if hasattr(result, name):
-        return getattr(result, name)
-    if index is not None and isinstance(result, Sequence):
-        return result[index]
-    raise AssertionError(f"result has no {name!r} field: {result!r}")
-
-
-def _seed_tuple(value: object) -> tuple[int, ...]:
-    if isinstance(value, str):
-        return tuple(int(part.strip()) for part in value.split(",") if part.strip())
-    if isinstance(value, Sequence):
-        return tuple(int(item) for item in value)
-    raise AssertionError(f"generation seed value is not a sequence: {value!r}")
-
-
 def _prediction_samples(
     args: Sequence[object], kwargs: Mapping[str, object]
 ) -> torch.Tensor:
-    value = kwargs.get("samples")
-    if value is None and args:
-        value = args[0]
+    assert not args
+    value = kwargs["samples"]
     if not isinstance(value, torch.Tensor):
         raise AssertionError("conditional predictor did not receive a sample tensor")
     return value
@@ -82,29 +67,34 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
     }
     assert options == {
         "--model",
+        "--scheduler",
+        "--g",
+        "--T",
         "--num-loss-seeds",
         "--loss-seed",
-        "--generation-seeds",
-        "--max-generation-seeds",
+        "--N",
         "--sample-batch-size",
         "--max-records",
         "--output-dir",
+        "--device",
         "--plot",
-        "--plot-only",
     }
 
     arguments = parser.parse_args([])
     assert arguments.model == "sdv1"
+    assert arguments.scheduler == "ddim"
+    assert arguments.g == pytest.approx(7.5)
+    assert arguments.num_inference_steps == 50
     assert arguments.num_loss_seeds == 20
     assert arguments.loss_seed == 0
-    assert _seed_tuple(arguments.generation_seeds) == tuple(range(20))
-    assert arguments.max_generation_seeds is None
+    assert arguments.num_seeds == 20
     assert arguments.sample_batch_size > 0
     assert arguments.max_records is None
     assert arguments.output_dir is None
-    assert arguments.plot_only is False
-    assert parser.parse_args(["--plot"]).plot_only is True
-    assert parser.parse_args(["--plot-only"]).plot_only is True
+    assert arguments.device == "auto"
+    assert arguments.plot is False
+    assert parser.parse_args(["--plot"]).plot is True
+    assert parser.parse_args(["--device", "CUDA:2"]).device == "cuda:2"
     expected_output_directories = {
         model_name: (
             experiment.ROOT
@@ -115,41 +105,259 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
         for model_name in ("sdv1", "sdv2", "realvis")
     }
     assert {
-        model_name: experiment._default_output_directory(model_name)
+        model_name: experiment._default_output_directory(
+            model_name, "ddim", 7.5, 50, 20
+        )
         for model_name in expected_output_directories
     } == expected_output_directories
     assert len(set(expected_output_directories.values())) == 3
+    assert experiment._default_output_directory("sdv1", "ddpm", 3.25, 12, 3) == (
+        experiment.ROOT
+        / "outputs"
+        / "sdv1_ddpm_g3.25_T12_N3"
+        / "theorem1_loss_recovery"
+    )
 
     smoke = parser.parse_args(
         [
             "--max-records",
             "2",
+            "--scheduler",
+            "ddpm",
+            "--g",
+            "3.25",
+            "--T",
+            "12",
             "--num-loss-seeds",
             "2",
-            "--max-generation-seeds",
+            "--N",
             "2",
         ]
+    )
+    assert (smoke.scheduler, smoke.g, smoke.num_inference_steps) == (
+        "ddpm",
+        pytest.approx(3.25),
+        12,
     )
     assert (
         smoke.max_records,
         smoke.num_loss_seeds,
-        smoke.max_generation_seeds,
+        smoke.num_seeds,
     ) == (2, 2, 2)
-    custom = parser.parse_args(["--generation-seeds", "2,5,11"])
-    assert _seed_tuple(custom.generation_seeds) == (2, 5, 11)
-
     with pytest.raises(SystemExit):
         parser.parse_args(["--num-loss-seeds", "0"])
     with pytest.raises(SystemExit):
+        parser.parse_args(["--scheduler", "euler"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--g", "nan"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--T", "0"])
+    with pytest.raises(SystemExit):
         parser.parse_args(["--loss-seed", "-1"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["--max-generation-seeds", "0"])
+        parser.parse_args(["--N", "0"])
     with pytest.raises(SystemExit):
         parser.parse_args(["--num-loss", "2"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--plot-only"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--device", "cuda:-1"])
 
     assert experiment.CSV_COLUMNS == EXPECTED_COLUMNS
     assert experiment.CSV_NAME == "theorem1_loss_recovery.csv"
     assert experiment.FIGURE_NAME == "theorem1_loss_recovery.pdf"
+
+
+def test_run_experiment_requires_explicit_device() -> None:
+    assert (
+        inspect.signature(experiment.run_experiment).parameters["device"].default
+        is inspect.Parameter.empty
+    )
+
+
+def test_nondefault_generation_contract_uses_exact_sampler_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedule_path = tmp_path / "schedule.pt"
+    schedule_path.write_bytes(b"cached schedule")
+    paths = SimpleNamespace(
+        schedule=schedule_path,
+        run_directory=tmp_path / "logs/sdv1_ddpm_g3.25_T12_N3/experiment_S0_N3",
+    )
+    path_requests: list[tuple[Path, dict[str, object]]] = []
+
+    def fake_generation_paths(root: Path, **kwargs: object) -> SimpleNamespace:
+        path_requests.append((root, dict(kwargs)))
+        return paths
+
+    scheduler_config = {
+        "_class_name": "DDPMScheduler",
+        "prediction_type": "v_prediction",
+    }
+    science = {
+        "model_cli_name": "sdv1",
+        "dataset_model": "sdv1",
+        "model_id": "synthetic-model",
+        "guidance_scale": 3.25,
+        "num_inference_steps": 12,
+        "num_seeds": 3,
+        "seeds": [0, 1, 2],
+        "trajectory_order": "noise_to_image",
+        "stored_prediction_type": "epsilon",
+        "target_latent_definition": experiment.TARGET_LATENT_DEFINITION,
+        "target_preprocessing": {"policy": "test"},
+        "latent_shape": [4, 8, 8],
+        "scientific_tensor_storage": {
+            "dtype": "float16",
+            "device": "cpu",
+            "layout": "contiguous",
+        },
+        "scheduler": {"name": "ddpm", "config": scheduler_config},
+    }
+    schedule_payload = {
+        "timesteps": torch.arange(11, -1, -1, dtype=torch.int64),
+        "init_noise_sigma": 1.0,
+        "scheduler_config": scheduler_config,
+    }
+    sscd_requests: list[tuple[object, Mapping[str, object], str, tuple[int, ...]]] = []
+
+    def fake_sscd_configuration(
+        sscd_paths: object,
+        *,
+        science: Mapping[str, object],
+        scientific_hash: str,
+        seeds: Sequence[int],
+    ) -> tuple[None, None, str]:
+        sscd_requests.append(
+            (sscd_paths, science, scientific_hash, tuple(int(seed) for seed in seeds))
+        )
+        return None, None, "synthetic missing SSCD"
+
+    monkeypatch.setattr(experiment, "generation_paths", fake_generation_paths)
+    monkeypatch.setattr(
+        experiment,
+        "require_generation_run",
+        lambda observed: (
+            {
+                "scientific_config": science,
+                "scientific_config_hash": "science-hash",
+            }
+            if observed is paths
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        experiment,
+        "get_model_spec",
+        lambda _name: SimpleNamespace(
+            dataset_model="sdv1",
+            model_id="synthetic-model",
+            resolution=64,
+        ),
+    )
+    monkeypatch.setattr(
+        experiment,
+        "target_preprocessing_policy",
+        lambda _resolution: {"policy": "test"},
+    )
+    monkeypatch.setattr(
+        experiment,
+        "safe_torch_load",
+        lambda observed: (
+            schedule_payload
+            if observed == schedule_path
+            else pytest.fail(f"unexpected tensor load: {observed}")
+        ),
+    )
+    monkeypatch.setattr(
+        experiment,
+        "_load_sscd_configuration",
+        fake_sscd_configuration,
+    )
+
+    contract = experiment._load_generation_contract(
+        tmp_path,
+        "sdv1",
+        "ddpm",
+        3.25,
+        12,
+        3,
+    )
+
+    assert path_requests == [
+        (
+            tmp_path.resolve(),
+            {
+                "model_name": "sdv1",
+                "scheduler_name": "ddpm",
+                "guidance_scale": 3.25,
+                "num_inference_steps": 12,
+                "num_seeds": 3,
+                "seed_start": 0,
+            },
+        )
+    ]
+    assert contract.paths is paths
+    assert contract.seeds == (0, 1, 2)
+    assert contract.stored_dtype is torch.float16
+    assert contract.scheduler_config == scheduler_config
+    assert contract.sscd_error == "synthetic missing SSCD"
+    assert len(sscd_requests) == 1
+    assert sscd_requests[0][1:] == (
+        science,
+        "science-hash",
+        (0, 1, 2),
+    )
+
+
+def test_active_scheduler_uses_requested_name_and_inference_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_timesteps = torch.arange(11, -1, -1, dtype=torch.int64)
+    timestep_calls: list[tuple[int, torch.device]] = []
+
+    def set_timesteps(count: int, *, device: torch.device) -> None:
+        timestep_calls.append((count, device))
+        scheduler.timesteps = expected_timesteps.to(device=device)
+
+    scheduler = SimpleNamespace(
+        timesteps=torch.empty(0, dtype=torch.int64),
+        init_noise_sigma=1.0,
+        set_timesteps=set_timesteps,
+    )
+    scheduler_config = {
+        "_class_name": "DDPMScheduler",
+        "prediction_type": "sample",
+    }
+    original_scheduler = object()
+    build_requests: list[tuple[object, str]] = []
+
+    def fake_build_scheduler(original: object, name: str) -> SimpleNamespace:
+        build_requests.append((original, name))
+        return SimpleNamespace(scheduler=scheduler, config=scheduler_config)
+
+    monkeypatch.setattr(experiment, "build_scheduler", fake_build_scheduler)
+    contract = SimpleNamespace(
+        schedule_payload={"timesteps": expected_timesteps},
+        scheduler_config=scheduler_config,
+        init_noise_sigma=1.0,
+    )
+    components = SimpleNamespace(
+        original_scheduler=original_scheduler,
+        device=torch.device("cpu"),
+    )
+
+    active = experiment._validate_active_scheduler(
+        components,
+        contract,
+        "ddpm",
+        12,
+    )
+
+    assert active is scheduler
+    assert build_requests == [(original_scheduler, "ddpm")]
+    assert timestep_calls == [(12, torch.device("cpu"))]
 
 
 def test_conditional_loss_uses_sum_then_mean_then_square_root_and_checks_identity(
@@ -197,13 +405,9 @@ def test_conditional_loss_uses_sum_then_mean_then_square_root_and_checks_identit
     assert per_seed_sum.tolist() == [5.0, 9.0]
     expected_mse = 7.0 / (target.numel() * snr_t)
     expected_rmse = math.sqrt(expected_mse)
-    assert float(_field(result, "conditional_loss", 0)) == pytest.approx(7.0)
-    assert float(_field(result, "normalized_loss_mse", 1)) == pytest.approx(
-        expected_mse
-    )
-    assert float(_field(result, "normalized_loss_rmse", 2)) == pytest.approx(
-        expected_rmse
-    )
+    assert result.conditional_loss == pytest.approx(7.0)
+    assert result.normalized_loss_mse == pytest.approx(expected_mse)
+    assert result.normalized_loss_rmse == pytest.approx(expected_rmse)
     mean_seedwise_rmse = float(
         torch.sqrt(per_seed_sum / (target.numel() * snr_t)).mean()
     )
@@ -302,9 +506,139 @@ def test_generation_initial_latents_match_canonical_sampler_and_recovery_has_no_
     per_seed_mse = torch.tensor([0.625, 2.5], dtype=torch.float64)
     expected_mse = float(per_seed_mse.mean())
     expected_rmse = math.sqrt(expected_mse)
-    assert float(_field(result, "recovery_mse", 0)) == pytest.approx(expected_mse)
-    assert float(_field(result, "recovery_rmse", 1)) == pytest.approx(expected_rmse)
+    assert result.recovery_mse == pytest.approx(expected_mse)
+    assert result.recovery_rmse == pytest.approx(expected_rmse)
     assert expected_rmse != pytest.approx(float(torch.sqrt(per_seed_mse).mean()))
+
+
+def test_cuda_oom_halving_preserves_loss_and_recovery_sample_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = torch.zeros((1, 1, 1), dtype=torch.float32)
+    samples = torch.arange(1, 6, dtype=torch.float32).reshape(5, 1, 1, 1)
+    components = SimpleNamespace(
+        device=torch.device("cuda:0"),
+        inference_dtype=torch.float32,
+    )
+    attempted_batches: list[torch.Tensor] = []
+    successful_samples: list[torch.Tensor] = []
+    cache_releases: list[None] = []
+
+    def oom_above_two(
+        conceptual_samples: torch.Tensor, **_kwargs: object
+    ) -> torch.Tensor:
+        attempted_batches.append(conceptual_samples.detach().clone())
+        if conceptual_samples.shape[0] > 2:
+            raise RuntimeError("synthetic CUDA out of memory")
+        successful_samples.append(conceptual_samples.detach().clone())
+        return torch.zeros_like(conceptual_samples)
+
+    monkeypatch.setattr(experiment, "_prediction_batch", oom_above_two)
+    monkeypatch.setattr(
+        experiment.torch.cuda,
+        "empty_cache",
+        lambda: cache_releases.append(None),
+    )
+
+    loss = experiment._measure_conditional_loss(
+        target_latent=target,
+        loss_noise=samples,
+        condition=torch.ones((1, 1, 1), dtype=torch.float32),
+        timestep=876,
+        alpha_t=0.6,
+        sigma_t=0.8,
+        snr_t=0.5625,
+        components=components,
+        scheduler=object(),
+        sample_batch_size=4,
+    )
+
+    assert [batch.shape[0] for batch in attempted_batches] == [4, 2, 2, 1]
+    torch.testing.assert_close(
+        torch.cat(successful_samples),
+        0.8 * samples,
+    )
+    assert loss.conditional_loss == pytest.approx(11.0)
+    assert loss.normalized_loss_mse == pytest.approx(11.0 / 0.5625)
+    assert loss.normalized_loss_rmse == pytest.approx(math.sqrt(11.0 / 0.5625))
+
+    attempted_batches.clear()
+    successful_samples.clear()
+    recovery = experiment._measure_recovery(
+        target_latent=target,
+        generation_initial_latents=samples,
+        condition=torch.ones((1, 1, 1), dtype=torch.float32),
+        timestep=876,
+        alpha_t=0.6,
+        sigma_t=0.8,
+        components=components,
+        scheduler=object(),
+        sample_batch_size=4,
+    )
+
+    assert [batch.shape[0] for batch in attempted_batches] == [4, 2, 2, 1]
+    torch.testing.assert_close(torch.cat(successful_samples), samples)
+    assert recovery.recovery_mse == pytest.approx(11.0 / 0.36)
+    assert recovery.recovery_rmse == pytest.approx(math.sqrt(11.0 / 0.36))
+    assert len(cache_releases) == 2
+
+
+def test_non_cuda_out_of_memory_error_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[int] = []
+
+    def fail(samples: torch.Tensor, **_kwargs: object) -> torch.Tensor:
+        attempts.append(samples.shape[0])
+        raise RuntimeError("synthetic out of memory")
+
+    monkeypatch.setattr(experiment, "_prediction_batch", fail)
+    monkeypatch.setattr(
+        experiment.torch.cuda,
+        "empty_cache",
+        lambda: pytest.fail("CPU failure must not touch the CUDA allocator"),
+    )
+    components = SimpleNamespace(device=torch.device("cpu"))
+
+    with pytest.raises(RuntimeError, match="synthetic out of memory"):
+        tuple(
+            experiment._prediction_batches(
+                torch.zeros((3, 1, 1, 1)),
+                condition=torch.zeros((1, 1, 1)),
+                timestep=1,
+                components=components,
+                scheduler=object(),
+                initial_batch_size=3,
+            )
+        )
+    assert attempts == [3]
+
+
+def test_unused_vae_is_offloaded_after_validation_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transfers: list[dict[str, object]] = []
+    cache_releases: list[None] = []
+
+    class FakeVAE:
+        def to(self, **kwargs: object) -> FakeVAE:
+            transfers.append(dict(kwargs))
+            return self
+
+    components = SimpleNamespace(
+        device=torch.device("cuda:2"),
+        vae=FakeVAE(),
+    )
+    monkeypatch.setattr(
+        experiment.torch.cuda,
+        "empty_cache",
+        lambda: cache_releases.append(None),
+    )
+
+    experiment._offload_unused_vae(components)
+
+    assert transfers == [{"device": torch.device("cpu"), "dtype": torch.float32}]
+    assert cache_releases == [None]
 
 
 def test_loss_noise_stream_is_reproducible_and_independent_of_generation_seeds() -> (
@@ -460,15 +794,20 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
         tokenizer=object(),
         text_encoder=_EvalModule(),
         scheduler=scheduler,
+        device_metadata={},
     )
     generation_contract = SimpleNamespace(
         latent_shape=(1, 2, 2),
         stored_dtype=torch.float32,
-        latent_dtype=torch.float32,
         init_noise_sigma=1.0,
-        seeds=tuple(range(20)),
-        generation_seeds=tuple(range(20)),
+        seeds=tuple(range(3)),
         scheduler_config={},
+        science={
+            "model_id": "SG161222/Realistic_Vision_V2.0",
+            "model_revision": "a" * 40,
+            "vae_id": "stabilityai/sd-vae-ft-mse",
+            "vae_revision": "b" * 40,
+        },
         paths=SimpleNamespace(),
         sscd_paths=SimpleNamespace(),
     )
@@ -480,29 +819,48 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
         return FakeDataset()
 
     monkeypatch.setattr(experiment, "WebsterDataset", fake_dataset)
+    loaded_contract_arguments: list[tuple[object, ...]] = []
+
+    def load_contract(*args: object, **_kwargs: object) -> object:
+        loaded_contract_arguments.append(args)
+        return generation_contract
+
+    monkeypatch.setattr(experiment, "_load_generation_contract", load_contract)
+    active_scheduler_arguments: list[tuple[object, ...]] = []
+
+    def validate_scheduler(*args: object, **_kwargs: object) -> object:
+        active_scheduler_arguments.append(args)
+        return scheduler
+
+    monkeypatch.setattr(experiment, "_validate_active_scheduler", validate_scheduler)
+    loaded_runtimes: list[object] = []
+
+    def load_components(*_args: object, **kwargs: object) -> object:
+        loaded_runtimes.append(kwargs["runtime"])
+        resolver = kwargs["revision_resolver"]
+        assert callable(resolver)
+        assert resolver("SG161222/Realistic_Vision_V2.0") == "a" * 40
+        return components
+
+    monkeypatch.setattr(experiment, "load_model_components", load_components)
+    preflight_steps: list[int] = []
     monkeypatch.setattr(
         experiment,
-        "_load_generation_contract",
-        lambda *_args, **_kwargs: generation_contract,
+        "preflight_model_components",
+        lambda *_args, **kwargs: preflight_steps.append(
+            int(kwargs["num_inference_steps"])
+        ),
     )
-    monkeypatch.setattr(
-        experiment,
-        "_validate_active_scheduler",
-        lambda *_args, **_kwargs: scheduler,
-    )
-    monkeypatch.setattr(
-        experiment,
-        "load_model_components",
-        lambda *_args, **_kwargs: components,
-    )
-    monkeypatch.setattr(
-        experiment, "preflight_model_components", lambda *_args, **_kwargs: None
-    )
+    component_lifecycle: list[str] = []
     monkeypatch.setattr(
         experiment,
         "_validate_loaded_components",
-        lambda *_args, **_kwargs: None,
-        raising=False,
+        lambda *_args, **_kwargs: component_lifecycle.append("validated"),
+    )
+    monkeypatch.setattr(
+        experiment,
+        "_offload_unused_vae",
+        lambda *_args, **_kwargs: component_lifecycle.append("offloaded"),
     )
     monkeypatch.setattr(
         experiment,
@@ -510,19 +868,39 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
         lambda *_args, **_kwargs: torch.ones((1, 1, 1), dtype=torch.float32),
     )
 
-    def encode_target(image: object, *_args: object, **_kwargs: object) -> torch.Tensor:
-        if image is records[1]["image"]:
+    validated_pairs: list[str] = []
+
+    def validate_pair(
+        contract: object,
+        metadata: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        assert contract is generation_contract
+        record_id = str(metadata["record_id"])
+        validated_pairs.append(record_id)
+        return {"validated_record_id": record_id}
+
+    monkeypatch.setattr(experiment, "_validate_generation_pair", validate_pair)
+
+    def load_target(
+        *,
+        metadata: Mapping[str, object],
+        contract: object,
+        generation_marker: Mapping[str, object],
+    ) -> torch.Tensor:
+        assert contract is generation_contract
+        assert generation_marker["validated_record_id"] == metadata["record_id"]
+        if metadata["record_id"] == records[1]["record_id"]:
             raise RuntimeError("synthetic target failure")
         return torch.ones((1, 2, 2), dtype=torch.float32)
 
-    monkeypatch.setattr(experiment, "encode_target_latent", encode_target)
+    monkeypatch.setattr(experiment, "_load_target_latent", load_target)
     _FakeProgress.instances.clear()
 
     loss_noises: list[torch.Tensor] = []
     recovery_latents: list[torch.Tensor] = []
     requested_recovery_seeds: list[tuple[int, ...]] = []
     requested_sscd_seeds: list[tuple[int, ...]] = []
-    generation_initial = torch.full((2, 1, 2, 2), 99.0, dtype=torch.float32)
+    generation_initial = torch.full((3, 1, 2, 2), 99.0, dtype=torch.float32)
 
     def reconstruct(
         seeds: Sequence[int], *_args: object, **_kwargs: object
@@ -535,13 +913,13 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     )
 
     def make_loss_noise(*_args: object, **kwargs: object) -> torch.Tensor:
-        count = int(kwargs.get("num_loss_seeds", kwargs.get("count", 2)))
+        count = int(kwargs["num_loss_seeds"])
         return torch.arange(count * 4, dtype=torch.float32).reshape(count, 1, 2, 2)
 
     monkeypatch.setattr(experiment, "_make_loss_noise", make_loss_noise)
 
     def measure_loss(*_args: object, **kwargs: object) -> experiment.LossMeasurement:
-        noise = kwargs.get("loss_noise")
+        noise = kwargs["loss_noise"]
         if not isinstance(noise, torch.Tensor):
             raise AssertionError("run did not pass pair loss-noise samples")
         loss_noises.append(noise.detach().cpu().clone())
@@ -550,7 +928,7 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     def measure_recovery(
         *_args: object, **kwargs: object
     ) -> experiment.RecoveryMeasurement:
-        latents = kwargs.get("generation_initial_latents")
+        latents = kwargs["generation_initial_latents"]
         if not isinstance(latents, torch.Tensor):
             raise AssertionError("run did not pass generation initial latents")
         recovery_latents.append(latents.detach().cpu().clone())
@@ -559,28 +937,23 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     monkeypatch.setattr(experiment, "_measure_conditional_loss", measure_loss)
     monkeypatch.setattr(experiment, "_measure_recovery", measure_recovery)
 
-    def target_sscd(*args: object, **kwargs: object) -> float:
-        seeds = kwargs.get(
-            "generation_seeds",
-            kwargs.get("selected_seeds", kwargs.get("seeds")),
-        )
-        if not isinstance(seeds, Sequence):
-            for candidate in reversed(args):
-                if isinstance(candidate, Sequence) and not isinstance(
-                    candidate, (str, bytes, torch.Tensor)
-                ):
-                    seeds = candidate
-                    break
-        if not isinstance(seeds, Sequence):
-            raise AssertionError("SSCD lookup did not receive generation seeds")
-        requested_sscd_seeds.append(tuple(int(seed) for seed in seeds))
+    def target_sscd(
+        *,
+        contract: object,
+        metadata: Mapping[str, object],
+        generation_seeds: Sequence[int],
+        generation_marker: Mapping[str, object],
+    ) -> float:
+        assert contract is generation_contract
+        assert generation_marker["validated_record_id"] == metadata["record_id"]
+        requested_sscd_seeds.append(tuple(int(seed) for seed in generation_seeds))
         return 0.4
 
     monkeypatch.setattr(experiment, "_load_mean_target_sscd", target_sscd)
 
     plotted: list[tuple[Path, Path]] = []
 
-    def fake_plot(csv_path: Path, figure_path: Path) -> None:
+    def fake_plot(csv_path: Path, figure_path: Path, **_: object) -> None:
         assert Path(csv_path).is_file()
         plotted.append((Path(csv_path), Path(figure_path)))
         Path(figure_path).write_bytes(b"%PDF-1.4\n%%EOF\n")
@@ -589,13 +962,16 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     output = tmp_path / "loss-recovery"
     experiment.run_experiment(
         model_name="realvis",
+        scheduler_name="ddpm",
+        guidance_scale=3.25,
+        num_inference_steps=12,
         num_loss_seeds=2,
         loss_seed=7,
-        generation_seeds=(2, 5),
-        max_generation_seeds=None,
+        num_seeds=3,
         sample_batch_size=2,
         max_records=2,
         output_dir=output,
+        device="cpu",
         progress_factory=_FakeProgress,
     )
 
@@ -603,11 +979,27 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     assert tuple(frame.columns) == EXPECTED_COLUMNS
     assert len(frame) == 2
     assert requested_dataset_models == ["realisticvision"]
+    assert loaded_contract_arguments == [
+        (experiment.ROOT, "realvis", "ddpm", 3.25, 12, 3)
+    ]
+    assert active_scheduler_arguments == [(components, generation_contract, "ddpm", 12)]
+    assert preflight_steps == [12]
+    assert len(loaded_runtimes) == 1
+    assert loaded_runtimes[0].device == torch.device("cpu")
+    assert loaded_runtimes[0].inference_dtype is torch.float32
+    assert component_lifecycle == ["validated", "offloaded"]
+    assert validated_pairs == [
+        "realisticvision-0000",
+        "realisticvision-0001",
+    ]
     assert frame["record_id"].tolist() == [
         "realisticvision-0000",
         "realisticvision-0001",
     ]
     assert frame["model_name"].tolist() == ["realvis", "realvis"]
+    assert frame["scheduler_name"].tolist() == ["ddpm", "ddpm"]
+    assert frame["guidance_scale"].tolist() == [3.25, 3.25]
+    assert frame["num_inference_steps"].tolist() == [12, 12]
     first, second = frame.iloc[0], frame.iloc[1]
     assert first["status"] == "ok" and first["error"] == ""
     assert second["status"] == "error"
@@ -618,8 +1010,8 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     assert float(first["snr_t"]) == pytest.approx(0.5625)
     assert int(first["num_loss_seeds"]) == 2
     assert int(first["loss_seed"]) == 7
-    assert str(first["generation_seeds"]) == "2,5"
-    assert int(first["num_generation_seeds"]) == 2
+    assert str(first["generation_seeds"]) == "0,1,2"
+    assert int(first["num_generation_seeds"]) == 3
     assert float(first["conditional_loss"]) == pytest.approx(8.0)
     assert float(first["normalized_loss_mse"]) == pytest.approx(2.0)
     assert float(first["normalized_loss_rmse"]) == pytest.approx(math.sqrt(2.0))
@@ -627,10 +1019,11 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     assert float(first["recovery_rmse"]) == pytest.approx(math.sqrt(3.0))
     assert float(first["mean_target_sscd"]) == pytest.approx(0.4)
 
-    assert requested_recovery_seeds == [(2, 5)]
-    assert requested_sscd_seeds == [(2, 5)]
+    assert requested_recovery_seeds == [(0, 1, 2)]
+    assert requested_sscd_seeds == [(0, 1, 2)]
     assert len(loss_noises) == len(recovery_latents) == 1
-    assert loss_noises[0].shape == recovery_latents[0].shape == (2, 1, 2, 2)
+    assert loss_noises[0].shape == (2, 1, 2, 2)
+    assert recovery_latents[0].shape == (3, 1, 2, 2)
     assert not torch.equal(loss_noises[0], recovery_latents[0])
     torch.testing.assert_close(recovery_latents[0], generation_initial)
 
@@ -638,18 +1031,361 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     progress = _FakeProgress.instances[0]
     assert progress.kwargs["total"] == 2
     assert progress.kwargs["desc"] == "Theorem 1 loss–recovery"
+    assert progress.kwargs["unit"] == "pair"
     assert progress.kwargs["dynamic_ncols"] is True
     assert progress.kwargs["leave"] is True
     assert progress.updated == 2
-    assert [values.get("record_id") for values in progress.postfixes] == [
+    completed_postfixes = [
+        values for values in progress.postfixes if "status" in values
+    ]
+    assert [values["record_id"] for values in completed_postfixes] == [
         "realisticvision-0000",
         "realisticvision-0001",
     ]
+    assert [values["status"] for values in completed_postfixes] == ["ok", "error"]
+    assert {
+        values.get("phase") for values in progress.postfixes if "phase" in values
+    } == {
+        "loading-target",
+        "encoding-prompt",
+        "conditional-loss",
+        "recovery",
+        "sscd",
+    }
     assert plotted == [(output / experiment.CSV_NAME, output / experiment.FIGURE_NAME)]
     assert {path.name for path in output.iterdir()} == {
         experiment.CSV_NAME,
         experiment.FIGURE_NAME,
     }
+
+
+def test_worker_setup_failure_still_writes_all_pair_rows_and_figure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = (
+        {"record_id": "sdv1-0000"},
+        {"record_id": "sdv1-0001"},
+    )
+
+    class FakeDataset:
+        def iter_metadata(self):  # type: ignore[no-untyped-def]
+            yield from records
+
+    contract = SimpleNamespace(
+        seeds=tuple(range(2)),
+        latent_shape=(4, 8, 8),
+        science={
+            "model_id": "model",
+            "model_revision": "a" * 40,
+            "vae_id": "vae",
+            "vae_revision": "b" * 40,
+        },
+    )
+    monkeypatch.setattr(
+        experiment, "WebsterDataset", lambda *_args, **_kwargs: FakeDataset()
+    )
+    monkeypatch.setattr(
+        experiment,
+        "_load_generation_contract",
+        lambda *_args, **_kwargs: contract,
+    )
+
+    def fail_model_load(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("synthetic model initialization failure")
+
+    monkeypatch.setattr(experiment, "load_model_components", fail_model_load)
+    plotted: list[tuple[Path, Path]] = []
+
+    def fake_plot(csv_path: Path, figure_path: Path, **_: object) -> None:
+        plotted.append((Path(csv_path), Path(figure_path)))
+        Path(figure_path).write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    monkeypatch.setattr(experiment, "plot_saved_results", fake_plot)
+    _FakeProgress.instances.clear()
+    output = tmp_path / "setup-failure"
+
+    exit_code = experiment.run_experiment(
+        model_name="sdv1",
+        scheduler_name="ddim",
+        guidance_scale=7.5,
+        num_inference_steps=50,
+        num_loss_seeds=3,
+        loss_seed=17,
+        num_seeds=2,
+        sample_batch_size=2,
+        max_records=None,
+        output_dir=output,
+        device="cpu",
+        progress_factory=_FakeProgress,
+    )
+
+    assert exit_code == 1
+    frame = pd.read_csv(output / experiment.CSV_NAME)
+    assert tuple(frame.columns) == EXPECTED_COLUMNS
+    assert frame["record_id"].tolist() == ["sdv1-0000", "sdv1-0001"]
+    assert frame["scheduler_name"].tolist() == ["ddim", "ddim"]
+    assert frame["guidance_scale"].tolist() == [7.5, 7.5]
+    assert frame["num_inference_steps"].tolist() == [50, 50]
+    assert frame["status"].tolist() == ["error", "error"]
+    assert frame["latent_dimension"].tolist() == [256, 256]
+    assert frame["generation_seeds"].astype(str).tolist() == ["0,1", "0,1"]
+    assert frame["timestep"].isna().all()
+    assert frame["conditional_loss"].isna().all()
+    assert all(
+        "synthetic model initialization failure" in message
+        for message in frame["error"].astype(str)
+    )
+    assert plotted == [(output / experiment.CSV_NAME, output / experiment.FIGURE_NAME)]
+    assert {path.name for path in output.iterdir()} == {
+        experiment.CSV_NAME,
+        experiment.FIGURE_NAME,
+    }
+    assert len(_FakeProgress.instances) == 1
+    progress = _FakeProgress.instances[0]
+    assert progress.updated == 2
+    assert [postfix["record_id"] for postfix in progress.postfixes] == [
+        "sdv1-0000",
+        "sdv1-0001",
+    ]
+    assert all(postfix["status"] == "error" for postfix in progress.postfixes)
+    assert all(postfix["phase"] == "worker-failure" for postfix in progress.postfixes)
+
+
+def test_multi_gpu_shards_whole_pairs_and_restores_metadata_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = tuple(
+        (position, {"record_id": f"pair-{position}"}) for position in range(5)
+    )
+    devices = tuple(torch.device(f"cuda:{index}") for index in range(3))
+    progress_lock = experiment.tqdm.get_lock()
+    spawn_context = SimpleNamespace(RLock=lambda: progress_lock)
+    dataset = object()
+    contract = object()
+    progress_factory = object()
+    observed: list[
+        tuple[
+            int, str, str, float, int, tuple[int, ...], tuple[int, ...], int, int, bool
+        ]
+    ] = []
+
+    class ImmediateFuture:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+        def result(self) -> object:
+            return self.value
+
+    class ImmediateExecutor:
+        def __init__(
+            self,
+            *,
+            max_workers: int,
+            mp_context: object,
+            initializer: object,
+            initargs: tuple[object, ...],
+        ) -> None:
+            assert max_workers == 2
+            assert mp_context is spawn_context
+            assert initializer is experiment._install_tqdm_lock
+            assert initargs == (progress_lock,)
+
+        def __enter__(self) -> ImmediateExecutor:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def submit(
+            self, function: object, *arguments: object, **kwargs: object
+        ) -> ImmediateFuture:
+            assert function is fake_pair_shard
+            assert not arguments
+            assert "dataset" not in kwargs
+            assert "contract" not in kwargs
+            assert "progress_factory" not in kwargs
+            return ImmediateFuture(fake_pair_shard(**kwargs))
+
+    def fake_pair_shard(**kwargs: object) -> experiment._PairShardResult:
+        worker_index = int(kwargs["worker_index"])
+        selected = kwargs["device"]
+        shard = kwargs["entries"]
+        seeds = kwargs["generation_seeds"]
+        assert isinstance(selected, torch.device)
+        assert isinstance(shard, Sequence)
+        assert isinstance(seeds, tuple)
+        positions = tuple(int(entry[0]) for entry in shard)
+        is_local = "dataset" in kwargs
+        if is_local:
+            assert kwargs["dataset"] is dataset
+            assert kwargs["contract"] is contract
+            assert kwargs["progress_factory"] is progress_factory
+        observed.append(
+            (
+                worker_index,
+                str(selected),
+                str(kwargs["scheduler_name"]),
+                float(kwargs["guidance_scale"]),
+                int(kwargs["num_inference_steps"]),
+                positions,
+                tuple(int(seed) for seed in seeds),
+                int(kwargs["num_loss_seeds"]),
+                int(kwargs["loss_seed"]),
+                is_local,
+            )
+        )
+        rows = tuple(
+            (
+                position,
+                {
+                    "record_id": f"pair-{position}",
+                    "status": "error" if position == 3 else "ok",
+                },
+            )
+            for position in positions
+        )
+        return experiment._PairShardResult(rows, int(3 in positions))
+
+    monkeypatch.setattr(
+        experiment.multiprocessing,
+        "get_context",
+        lambda method: spawn_context if method == "spawn" else None,
+    )
+    monkeypatch.setattr(experiment, "ProcessPoolExecutor", ImmediateExecutor)
+    monkeypatch.setattr(experiment, "_run_pair_shard", fake_pair_shard)
+
+    result = experiment._run_pair_shards(
+        project_root=tmp_path,
+        model_name="sdv1",
+        scheduler_name="ddpm",
+        guidance_scale=3.25,
+        num_inference_steps=12,
+        num_loss_seeds=7,
+        loss_seed=31,
+        generation_seeds=(2, 5, 11),
+        sample_batch_size=4,
+        entries=entries,
+        devices=devices,
+        dataset=dataset,
+        contract=contract,
+        progress_factory=progress_factory,
+    )
+
+    assert observed == [
+        (1, "cuda:1", "ddpm", 3.25, 12, (1, 4), (2, 5, 11), 7, 31, False),
+        (2, "cuda:2", "ddpm", 3.25, 12, (2,), (2, 5, 11), 7, 31, False),
+        (0, "cuda:0", "ddpm", 3.25, 12, (0, 3), (2, 5, 11), 7, 31, True),
+    ]
+    assert [position for position, _ in result.indexed_rows] == list(range(5))
+    assert [row["record_id"] for _, row in result.indexed_rows] == [
+        f"pair-{position}" for position in range(5)
+    ]
+    assert result.failed_count == 1
+
+
+def test_multi_gpu_worker_crash_becomes_source_ordered_error_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress_lock = experiment.tqdm.get_lock()
+    spawn_context = SimpleNamespace(RLock=lambda: progress_lock)
+
+    class FailedFuture:
+        def result(self) -> object:
+            raise RuntimeError("synthetic worker crash")
+
+    class ImmediateExecutor:
+        def __init__(
+            self,
+            *,
+            max_workers: int,
+            mp_context: object,
+            initializer: object,
+            initargs: tuple[object, ...],
+        ) -> None:
+            assert max_workers == 1
+            assert mp_context is spawn_context
+            assert initializer is experiment._install_tqdm_lock
+            assert initargs == (progress_lock,)
+
+        def __enter__(self) -> ImmediateExecutor:
+            return self
+
+        def __exit__(self, *_arguments: object) -> None:
+            return None
+
+        def submit(self, *_arguments: object, **_kwargs: object) -> FailedFuture:
+            return FailedFuture()
+
+    def local_pair_shard(**kwargs: object) -> experiment._PairShardResult:
+        assert kwargs["worker_index"] == 0
+        return experiment._PairShardResult(
+            ((0, {"record_id": "pair-0", "status": "ok"}),),
+            0,
+        )
+
+    monkeypatch.setattr(
+        experiment.multiprocessing,
+        "get_context",
+        lambda method: spawn_context if method == "spawn" else None,
+    )
+    monkeypatch.setattr(experiment, "ProcessPoolExecutor", ImmediateExecutor)
+    monkeypatch.setattr(experiment, "_run_pair_shard", local_pair_shard)
+    _FakeProgress.instances.clear()
+
+    result = experiment._run_pair_shards(
+        project_root=tmp_path,
+        model_name="sdv1",
+        scheduler_name="ddpm",
+        guidance_scale=3.25,
+        num_inference_steps=12,
+        num_loss_seeds=2,
+        loss_seed=0,
+        generation_seeds=(0, 1),
+        sample_batch_size=2,
+        entries=(
+            (0, {"record_id": "pair-0"}),
+            (1, {"record_id": "pair-1"}),
+        ),
+        devices=(torch.device("cuda:0"), torch.device("cuda:1")),
+        dataset=object(),
+        contract=SimpleNamespace(latent_shape=(4, 8, 8)),
+        progress_factory=_FakeProgress,
+    )
+
+    assert [position for position, _row in result.indexed_rows] == [0, 1]
+    assert result.indexed_rows[0][1] == {
+        "record_id": "pair-0",
+        "status": "ok",
+    }
+    failed_row = result.indexed_rows[1][1]
+    assert failed_row["record_id"] == "pair-1"
+    assert failed_row["status"] == "error"
+    assert failed_row["latent_dimension"] == 256
+    assert failed_row["scheduler_name"] == "ddpm"
+    assert failed_row["guidance_scale"] == pytest.approx(3.25)
+    assert failed_row["num_inference_steps"] == 12
+    assert "worker on cuda:1 failed" in str(failed_row["error"])
+    assert "synthetic worker crash" in str(failed_row["error"])
+    assert result.failed_count == 1
+    assert len(_FakeProgress.instances) == 1
+    progress = _FakeProgress.instances[0]
+    assert progress.updated == 1
+    assert progress.kwargs["total"] == 1
+    assert progress.kwargs["desc"] == (
+        experiment.PROGRESS_DESCRIPTION + " [cuda:1 shard 2/2]"
+    )
+    assert progress.postfixes[-1]["phase"] == "worker-failure"
+    assert progress.postfixes[-1]["status"] == "error"
+
+
+def test_merge_rejects_missing_or_duplicate_pair_positions() -> None:
+    first = experiment._PairShardResult(((0, {"status": "ok"}),), 0)
+    duplicate = experiment._PairShardResult(((0, {"status": "ok"}),), 0)
+    with pytest.raises(experiment.ExperimentError, match="duplicate or missing"):
+        experiment._merge_pair_shard_results((first, duplicate), 2)
 
 
 def _row(
@@ -671,6 +1407,9 @@ def _row(
     return {
         "record_id": record_id,
         "model_name": "sdv1",
+        "scheduler_name": "ddim",
+        "guidance_scale": 7.5,
+        "num_inference_steps": 50,
         "timestep": 981,
         "alpha_t": alpha_t,
         "sigma_t": sigma_t,
@@ -760,9 +1499,9 @@ def test_plot_reloads_csv_and_draws_pair_scatter_and_binned_median(
             return real_savefig(*save_args, **save_kwargs)
 
         def tight_layout_spy(*layout_args: object, **layout_kwargs: object) -> object:
-            captured["tight_layout_calls"] = int(
-                captured.get("tight_layout_calls", 0)
-            ) + 1
+            captured["tight_layout_calls"] = (
+                int(captured.get("tight_layout_calls", 0)) + 1
+            )
             return real_tight_layout(*layout_args, **layout_kwargs)
 
         monkeypatch.setattr(figure, "savefig", savefig_spy)
@@ -915,13 +1654,11 @@ def test_plot_reduces_bins_and_warns_when_two_bins_are_impossible(
     assert "warning" in (captured_output.out + captured_output.err).lower()
 
 
-@pytest.mark.parametrize("plot_flag", ("--plot", "--plot-only"))
-def test_plot_only_uses_saved_csv_without_loading_diffusion_model(
+def test_plot_uses_saved_csv_without_loading_diffusion_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    plot_flag: str,
 ) -> None:
-    output = tmp_path / "plot-only"
+    output = tmp_path / "plot"
     output.mkdir()
     csv_path = output / experiment.CSV_NAME
     pd.DataFrame(
@@ -944,15 +1681,50 @@ def test_plot_only_uses_saved_csv_without_loading_diffusion_model(
     original_csv = csv_path.read_bytes()
 
     def forbidden(*_: object, **__: object) -> None:
-        raise AssertionError("plot-only must not load or run the diffusion model")
+        raise AssertionError("plot mode must not load or run the diffusion model")
 
-    monkeypatch.setattr(experiment, "load_model_components", forbidden, raising=False)
-    monkeypatch.setattr(
-        experiment, "preflight_model_components", forbidden, raising=False
-    )
-    monkeypatch.setattr(experiment, "WebsterDataset", forbidden, raising=False)
+    monkeypatch.setattr(experiment, "load_model_components", forbidden)
+    monkeypatch.setattr(experiment, "preflight_model_components", forbidden)
+    monkeypatch.setattr(experiment, "WebsterDataset", forbidden)
     monkeypatch.setattr(experiment, "run_experiment", forbidden)
-    assert experiment.main([plot_flag, "--output-dir", str(output)]) == 0
+    monkeypatch.setattr(experiment, "resolve_devices", forbidden)
+    with pytest.raises(
+        experiment.ExperimentError,
+        match="saved CSV differs from requested configuration at: loss_seed",
+    ):
+        experiment.main(
+            [
+                "--plot",
+                "--N",
+                "2",
+                "--num-loss-seeds",
+                "2",
+                "--loss-seed",
+                "124",
+                "--device",
+                "cuda:999",
+                "--output-dir",
+                str(output),
+            ]
+        )
+    assert (
+        experiment.main(
+            [
+                "--plot",
+                "--N",
+                "2",
+                "--num-loss-seeds",
+                "2",
+                "--loss-seed",
+                "123",
+                "--device",
+                "cuda:999",
+                "--output-dir",
+                str(output),
+            ]
+        )
+        == 0
+    )
     assert csv_path.read_bytes() == original_csv
     assert {path.name for path in output.iterdir()} == {
         experiment.CSV_NAME,

@@ -39,6 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_inference_steps=arguments.T,
         num_seeds=arguments.N,
         seed_start=arguments.seed_start,
+        device=arguments.device,
     )
     print(f"Summary: {result.summary_path}")
     return int(result.exit_code)

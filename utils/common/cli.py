@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 from dataclasses import dataclass
 
 MODEL_CHOICES = ("sdv1", "sdv2", "realvis")
 SCHEDULER_CHOICES = ("ddim", "ddpm")
 MAX_SEED = 2**63 - 1
+_DEVICE = re.compile(r"(?:auto|cpu|mps|cuda|cuda:[0-9]+)\Z")
 
 
 class CLIValueError(argparse.ArgumentTypeError):
@@ -51,6 +53,15 @@ def nonnegative_integer(value: str) -> int:
     return number
 
 
+def device_argument(value: str) -> str:
+    """Parse one automatic or concrete execution device."""
+
+    normalized = value.strip().casefold()
+    if not _DEVICE.fullmatch(normalized):
+        raise CLIValueError("must be auto, cpu, mps, cuda, or cuda:N")
+    return normalized
+
+
 def validate_seed_block(seed_start: object, num_seeds: object) -> tuple[int, int]:
     """Validate one contiguous seed block without materializing it."""
 
@@ -68,7 +79,11 @@ def validate_seed_block(seed_start: object, num_seeds: object) -> tuple[int, int
     return seed_start, num_seeds
 
 
-def add_run_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+def add_run_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_device: bool = True,
+) -> argparse.ArgumentParser:
     """Add model, scheduler, guidance, step, and seed-block arguments."""
 
     parser.add_argument("--model", choices=MODEL_CHOICES, default="sdv1")
@@ -83,10 +98,23 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
         metavar="SEED",
         help="first seed in the contiguous N-seed block (default: 0)",
     )
+    if include_device:
+        parser.add_argument(
+            "--device",
+            type=device_argument,
+            default="auto",
+            metavar="DEVICE",
+            help=(
+                "auto uses every CUDA device visible to PyTorch; cpu, mps, "
+                "cuda, or cuda:N selects one device (default: auto)"
+            ),
+        )
     return parser
 
 
-def add_generation_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+def add_generation_arguments(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
     """Add the shared run arguments and generation-preview downscale."""
 
     add_run_arguments(parser)
@@ -114,7 +142,7 @@ def generation_run_name(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
-    seed_start: int = 0,
+    seed_start: int,
 ) -> str:
     """Return the stable logical identity of one generation run."""
 
@@ -126,9 +154,7 @@ def generation_run_name(
         raise ValueError("steps and seeds must be positive")
     seed_start, num_seeds = validate_seed_block(seed_start, num_seeds)
     seed_identity = (
-        f"_N{num_seeds}"
-        if seed_start == 0
-        else f"_S{seed_start}_N{num_seeds}"
+        f"_N{num_seeds}" if seed_start == 0 else f"_S{seed_start}_N{num_seeds}"
     )
     return (
         f"{model_name}_{scheduler_name}_g{stable_float(guidance_scale)}"
@@ -161,7 +187,7 @@ def generation_cache_namespace(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
-    seed_start: int = 0,
+    seed_start: int,
 ) -> str:
     """Return a collision-free role namespace beneath a shared cache parent."""
 
@@ -175,13 +201,7 @@ def generation_cache_namespace(
     )
     if seed_start == 0:
         role = "experiment"
-    elif (
-        scheduler_name == "ddim"
-        and float(guidance_scale) == 7.5
-        and num_inference_steps == 50
-        and seed_start == 20
-        and num_seeds == 20
-    ):
+    elif seed_start == num_seeds:
         role = "reference"
     else:
         role = "seed"
@@ -197,7 +217,7 @@ class RunArguments:
     guidance_scale: float
     num_inference_steps: int
     num_seeds: int
-    seed_start: int = 0
+    seed_start: int
 
     @property
     def name(self) -> str:

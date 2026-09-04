@@ -19,8 +19,6 @@ from .prediction_conversion import (
 )
 from .schedulers import SCHEDULER_NAMES, scheduler_step_kwargs
 
-SAMPLER_CONTRACT_VERSION = 2
-
 
 class SamplingError(RuntimeError):
     """Report an invalid model interface or non-finite sampling result."""
@@ -78,13 +76,6 @@ class _MicrobatchTrajectory:
     conditional: torch.Tensor
 
 
-def seeds_from_count(count: int) -> list[int]:
-    """Return the experiment's fixed seed sequence ``0`` through ``N - 1``."""
-
-    size = _positive_integer(count, "seed count")
-    return list(range(size))
-
-
 def latent_shape_from_unet(unet: Any) -> tuple[int, int, int]:
     """Return ``[C,H,W]`` from a Stable Diffusion UNet configuration."""
 
@@ -117,7 +108,7 @@ def latent_shape_from_unet(unet: Any) -> tuple[int, int, int]:
 
 def validate_latent_shape(
     unet: Any,
-    expected_shape: Sequence[int] = (4, 64, 64),
+    expected_shape: Sequence[int],
 ) -> tuple[int, int, int]:
     """Derive and require the registered model's expected latent shape."""
 
@@ -241,6 +232,7 @@ def predict_conditional_epsilon(
             scaled_input,
             timestep,
             encoder_hidden_states=condition_batch,
+            return_dict=False,
         )
         native_prediction = _output_tensor(model_output, "sample", "UNet")
         _validate_native_prediction(
@@ -515,6 +507,7 @@ def _sample_microbatch(
             scaled_input,
             timestep,
             encoder_hidden_states=condition_batch,
+            return_dict=False,
         )
         native_prediction = _output_tensor(model_output, "sample", "UNet")
         _validate_native_prediction(

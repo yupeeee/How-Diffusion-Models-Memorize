@@ -1,8 +1,8 @@
 """Current-schema-only SQLite state for resumable Webster recovery.
 
-New databases are created directly as schema v2. Existing v2 databases are
-validated before use. Extra tables or columns in an existing v2 database are
-left untouched, while older or partial schemas are rejected without writes.
+New databases are created with the complete recovery schema. Existing databases
+are validated before use. Extra tables or columns are left untouched, while an
+incomplete schema is rejected without writes.
 """
 
 from __future__ import annotations
@@ -189,7 +189,7 @@ def _validate_schema(connection: sqlite3.Connection, database: Path) -> None:
     missing = sorted(_REQUIRED_TABLES - tables)
     if missing:
         raise StateSchemaError(
-            f"current schema v2 is incomplete in {database}; "
+            f"current recovery schema is incomplete in {database}; "
             f"missing: {', '.join(missing)}"
         )
     for table, required in _REQUIRED_COLUMNS.items():
@@ -200,7 +200,7 @@ def _validate_schema(connection: sqlite3.Connection, database: Path) -> None:
         missing_columns = sorted(required - columns)
         if missing_columns:
             raise StateSchemaError(
-                f"current schema v2 in {database} has incomplete {table}; "
+                f"current recovery schema in {database} has incomplete {table}; "
                 f"missing columns: {', '.join(missing_columns)}"
             )
 
@@ -530,10 +530,10 @@ class RecoveryState:
                 )
                 for item in stage_rows
             }
-            # The mirror did not exist in pre-v1 databases, so it cannot be
-            # required when auditing either legacy reactivation path.
+            # Strategy updates are independent, so a mirror result is not required
+            # when deciding whether a mirror or Arquivo retry is eligible.
             excluded = {name, RecoveryStage.GROUND_TRUTH_MIRROR.value}
-            required_legacy = {
+            required_stages = {
                 item.value for item in STAGE_ORDER if item.value not in excluded
             }
             if any(
@@ -541,7 +541,7 @@ class RecoveryState:
                 or stage_results[required][0]
                 == StageOutcome.RUNNING.value
                 or stage_results[required][1]
-                for required in required_legacy
+                for required in required_stages
             ):
                 return False
             prior = stage_results.get(name)

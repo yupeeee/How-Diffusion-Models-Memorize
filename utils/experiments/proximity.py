@@ -1,8 +1,7 @@
-"""Cache-only terminal latent proximity and target-pair analysis."""
+"""Build or apply frozen prompt selection from generation and SSCD caches."""
 
 from __future__ import annotations
 
-import math
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -16,8 +15,6 @@ from tqdm import tqdm
 from utils.common.cli import generation_run_name, stable_float
 from utils.common.io import (
     CacheIOError,
-    atomic_copy,
-    atomic_torch_save,
     atomic_write_frame_csv,
     atomic_write_json,
     canonical_json,
@@ -26,6 +23,7 @@ from utils.common.io import (
     safe_torch_load,
     utc_now,
 )
+from utils.data.webster import normalize_webster_type
 from utils.models.latent import compute_latent_distances
 
 from .cache import (
@@ -35,25 +33,29 @@ from .cache import (
     generation_paths,
     list_completed_records,
     require_generation_run,
-    safe_index,
-    validate_generation_record,
 )
-from .plotting import AnalysisStatistics, write_analysis_outputs
+from .plotting import (
+    AnalysisStatistics,
+    write_analysis_outputs,
+    write_selection_figure,
+)
 
-SCHEMA_VERSION = 4
-
-PAIRED_COLUMNS = tuple(
-    "original_index record_id source_row_number seed prompt_raw "
-    "webster_overfit_type_raw target_image_sha256 latent_l2 latent_rmse "
-    "sscd_cosine_similarity".split()
+OBSERVATION_COLUMNS = tuple(
+    "model_name original_index record_id source_row_number seed prompt kind "
+    "target_image_sha256 generated_image_path generated_image_tile_index "
+    "l2_norm sscd observation_status observation_error".split()
+)
+ANALYSIS_COLUMNS = OBSERVATION_COLUMNS + tuple(
+    "prompt_spearman include_prompt selection_status selection_reason".split()
 )
 FAILED_COLUMNS = tuple(
-    "original_index record_id source_row_number issue_type reason generation_record_path sscd_record_path".split()
+    "original_index record_id source_row_number issue_type reason "
+    "generation_record_path sscd_record_path".split()
 )
 
 
 class ProximityError(RuntimeError):
-    """The local cache or frozen selection cannot support this analysis."""
+    """The local generation, SSCD, or frozen selection cache is unusable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +63,7 @@ class ProximityPaths:
     project_root: Path
     generation_run: Path
     output_directory: Path
+    configuration_filename: str = "run_config.json"
 
     @classmethod
     def build(
@@ -69,29 +72,29 @@ class ProximityPaths:
         generation_run: str | Path,
         *,
         output_run_name: str | None = None,
-        role: str = "experiment",
-        seed_start: int = 0,
-        num_seeds: int = 20,
+        role: str,
+        seed_start: int,
+        num_seeds: int,
     ) -> "ProximityPaths":
-        namespace = f"{role}_S{seed_start}_N{num_seeds}"
         generation = Path(generation_run)
         if not generation.is_absolute():
             generation = root / "logs" / generation
         if output_run_name is None:
             try:
-                output_parent = generation.relative_to(root / "logs").parts[0]
+                output_run_name = generation.relative_to(root / "logs").parts[0]
             except (ValueError, IndexError) as error:
                 raise ValueError(
-                    "output_run_name is required for a generation run outside logs"
+                    "output_run_name is required outside the logs directory"
                 ) from error
-        else:
-            output_parent = output_run_name
-        output = root / "outputs" / output_parent / "proximity" / namespace
+        namespace = f"{role}_S{seed_start}_N{num_seeds}"
+        output = root / "outputs" / output_run_name / "proximity" / namespace
         return cls(root, generation, output)
 
-    @property
-    def records_directory(self) -> Path:
-        return self.output_directory / "records"
+    @classmethod
+    def frozen_selection(
+        cls, root: Path, generation_run: Path, selection_directory: Path
+    ) -> "ProximityPaths":
+        return cls(root, generation_run, selection_directory, "config.json")
 
     @property
     def failed_csv(self) -> Path:
@@ -99,14 +102,11 @@ class ProximityPaths:
 
     @property
     def run_config_json(self) -> Path:
-        return self.output_directory / "run_config.json"
+        return self.output_directory / self.configuration_filename
 
     @property
     def summary_json(self) -> Path:
         return self.output_directory / "summary.json"
-
-    def result_path(self, original_index: str) -> Path:
-        return self.records_directory / f"{safe_index(original_index)}.pt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,25 +122,31 @@ class ProximitySummary:
 @dataclass(frozen=True, slots=True)
 class _GenerationRecord:
     metadata: Mapping[str, object]
-    original_index: str
-    source_row_number: int
-    latent_path: Path
-    target_latent_path: Path
+    completed: CompletedGenerationRecord
+    paths: GenerationPaths
+    generated_image_path: str
     marker_sha256: str
 
 
 def _record_progress(values: Sequence[Any]) -> Iterable[Any]:
-    """Keep per-record proximity work visible in terminals and captured logs."""
-
     return tqdm(
         values,
         total=len(values),
-        desc="[Proximity 1/2] Records",
+        desc="[Proximity] Records",
         unit="record",
         dynamic_ncols=True,
         leave=True,
         disable=False,
     )
+
+
+def _set_record_progress(
+    progress: Any,
+    completed: CompletedGenerationRecord,
+    status: str,
+) -> None:
+    record_id = completed.metadata.get("record_id") or completed.original_index
+    progress.set_postfix(record=record_id, status=status, refresh=True)
 
 
 def _seed_role(
@@ -152,11 +158,46 @@ def _seed_role(
     num_seeds: int,
     seed_start: int,
 ) -> str:
-    """Accept only disjoint experiment runs or the exact selection reference."""
-
     from utils.data.selection import is_reference_configuration
 
-    identity = {
+    if is_reference_configuration(
+        model_name=model_name,
+        scheduler_name=scheduler_name,
+        guidance_scale=guidance_scale,
+        num_inference_steps=num_inference_steps,
+        num_seeds=num_seeds,
+        seed_start=seed_start,
+    ):
+        return "reference"
+    if (
+        isinstance(num_seeds, int)
+        and not isinstance(num_seeds, bool)
+        and num_seeds > 0
+        and seed_start == 0
+    ):
+        return "experiment"
+    raise ProximityError(
+        "seed range must be the first N seeds (--seed-start 0) for the "
+        "experiment, or the next N seeds (--seed-start N) for the matching "
+        "selection reference; N must be positive"
+    )
+
+
+def run_proximity(
+    project_root: str | Path,
+    *,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+    seed_start: int,
+) -> ProximitySummary:
+    """Build on reference seeds N..2N-1 or report a frozen experiment."""
+
+    started = time.monotonic()
+    root = Path(project_root).expanduser().resolve()
+    arguments = {
         "model_name": model_name,
         "scheduler_name": scheduler_name,
         "guidance_scale": guidance_scale,
@@ -164,80 +205,8 @@ def _seed_role(
         "num_seeds": num_seeds,
         "seed_start": seed_start,
     }
-    if is_reference_configuration(**identity):
-        return "reference"
-    if seed_start == 0 and 0 < num_seeds <= 20:
-        return "experiment"
-    raise ProximityError(
-        "seed range must be an experiment starting at 0 with N <= 20, or the "
-        "exact selection reference --scheduler ddim --g 7.5 --T 50 --N 20 "
-        "--seed-start 20; partial overlap with reference seeds 20--39 is "
-        "forbidden"
-    )
-
-
-def _preexisting_selection(
-    root: Path,
-    *,
-    model_name: str,
-    role: str,
-    output_directory: Path,
-) -> Any | None:
-    """Load selection early so incompatible output config fails before writes."""
-
-    from utils.data.selection import (
-        StaleTargetPairSelectionError,
-        load_target_pair_selection,
-        target_pair_selection_directory,
-    )
-
-    directory = target_pair_selection_directory(root, model_name=model_name)
-    if role == "reference" and not directory.exists():
-        return None
-    try:
-        return load_target_pair_selection(root, model_name=model_name)
-    except StaleTargetPairSelectionError as error:
-        raise ProximityError(
-            "Stale frozen target-pair selection is incompatible with "
-            f"proximity schema {SCHEMA_VERSION}.\n"
-            "Archive or remove exactly these two derived locations before "
-            "rebuilding:\n"
-            f"- {directory}\n"
-            f"- {output_directory}"
-        ) from error
-
-
-def run_proximity(
-    project_root: str | Path,
-    *,
-    model_name: str = "sdv1",
-    scheduler_name: str = "ddim",
-    guidance_scale: float = 7.5,
-    num_inference_steps: int = 50,
-    num_seeds: int = 20,
-    seed_start: int = 0,
-) -> ProximitySummary:
-    """Validate local caches, compute proximity, freeze/apply selection, and plot."""
-
-    started = time.monotonic()
-    root = Path(project_root).expanduser().resolve()
-    role = _seed_role(
-        model_name=model_name,
-        scheduler_name=scheduler_name,
-        guidance_scale=guidance_scale,
-        num_inference_steps=num_inference_steps,
-        num_seeds=num_seeds,
-        seed_start=seed_start,
-    )
-    cache_paths = generation_paths(
-        root,
-        model_name=model_name,
-        scheduler_name=scheduler_name,
-        guidance_scale=guidance_scale,
-        num_inference_steps=num_inference_steps,
-        num_seeds=num_seeds,
-        seed_start=seed_start,
-    )
+    role = _seed_role(**arguments)
+    cache = generation_paths(root, **arguments)
     run_name = generation_run_name(
         model_name,
         scheduler_name,
@@ -246,7 +215,7 @@ def run_proximity(
         num_seeds,
         seed_start,
     )
-    output_run_name = generation_run_name(
+    parent_name = generation_run_name(
         model_name,
         scheduler_name,
         guidance_scale,
@@ -256,78 +225,90 @@ def run_proximity(
     )
     paths = ProximityPaths.build(
         root,
-        cache_paths.run_directory,
-        output_run_name=output_run_name,
+        cache.run_directory,
+        output_run_name=parent_name,
         role=role,
         seed_start=seed_start,
         num_seeds=num_seeds,
     )
+
+    if role == "reference":
+        frozen = _frozen_reference_result(
+            root,
+            cache.run_directory,
+            model_name,
+            scheduler_name,
+            guidance_scale,
+            num_inference_steps,
+            num_seeds,
+        )
+        if frozen is not None:
+            return frozen
+
     generation_command = _generation_command(
-        model_name, scheduler_name, guidance_scale, num_inference_steps,
-        num_seeds, seed_start,
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start,
     )
-    if not cache_paths.run_config.exists() and not cache_paths.run_config.is_symlink():
+    if not cache.run_config.is_file() or cache.run_config.is_symlink():
         raise ProximityError(
-            f"required generation configuration is absent: {cache_paths.run_config}\n"
+            f"required generation configuration is absent: {cache.run_config}\n"
             f"Create it with:\n{generation_command}"
         )
-    generation_config = require_generation_run(cache_paths)
-    _validate_generation_invocation(
-        generation_config,
-        model_name=model_name,
-        scheduler_name=scheduler_name,
-        guidance_scale=guidance_scale,
-        num_inference_steps=num_inference_steps,
-        num_seeds=num_seeds,
-        seed_start=seed_start,
-    )
-    sscd_config_path = paths.generation_run / "sscd_config.json"
-    sscd_command = _sscd_command(
-        model_name, scheduler_name, guidance_scale, num_inference_steps,
-        num_seeds, seed_start,
-    )
-    if not sscd_config_path.exists() and not sscd_config_path.is_symlink():
+    generation = require_generation_run(cache)
+    _validate_generation_invocation(generation, **arguments)
+    sscd_path = cache.run_directory / "sscd_config.json"
+    if not sscd_path.is_file() or sscd_path.is_symlink():
         raise ProximityError(
-            f"required cached SSCD configuration is absent: {sscd_config_path}\n"
-            f"Create it with:\n{sscd_command}"
+            f"required cached SSCD configuration is absent: {sscd_path}\n"
+            f"Create it with:\n{
+                _sscd_command(
+                    model_name,
+                    scheduler_name,
+                    guidance_scale,
+                    num_inference_steps,
+                    num_seeds,
+                    seed_start,
+                )
+            }"
         )
-    sscd_config = _load_sscd_config(paths.generation_run, generation_config)
-    preexisting_selection = _preexisting_selection(
-        root,
-        model_name=model_name,
-        role=role,
-        output_directory=paths.output_directory,
-    )
-    if preexisting_selection is not None:
-        desired = _analysis_configuration(
-            paths, run_name, generation_config, sscd_config, preexisting_selection
-        )
-        _write_or_validate_configuration(paths.run_config_json, desired)
-    elif paths.run_config_json.exists() or paths.run_config_json.is_symlink():
-        raise ProximityError(
-            "A derived proximity output exists without its frozen reference "
-            "selection. Archive or remove exactly this derived location before "
-            f"rebuilding:\n- {paths.output_directory}"
-        )
-    paths.records_directory.mkdir(parents=True, exist_ok=True)
-    records = list_completed_records(cache_paths)
-    if not records:
-        raise ProximityError(
-            f"no completed generation records found in {paths.generation_run / 'record'}\n"
-            f"Create them with:\n{_generation_command(
-                model_name, scheduler_name, guidance_scale, num_inference_steps,
-                num_seeds, seed_start,
-            )}"
+    sscd = _load_sscd_config(cache.run_directory, generation)
+
+    selection = None
+    if role == "experiment":
+        from utils.data.selection import load_target_pair_selection
+
+        selection = load_target_pair_selection(
+            root,
+            model_name=model_name,
+            scheduler_name=scheduler_name,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            num_seeds=num_seeds,
         )
 
-    paired_rows: list[dict[str, object]] = []
+    records = list_completed_records(cache)
+    if not records:
+        raise ProximityError(
+            f"no completed generation records found in {cache.record_directory}\n"
+            f"Create them with:\n{generation_command}"
+        )
+    _require_generation_coverage(cache, records)
+
+    rows: list[dict[str, object]] = []
     failures: list[dict[str, object]] = []
-    for completed in _record_progress(records):
+    progress = _record_progress(records)
+    for completed in progress:
+        _set_record_progress(progress, completed, "processing")
         try:
-            record = _validated_generation_record(cache_paths, completed, generation_config)
-            proximity = _load_or_compute_result(paths, record, generation_config)
-            scores = _validated_sscd_scores(root, paths.generation_run, record, generation_config, sscd_config)
-            paired_rows.extend(_paired_rows(record, proximity, scores))
+            record = _validated_record(root, cache, completed, generation)
+            l2 = _terminal_l2(record)
+            scores = _sscd_scores(root, record, generation, sscd)
+            rows.extend(_paired_rows(record, l2, scores, model_name=model_name))
+            _set_record_progress(progress, completed, "complete")
         except (
             CacheIOError,
             GenerationCacheError,
@@ -338,90 +319,163 @@ def run_proximity(
             TypeError,
             ValueError,
         ) as error:
-            failures.append(_failure_row(completed, error, paths.generation_run))
+            if role == "reference":
+                try:
+                    failed_rows = _failed_reference_rows(
+                        root,
+                        cache,
+                        completed,
+                        generation,
+                        error,
+                        model_name=model_name,
+                    )
+                except Exception:
+                    _set_record_progress(progress, completed, "failed")
+                    raise
+                rows.extend(failed_rows)
+                _set_record_progress(progress, completed, "unusable")
+            else:
+                failures.append(_failure_row(completed, error, cache.run_directory))
+                _set_record_progress(progress, completed, "failed")
 
-    atomic_write_frame_csv(pd.DataFrame(failures, columns=FAILED_COLUMNS), paths.failed_csv)
+    observations = pd.DataFrame(rows, columns=OBSERVATION_COLUMNS).sort_values(
+        ["source_row_number", "original_index", "seed"],
+        kind="stable",
+        ignore_index=True,
+    )
+    if role == "reference":
+        from utils.data.selection import build_target_pair_selection
+
+        build_target_pair_selection(
+            root,
+            model_name=model_name,
+            scheduler_name=scheduler_name,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            num_seeds=num_seeds,
+            paired_frame=observations,
+            records_frame=_reference_records_frame(records, model_name),
+            reference_run_config=generation,
+            sscd_config=sscd,
+        )
+        result = _frozen_reference_result(
+            root,
+            cache.run_directory,
+            model_name,
+            scheduler_name,
+            guidance_scale,
+            num_inference_steps,
+            num_seeds,
+        )
+        assert result is not None
+        return result
+
+    assert selection is not None
+    analysis = _annotate_selection(
+        observations, selection, require_complete=not failures
+    )
+    configuration = _analysis_configuration(
+        paths, run_name, generation, sscd, selection
+    )
+    _write_configuration(paths.run_config_json, configuration)
     if failures:
-        values = {
-            "schema_version": SCHEMA_VERSION,
-            "complete": False,
-            "run_name": run_name,
-            "generation_scientific_config_hash": generation_config["scientific_config_hash"],
-            "sscd_configuration_hash": sscd_config["configuration_hash"],
-            "failed_rows": len(failures),
-            "failed_csv": _display_path(paths.failed_csv, root),
-            "run_duration_seconds": time.monotonic() - started,
-            "finished_at_utc": utc_now(),
-        }
-        atomic_write_json(paths.summary_json, values)
-        return ProximitySummary(paths, values)
+        _remove_optional(paths.output_directory / "proximity_vs_sscd.png")
+        atomic_write_frame_csv(analysis, paths.output_directory / "proximity.csv")
+        atomic_write_frame_csv(
+            pd.DataFrame(failures, columns=FAILED_COLUMNS), paths.failed_csv
+        )
+        values = _summary(
+            paths,
+            run_name,
+            generation,
+            sscd,
+            selection,
+            analysis,
+            duration=time.monotonic() - started,
+            failures=failures,
+        )
+    else:
+        _remove_optional(paths.failed_csv)
+        statistics = write_analysis_outputs(paths.output_directory, analysis=analysis)
+        values = _summary(
+            paths,
+            run_name,
+            generation,
+            sscd,
+            selection,
+            analysis,
+            duration=time.monotonic() - started,
+            statistics=statistics,
+        )
+    atomic_write_json(paths.summary_json, values)
+    return ProximitySummary(paths, values)
 
-    paired_all = pd.DataFrame(paired_rows, columns=PAIRED_COLUMNS)
-    paired_all = paired_all.sort_values(["source_row_number", "seed"], kind="stable").reset_index(drop=True)
-    selection = _selection_for_run(
+
+def _frozen_reference_result(
+    root: Path,
+    generation_run: Path,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+) -> ProximitySummary | None:
+    from utils.data.selection import (
+        load_target_pair_selection,
+        target_pair_selection_directory,
+    )
+
+    directory = target_pair_selection_directory(
         root,
         model_name=model_name,
         scheduler_name=scheduler_name,
         guidance_scale=guidance_scale,
         num_inference_steps=num_inference_steps,
         num_seeds=num_seeds,
-        seed_start=seed_start,
-        paired_all=paired_all,
-        generation_config=generation_config,
-        sscd_config=sscd_config,
     )
-    paired_all = _annotate_selection(paired_all, selection)
-    paired_selected = _selected_frame(paired_all, selection)
-    run_config = _analysis_configuration(
-        paths, run_name, generation_config, sscd_config, selection
+    if not directory.exists() and not directory.is_symlink():
+        return None
+    selection = load_target_pair_selection(
+        root,
+        model_name=model_name,
+        scheduler_name=scheduler_name,
+        guidance_scale=guidance_scale,
+        num_inference_steps=num_inference_steps,
+        num_seeds=num_seeds,
     )
-    # Validate the scientific identity before copying or publishing any tables.
-    _write_or_validate_configuration(
-        paths.run_config_json,
-        run_config,
-        refresh_source_provenance=True,
-    )
-    _write_selection_outputs(paths.output_directory, selection)
-    statistics = write_analysis_outputs(
-        paths.output_directory,
-        paired_all=paired_all,
-        paired_selected=paired_selected,
-    )
-    values = _complete_summary(
-        paths,
-        run_name,
-        generation_config,
-        sscd_config,
-        selection,
-        statistics,
-        time.monotonic() - started,
-    )
-    atomic_write_json(paths.summary_json, values)
-    return ProximitySummary(paths, values)
+    paths = ProximityPaths.frozen_selection(root, generation_run, directory)
+    summary = read_json(paths.summary_json)
+    if summary.get("selection_hash") != selection.sha256:
+        raise ProximityError("frozen selection summary hash differs")
+    write_selection_figure(directory)
+    return ProximitySummary(paths, summary)
 
 
-def _validate_generation_invocation(config: Mapping[str, object], **expected: object) -> None:
+def _validate_generation_invocation(
+    config: Mapping[str, object], **expected: object
+) -> None:
     science = config.get("scientific_config")
     if not isinstance(science, Mapping):
         raise ProximityError("generation scientific_config is missing")
     seeds = science.get("seeds")
     if not isinstance(seeds, list) or not seeds:
         raise ProximityError("generation seeds are missing")
-    scheduler = science.get("scheduler")
-    scheduler_name = scheduler.get("name") if isinstance(scheduler, Mapping) else science.get("scheduler_name")
     observed = {
         "model_name": science.get("model_cli_name"),
-        "scheduler_name": scheduler_name,
+        "scheduler_name": _scheduler_name(science),
         "guidance_scale": science.get("guidance_scale"),
         "num_inference_steps": science.get("num_inference_steps"),
         "num_seeds": science.get("num_seeds"),
         "seed_start": seeds[0],
     }
-    for key, value in expected.items():
-        if canonical_json(observed.get(key)) != canonical_json(value):
-            raise ProximityError(f"generation configuration {key} differs")
-    start = int(expected["seed_start"])
-    count = int(expected["num_seeds"])
+    wrong = [
+        key
+        for key, value in expected.items()
+        if canonical_json(observed.get(key)) != canonical_json(value)
+    ]
+    if wrong:
+        raise ProximityError("generation configuration differs at: " + ", ".join(wrong))
+    start, count = int(expected["seed_start"]), int(expected["num_seeds"])
     if seeds != list(range(start, start + count)):
         raise ProximityError("generation seeds differ from seed-start and N")
     _latent_shape(science.get("latent_shape"))
@@ -430,12 +484,9 @@ def _validate_generation_invocation(config: Mapping[str, object], **expected: ob
 def _load_sscd_config(run: Path, generation: Mapping[str, object]) -> dict[str, Any]:
     from utils.experiments.sscd import sscd_configuration_hash
 
-    path = run / "sscd_config.json"
-    if not path.is_file() or path.is_symlink():
-        raise ProximityError(f"required cached SSCD configuration is absent: {path}")
-    config = read_json(path)
-    stored_hash = config.get("configuration_hash")
-    if not _sha256(stored_hash) or sscd_configuration_hash(config) != stored_hash:
+    config = read_json(run / "sscd_config.json")
+    digest = config.get("configuration_hash")
+    if not _sha256(digest) or sscd_configuration_hash(config) != digest:
         raise ProximityError("SSCD configuration hash is invalid")
     science = generation["scientific_config"]
     assert isinstance(science, Mapping)
@@ -444,129 +495,122 @@ def _load_sscd_config(run: Path, generation: Mapping[str, object]) -> dict[str, 
         "num_seeds": science["num_seeds"],
         "seeds": science["seeds"],
     }
-    for key, value in expected.items():
-        if canonical_json(config.get(key)) != canonical_json(value):
-            raise ProximityError(f"SSCD configuration {key} differs")
+    if any(
+        canonical_json(config.get(key)) != canonical_json(value)
+        for key, value in expected.items()
+    ):
+        raise ProximityError("SSCD configuration differs from generation")
     return config
 
 
-def _validated_generation_record(
+def _require_generation_coverage(
+    paths: GenerationPaths, records: Sequence[CompletedGenerationRecord]
+) -> None:
+    path = paths.summary_json
+    if not path.is_file() or path.is_symlink():
+        raise ProximityError(f"required generation summary is absent: {path}")
+    summary = read_json(path)
+    if (
+        summary.get("failed_rows") != 0
+        or summary.get("completed_rows") != len(records)
+        or summary.get("selected_rows") != len(records)
+    ):
+        raise ProximityError(
+            "generation did not complete every selected prompt; rerun generation"
+        )
+
+
+def _validated_record(
+    root: Path,
     paths: GenerationPaths,
     completed: CompletedGenerationRecord,
     config: Mapping[str, object],
 ) -> _GenerationRecord:
-    record = completed.metadata
-    marker_path = completed.marker_path
+    metadata = completed.metadata
+    index = completed.original_index
     science = config["scientific_config"]
     assert isinstance(science, Mapping)
-    index = completed.original_index
-    validation = validate_generation_record(
-        paths,
-        index,
-        expected_scientific_hash=str(config["scientific_config_hash"]),
-        load_tensors=False,
-    )
-    if not validation.valid:
-        raise ProximityError("invalid completed generation record: " + "; ".join(validation.errors))
     expected = {
         "scientific_config_hash": config["scientific_config_hash"],
         "model_cli_name": science["model_cli_name"],
+        "scheduler_name": _scheduler_name(science),
         "guidance_scale": science["guidance_scale"],
         "num_inference_steps": science["num_inference_steps"],
         "num_seeds": science["num_seeds"],
         "seeds": science["seeds"],
         "latent_shape": science["latent_shape"],
+        "preview_image_path": f"image/{index}.png",
     }
-    scheduler = science.get("scheduler")
-    expected["scheduler_name"] = (
-        scheduler.get("name") if isinstance(scheduler, Mapping) else science.get("scheduler_name")
-    )
-    for key, value in expected.items():
-        if canonical_json(record.get(key)) != canonical_json(value):
-            raise ProximityError(f"generation marker {key} differs")
-    if not isinstance(record.get("record_id"), str) or not record["record_id"]:
-        raise ProximityError("generation marker record_id is invalid")
-    if not isinstance(record.get("prompt_raw"), str):
-        raise ProximityError("generation marker prompt_raw is invalid")
-    return _GenerationRecord(
-        record,
-        index,
-        completed.source_row_number,
-        paths.latent_path(index),
+    wrong = [
+        key
+        for key, value in expected.items()
+        if canonical_json(metadata.get(key)) != canonical_json(value)
+    ]
+    if wrong:
+        raise ProximityError("generation marker differs at: " + ", ".join(wrong))
+    hashes = metadata.get("tensor_file_sha256")
+    if not isinstance(hashes, Mapping):
+        raise ProximityError("generation tensor hashes are missing")
+    _require_cached_file(paths.latent_path(index), hashes.get("latent"), "latent")
+    _require_cached_file(
         paths.target_latent_path(index),
-        file_sha256(marker_path),
+        hashes.get("target_latent"),
+        "target latent",
+    )
+    _require_cached_file(
+        paths.image_path(index),
+        metadata.get("preview_image_sha256"),
+        "generated montage",
+    )
+    return _GenerationRecord(
+        metadata,
+        completed,
+        paths,
+        _display_path(paths.image_path(index), root),
+        file_sha256(completed.marker_path),
     )
 
 
-def _load_or_compute_result(
-    paths: ProximityPaths,
-    record: _GenerationRecord,
-    config: Mapping[str, object],
-) -> Mapping[str, object]:
-    result_path = paths.result_path(record.original_index)
-    expected = {
-        "schema_version": SCHEMA_VERSION,
-        "original_index": record.original_index,
-        "generation_record_sha256": record.marker_sha256,
-        "generation_scientific_config_hash": config["scientific_config_hash"],
-        "generation_latent_sha256": record.metadata["tensor_file_sha256"]["latent"],  # type: ignore[index]
-        "generation_target_latent_sha256": record.metadata["tensor_file_sha256"]["target_latent"],  # type: ignore[index]
-        "seeds": record.metadata["seeds"],
-        "latent_shape": record.metadata["latent_shape"],
-    }
-    if result_path.is_file() and not result_path.is_symlink():
-        cached = safe_torch_load(result_path)
-        if (
-            isinstance(cached, Mapping)
-            and all(canonical_json(cached.get(key)) == canonical_json(value) for key, value in expected.items())
-            and _valid_distance_vectors(
-                cached,
-                int(record.metadata["num_seeds"]),
-                expected["latent_shape"],
-            )
-        ):
-            return cached
-    trajectory = safe_torch_load(record.latent_path)
-    target = safe_torch_load(record.target_latent_path)
+def _terminal_l2(record: _GenerationRecord) -> torch.Tensor:
+    trajectory = safe_torch_load(
+        record.paths.latent_path(record.completed.original_index)
+    )
+    target = safe_torch_load(
+        record.paths.target_latent_path(record.completed.original_index)
+    )
     if not isinstance(trajectory, torch.Tensor) or not isinstance(target, torch.Tensor):
-        raise ProximityError("generation proximity inputs must be plain tensors")
-    expected_shape = _latent_shape(record.metadata["latent_shape"])
-    expected_trajectory = (
+        raise ProximityError("generation proximity inputs must be tensors")
+    shape = _latent_shape(record.metadata["latent_shape"])
+    expected = (
         int(record.metadata["num_seeds"]),
         int(record.metadata["num_inference_steps"]) + 1,
-        *expected_shape,
+        *shape,
     )
-    if tuple(trajectory.shape) != expected_trajectory or tuple(target.shape) != expected_shape:
-        raise ProximityError("cached latent tensor shape differs from marker")
-    distances = compute_latent_distances(trajectory[:, -1], target)
-    payload = {
-        **expected,
-        "latent_l2": distances.l2_norms,
-        "latent_rmse": distances.latent_rmse,
-    }
-    atomic_torch_save(payload, result_path)
-    return payload
+    if tuple(trajectory.shape) != expected or tuple(target.shape) != shape:
+        raise ProximityError("generation latent shape differs from marker")
+    return compute_latent_distances(trajectory[:, -1], target).l2_norms
 
 
-def _validated_sscd_scores(
+def _sscd_scores(
     root: Path,
-    run: Path,
     record: _GenerationRecord,
     generation: Mapping[str, object],
     config: Mapping[str, object],
 ) -> torch.Tensor:
-    marker_path = run / "sscd_record" / f"{record.original_index}.json"
+    index = record.completed.original_index
+    run = record.paths.run_directory
+    marker_path = run / "sscd_record" / f"{index}.json"
     if not marker_path.is_file() or marker_path.is_symlink():
         raise ProximityError(f"cached SSCD marker is absent: {marker_path}")
     marker = read_json(marker_path)
     expected = {
-        "original_index": record.original_index,
+        "original_index": index,
         "record_id": record.metadata["record_id"],
-        "source_row_number": record.source_row_number,
+        "source_row_number": record.completed.source_row_number,
         "prompt_raw": record.metadata["prompt_raw"],
         "generation_record_sha256": record.marker_sha256,
         "generation_scientific_config_hash": generation["scientific_config_hash"],
-        "generation_latent_sha256": record.metadata["tensor_file_sha256"]["latent"],  # type: ignore[index]
+        "generation_latent_sha256": record.metadata["tensor_file_sha256"]["latent"],
         "target_image_sha256": record.metadata.get("target_image_sha256"),
         "sscd_configuration_hash": config["configuration_hash"],
         "num_seeds": record.metadata["num_seeds"],
@@ -574,164 +618,198 @@ def _validated_sscd_scores(
         "score_shape": [record.metadata["num_seeds"]],
         "score_dtype": "float32",
     }
-    for key, value in expected.items():
-        if canonical_json(marker.get(key)) != canonical_json(value):
-            raise ProximityError(f"SSCD marker {key} differs")
-    for key in (
-        "sscd_model_name",
-        "sscd_checkpoint_sha256",
-        "sscd_feature_dimension",
-        "sscd_input_size",
-        "sscd_preprocessing_hash",
-    ):
-        if key in config and canonical_json(marker.get(key)) != canonical_json(config[key]):
-            raise ProximityError(f"SSCD marker {key} differs")
-    score_path = _canonical_record_path(
-        root,
-        run,
-        marker.get("score_path"),
-        run / "sscd" / f"{record.original_index}.pt",
+    wrong = [
+        key
+        for key, value in expected.items()
+        if canonical_json(marker.get(key)) != canonical_json(value)
+    ]
+    if wrong:
+        raise ProximityError("SSCD marker differs at: " + ", ".join(wrong))
+    score_path = _canonical_score_path(
+        root, run, marker.get("score_path"), run / "sscd" / f"{index}.pt"
     )
-    _validate_cached_file(score_path, marker.get("score_sha256"), "SSCD score")
-    score = safe_torch_load(score_path)
+    if (
+        not _sha256(marker.get("score_sha256"))
+        or not score_path.is_file()
+        or score_path.is_symlink()
+        or file_sha256(score_path) != marker["score_sha256"]
+    ):
+        raise ProximityError("cached SSCD score file is invalid")
+    scores = safe_torch_load(score_path)
     count = int(record.metadata["num_seeds"])
     if (
-        not isinstance(score, torch.Tensor)
-        or score.dtype != torch.float32
-        or score.device.type != "cpu"
-        or not score.is_contiguous()
-        or tuple(score.shape) != (count,)
-        or not bool(torch.isfinite(score).all())
+        not isinstance(scores, torch.Tensor)
+        or scores.dtype != torch.float32
+        or scores.device.type != "cpu"
+        or not scores.is_contiguous()
+        or tuple(scores.shape) != (count,)
+        or not bool(torch.isfinite(scores).all())
+        or bool((scores < -1.00001).any())
+        or bool((scores > 1.00001).any())
     ):
         raise ProximityError("cached SSCD score tensor is invalid")
-    if bool((score < -1.00001).any()) or bool((score > 1.00001).any()):
-        raise ProximityError("cached SSCD score is outside the cosine range")
-    return score
+    return scores
 
 
 def _paired_rows(
     record: _GenerationRecord,
-    proximity: Mapping[str, object],
+    l2: torch.Tensor,
     scores: torch.Tensor,
+    *,
+    model_name: str,
 ) -> list[dict[str, object]]:
-    l2 = proximity["latent_l2"]
-    rmse = proximity["latent_rmse"]
-    assert isinstance(l2, torch.Tensor) and isinstance(rmse, torch.Tensor)
+    count = int(record.metadata["num_seeds"])
+    if (
+        tuple(l2.shape) != (count,)
+        or not bool(torch.isfinite(l2).all())
+        or tuple(scores.shape) != (count,)
+    ):
+        raise ProximityError("L2 and SSCD values do not align with seeds")
     common = {
-        "original_index": record.original_index,
+        "model_name": model_name,
+        "original_index": record.completed.original_index,
         "record_id": record.metadata["record_id"],
-        "source_row_number": record.source_row_number,
-        "prompt_raw": record.metadata["prompt_raw"],
-        "webster_overfit_type_raw": record.metadata.get("webster_overfit_type"),
+        "source_row_number": record.completed.source_row_number,
+        "prompt": record.metadata["prompt_raw"],
+        "kind": normalize_webster_type(record.metadata.get("webster_overfit_type")),
         "target_image_sha256": record.metadata.get("target_image_sha256"),
+        "generated_image_path": record.generated_image_path,
     }
     return [
         {
             **common,
             "seed": int(seed),
-            "latent_l2": float(l2[position]),
-            "latent_rmse": float(rmse[position]),
-            "sscd_cosine_similarity": float(scores[position]),
+            "generated_image_tile_index": position,
+            "l2_norm": float(l2[position]),
+            "sscd": float(scores[position]),
+            "observation_status": "complete",
+            "observation_error": "",
         }
         for position, seed in enumerate(record.metadata["seeds"])
     ]
 
 
-def _selection_for_run(root: Path, **values: object) -> Any:
-    from utils.data.selection import (
-        ensure_reference_target_pair_selection,
-        is_reference_configuration,
-        load_target_pair_selection,
-    )
+def _reference_records_frame(
+    records: Sequence[CompletedGenerationRecord], model_name: str
+) -> pd.DataFrame:
+    rows = []
+    for completed in records:
+        metadata = completed.metadata
+        row = {
+            "model_name": model_name,
+            "original_index": completed.original_index,
+            "record_id": metadata.get("record_id"),
+            "source_row_number": completed.source_row_number,
+            "prompt": metadata.get("prompt_raw"),
+            "kind": normalize_webster_type(metadata.get("webster_overfit_type")),
+            "target_image_sha256": metadata.get("target_image_sha256"),
+        }
+        if (
+            not isinstance(row["record_id"], str)
+            or not row["record_id"]
+            or not isinstance(row["prompt"], str)
+            or not _sha256(row["target_image_sha256"])
+        ):
+            raise ProximityError(
+                "cannot establish prompt identity for reference record "
+                f"{completed.original_index}"
+            )
+        rows.append(row)
+    return pd.DataFrame(rows)
 
-    identity = {
-        key: values[key]
-        for key in (
-            "model_name",
-            "scheduler_name",
-            "guidance_scale",
-            "num_inference_steps",
-            "num_seeds",
-            "seed_start",
-        )
+
+def _failed_reference_rows(
+    root: Path,
+    paths: GenerationPaths,
+    completed: CompletedGenerationRecord,
+    generation: Mapping[str, object],
+    error: Exception,
+    *,
+    model_name: str,
+) -> list[dict[str, object]]:
+    identity = _reference_records_frame([completed], model_name).iloc[0].to_dict()
+    science = generation["scientific_config"]
+    assert isinstance(science, Mapping)
+    common = {
+        **identity,
+        "generated_image_path": _display_path(
+            paths.image_path(completed.original_index), root
+        ),
     }
-    if is_reference_configuration(**identity):
-        return ensure_reference_target_pair_selection(
-            root,
-            model_name=str(values["model_name"]),
-            paired_frame=values["paired_all"],
-            reference_run_config=values["generation_config"],
-            sscd_config=values["sscd_config"],
-        )
-    return load_target_pair_selection(root, model_name=str(values["model_name"]))
+    message = f"{type(error).__name__}: {error}"
+    return [
+        {
+            **common,
+            "seed": int(seed),
+            "generated_image_tile_index": position,
+            "l2_norm": float("nan"),
+            "sscd": float("nan"),
+            "observation_status": "cache_error",
+            "observation_error": message,
+        }
+        for position, seed in enumerate(science["seeds"])
+    ]
 
 
-def _annotate_selection(frame: pd.DataFrame, selection: Any) -> pd.DataFrame:
-    selection_frame = selection.frame.copy(deep=True)
-    selection_frame["original_index"] = selection_frame["original_index"].astype(str)
-    frame = frame.copy(deep=True)
-    frame["original_index"] = frame["original_index"].astype(str)
-    fields = [
-        "original_index",
-        "webster_overfit_type_normalized",
-        "include_target_pair",
+def _annotate_selection(
+    frame: pd.DataFrame,
+    selection: Any,
+    *,
+    require_complete: bool = True,
+) -> pd.DataFrame:
+    prompts = selection.prompt_frame.copy(deep=True)
+    prompts["original_index"] = prompts["original_index"].astype(str)
+    observations = frame.copy(deep=True)
+    observations["original_index"] = observations["original_index"].astype(str)
+    identity = (
+        "model_name",
+        "record_id",
+        "source_row_number",
+        "prompt",
+        "kind",
+        "target_image_sha256",
+    )
+    decisions = (
+        "prompt_spearman",
+        "include_prompt",
         "selection_status",
         "selection_reason",
-        "target_semantics",
-        "selection_hash",
-    ]
-    annotated = frame.merge(
-        selection_frame[fields],
+    )
+    required = {"original_index", *identity, *decisions}
+    missing = sorted(required - set(prompts))
+    if missing:
+        raise ProximityError(
+            "frozen selection prompt table is missing: " + ", ".join(missing)
+        )
+    annotated = observations.merge(
+        prompts.loc[:, ["original_index", *identity, *decisions]],
         on="original_index",
         how="left",
+        suffixes=("", "_selection"),
         validate="many_to_one",
     )
-    if annotated["include_target_pair"].isna().any():
-        missing = sorted(annotated.loc[annotated["include_target_pair"].isna(), "original_index"].unique())
-        raise ProximityError("frozen selection has no row for: " + ", ".join(missing))
-    return annotated
-
-
-def _selected_frame(frame: pd.DataFrame, selection: Any) -> pd.DataFrame:
-    from utils.data.selection import apply_target_pair_selection
-
-    return apply_target_pair_selection(frame, selection)
-
-
-def _write_selection_outputs(output_directory: Path, selection: Any) -> None:
-    """Copy only validated current-schema selection sidecars into this analysis."""
-
-    from utils.data.selection import target_pair_selection_directory
-
-    source_directory = target_pair_selection_directory(
-        selection.root, model_name=selection.model_name
+    if annotated["include_prompt"].isna().any():
+        raise ProximityError("experiment contains a prompt absent from selection")
+    observed, frozen = (
+        set(observations["original_index"]),
+        set(prompts["original_index"]),
     )
-    for filename in (
-        "selection.csv",
-        "selected_tv.csv",
-        "excluded_tv.csv",
-        "selected_n.csv",
-        "excluded_n.csv",
-        "threshold_diagnostics.csv",
-    ):
-        source = source_directory / filename
-        if not source.is_file() or source.is_symlink():
-            raise ProximityError(f"frozen selection sidecar is invalid: {source}")
-        atomic_copy(source, output_directory / filename)
-
-
-def _selection_contract(selection: Any) -> dict[str, object]:
-    """Extract the validated scientific selection rule for run provenance."""
-
-    configuration = selection.configuration
-    return {
-        "schema_version": configuration["schema_version"],
-        "selection_policy": configuration["selection_policy"],
-        "boundary": configuration["boundary"],
-        "category_rules": configuration["category_rules"],
-        "selection_seeds": configuration["selection_seeds"],
-        "reference_validation_seeds": configuration["reference_validation_seeds"],
-    }
+    if require_complete and observed != frozen:
+        raise ProximityError("experiment does not contain every frozen prompt")
+    for field in identity:
+        other = f"{field}_selection"
+        if any(
+            canonical_json(left) != canonical_json(right)
+            for left, right in zip(annotated[field], annotated[other], strict=True)
+        ):
+            raise ProximityError(f"experiment and frozen selection differ at {field}")
+        annotated = annotated.drop(columns=other)
+    annotated["include_prompt"] = annotated["include_prompt"].astype(bool)
+    return annotated.loc[:, ANALYSIS_COLUMNS].sort_values(
+        ["source_row_number", "original_index", "seed"],
+        kind="stable",
+        ignore_index=True,
+    )
 
 
 def _analysis_configuration(
@@ -743,235 +821,162 @@ def _analysis_configuration(
 ) -> dict[str, object]:
     science = generation["scientific_config"]
     assert isinstance(science, Mapping)
-    seeds = science.get("seeds")
-    is_experiment = isinstance(seeds, list) and bool(seeds) and seeds[0] == 0
-    source_files = (
-        Path(__file__),
-        paths.project_root / "utils/experiments/plotting.py",
-        paths.project_root / "utils/data/selection.py",
-        paths.project_root / "utils/models/latent.py",
-    )
-    selection_contract = _selection_contract(selection)
     return {
-        "schema_version": SCHEMA_VERSION,
         "analysis": "proximity",
         "source": "validated_generation_and_sscd_caches_only",
         "run_name": run_name,
         "generation_run_path": _display_path(paths.generation_run, paths.project_root),
         "generation_scientific_config_hash": generation["scientific_config_hash"],
         "sscd_configuration_hash": sscd["configuration_hash"],
-        "selection_policy": selection_contract["selection_policy"],
+        "selection_policy": selection.configuration["selection_policy"],
         "selection_hash": selection.sha256,
-        "selection_contract": selection_contract,
         "model_name": science["model_cli_name"],
         "scheduler_name": _scheduler_name(science),
         "guidance_scale": science["guidance_scale"],
         "num_inference_steps": science["num_inference_steps"],
         "num_seeds": science["num_seeds"],
         "seeds": science["seeds"],
-        "seed_role": "experiment" if is_experiment else "selection_reference",
         "terminal_latent_index": -1,
-        "raw_distance": "euclidean_l2",
-        "dimension_normalized_distance": "latent_l2 / sqrt(d)",
-        "paper_facing_table": "paired_selected" if is_experiment else None,
-        "duplicates_generation_tensors": False,
-        "source_provenance": {
-            _display_path(source, paths.project_root): file_sha256(source)
-            for source in source_files
+        "distance": "euclidean_l2",
+        "outputs": {
+            "table": "proximity.csv",
+            "figure": "proximity_vs_sscd.png",
         },
     }
 
 
-def _write_or_validate_configuration(
-    path: Path,
-    desired: Mapping[str, object],
-    *,
-    refresh_source_provenance: bool = False,
-) -> None:
+def _write_configuration(path: Path, desired: Mapping[str, object]) -> None:
     if path.exists() or path.is_symlink():
         if path.is_symlink() or not path.is_file():
             raise ProximityError(f"unsafe existing analysis configuration: {path}")
-        existing = read_json(path)
-        if canonical_json(existing) == canonical_json(desired):
-            return
-        if _same_analysis_contract(existing, desired):
-            if refresh_source_provenance:
-                atomic_write_json(path, desired)
-            return
-        if _uses_stale_selection_policy(existing, desired):
+        if canonical_json(read_json(path)) != canonical_json(desired):
             raise ProximityError(
-                "Existing derived proximity output uses an incompatible frozen "
-                "selection policy. Archive or remove exactly this derived "
-                f"location before rebuilding:\n- {path.parent}"
+                f"existing analysis configuration is incompatible: {path}"
             )
-        raise ProximityError(f"existing analysis configuration is incompatible: {path}")
+        return
     atomic_write_json(path, desired)
 
 
-def _uses_stale_selection_policy(
-    existing: Mapping[str, object],
-    desired: Mapping[str, object],
-) -> bool:
-    """Return whether an old derived run predates the current selection contract."""
-
-    return existing.get("analysis") == "proximity" and any(
-        canonical_json(existing.get(key)) != canonical_json(desired.get(key))
-        for key in ("schema_version", "selection_policy", "selection_contract")
-    )
-
-
-def _same_analysis_contract(
-    existing: Mapping[str, object],
-    desired: Mapping[str, object],
-) -> bool:
-    """Compare schema-versioned science while treating source hashes as audit data."""
-
-    existing_values = dict(existing)
-    desired_values = dict(desired)
-    existing_values.pop("source_provenance", None)
-    desired_values.pop("source_provenance", None)
-    return canonical_json(existing_values) == canonical_json(desired_values)
-
-
-def _selection_prompt_counts(selection: Any) -> dict[str, int]:
-    """Count prompt-level outcomes and validation disagreements by category."""
-
-    frame = selection.frame
-    labels = frame["webster_overfit_type_normalized"]
-    included = frame["include_target_pair"].astype(bool)
-    agreement = frame["selection_validation_agree"]
-    tv = labels.eq("TV")
-    normal = labels.eq("N")
-    return {
-        "included_tv_prompts": int((tv & included).sum()),
-        "excluded_tv_prompts": int((tv & ~included).sum()),
-        "included_n_prompts": int((normal & included).sum()),
-        "excluded_n_prompts": int((normal & ~included).sum()),
-        "tv_selection_validation_disagreements": int((tv & agreement.eq(False)).sum()),
-        "n_selection_validation_disagreements": int((normal & agreement.eq(False)).sum()),
-    }
-
-
-def _complete_summary(
+def _summary(
     paths: ProximityPaths,
     run_name: str,
     generation: Mapping[str, object],
     sscd: Mapping[str, object],
     selection: Any,
-    statistics: AnalysisStatistics,
+    analysis: pd.DataFrame,
+    *,
     duration: float,
+    statistics: AnalysisStatistics | None = None,
+    failures: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
-    science = generation["scientific_config"]
-    assert isinstance(science, Mapping)
-    seeds = science.get("seeds")
-    is_experiment = isinstance(seeds, list) and bool(seeds) and seeds[0] == 0
-    selection_contract = _selection_contract(selection)
-    prompt_counts = _selection_prompt_counts(selection)
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "complete": True,
+    prompts = selection.prompt_frame
+    included = prompts["include_prompt"].astype(bool)
+    unusable = prompts["selection_status"].eq("unusable_reference_observations")
+    values: dict[str, object] = {
+        "complete": not failures,
         "run_name": run_name,
         "generation_scientific_config_hash": generation["scientific_config_hash"],
         "sscd_configuration_hash": sscd["configuration_hash"],
-        "selection_policy": selection_contract["selection_policy"],
+        "selection_policy": selection.configuration["selection_policy"],
         "selection_hash": selection.sha256,
-        "selection_contract": selection_contract,
-        "included_prompts": len(selection.included_indices),
-        "excluded_prompts": len(selection.excluded_indices),
-        "selected_tv_prompts": prompt_counts["included_tv_prompts"],
-        "selected_n_prompts": prompt_counts["included_n_prompts"],
-        **prompt_counts,
-        "tables": {
-            name: {"prompts": value.prompts, "points": value.points}
-            for name, value in (
-                ("paired_all", statistics.all),
-                ("paired_selected", statistics.selected),
-            )
-        },
-        "correlations": statistics.as_dict(),
-        "paper_facing_correlation": (
-            statistics.selected.as_dict() if is_experiment else None
-        ),
-        "failed_rows": 0,
+        "total_prompt_count": len(prompts),
+        "included_prompt_count": int(included.sum()),
+        "discarded_prompt_count": int((~included & ~unusable).sum()),
+        "unusable_prompt_count": int(unusable.sum()),
+        "observation_count": len(analysis),
+        "included_observation_count": int(analysis["include_prompt"].sum()),
+        "failed_rows": len(failures),
         "run_duration_seconds": duration,
         "finished_at_utc": utc_now(),
-        "output_directory": _display_path(paths.output_directory, paths.project_root),
+        "proximity_csv": _display_path(
+            paths.output_directory / "proximity.csv", paths.project_root
+        ),
     }
+    if failures:
+        values["failed_csv"] = _display_path(paths.failed_csv, paths.project_root)
+    else:
+        assert statistics is not None
+        values["prompt_spearman_summary"] = statistics.as_dict()
+        values["figure"] = _display_path(
+            paths.output_directory / "proximity_vs_sscd.png", paths.project_root
+        )
+    return values
 
 
-def _valid_distance_vectors(
-    value: Mapping[str, object], count: int, latent_shape: object
-) -> bool:
-    for key in ("latent_l2", "latent_rmse"):
-        tensor = value.get(key)
-        if (
-            not isinstance(tensor, torch.Tensor)
-            or tensor.dtype != torch.float32
-            or tensor.device.type != "cpu"
-            or not tensor.is_contiguous()
-            or tuple(tensor.shape) != (count,)
-            or not bool(torch.isfinite(tensor).all())
-        ):
-            return False
-    l2 = value["latent_l2"]
-    rmse = value["latent_rmse"]
-    assert isinstance(l2, torch.Tensor) and isinstance(rmse, torch.Tensor)
-    if bool((l2 < 0).any()) or bool((rmse < 0).any()):
-        return False
-    denominator = math.sqrt(math.prod(_latent_shape(latent_shape)))
-    return torch.equal(rmse, l2 / denominator)
-
-
-def _validate_cached_file(path: Path, expected_hash: object, label: str) -> None:
-    if not _sha256(expected_hash):
-        raise ProximityError(f"{label} SHA-256 is invalid")
-    if not path.is_file() or path.is_symlink():
-        raise ProximityError(f"missing safe {label}: {path}")
-    if file_sha256(path) != expected_hash:
-        raise ProximityError(f"{label} SHA-256 differs")
-
-
-def _canonical_record_path(root: Path, run: Path, value: object, expected: Path) -> Path:
+def _canonical_score_path(root: Path, run: Path, value: object, expected: Path) -> Path:
     if not isinstance(value, str) or not value:
-        raise ProximityError("cached artifact path is invalid")
+        raise ProximityError("cached score path is invalid")
     given = Path(value)
-    candidates = [given.resolve()] if given.is_absolute() else [(run / given).resolve(), (root / given).resolve()]
+    candidates = (
+        [given.resolve()]
+        if given.is_absolute()
+        else [(run / given).resolve(), (root / given).resolve()]
+    )
     target = expected.resolve()
     if target not in candidates:
-        raise ProximityError(f"cached artifact path is noncanonical: {value}")
+        raise ProximityError(f"cached score path is noncanonical: {value}")
     return target
 
 
-def _failure_row(completed: CompletedGenerationRecord, error: Exception, run: Path) -> dict[str, object]:
-    metadata = completed.metadata
-    index = completed.original_index
+def _require_cached_file(path: Path, digest: object, label: str) -> None:
+    if (
+        not _sha256(digest)
+        or not path.is_file()
+        or path.is_symlink()
+        or file_sha256(path) != digest
+    ):
+        raise ProximityError(f"cached {label} file is invalid")
+
+
+def _failure_row(
+    completed: CompletedGenerationRecord, error: Exception, run: Path
+) -> dict[str, object]:
     return {
-        "original_index": index,
-        "record_id": metadata.get("record_id"),
-        "source_row_number": metadata.get("source_row_number"),
+        "original_index": completed.original_index,
+        "record_id": completed.metadata.get("record_id"),
+        "source_row_number": completed.metadata.get("source_row_number"),
         "issue_type": type(error).__name__,
         "reason": str(error),
         "generation_record_path": str(completed.marker_path),
-        "sscd_record_path": str(run / "sscd_record" / f"{index}.json"),
+        "sscd_record_path": str(
+            run / "sscd_record" / f"{completed.original_index}.json"
+        ),
     }
+
+
+def _remove_optional(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        raise ProximityError(f"derived output is not a regular file: {path}")
 
 
 def _latent_shape(value: object) -> tuple[int, int, int]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise ProximityError("latent_shape is invalid")
     shape = tuple(value)
-    if len(shape) != 3 or any(isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in shape):
+    if len(shape) != 3 or any(
+        isinstance(item, bool) or not isinstance(item, int) or item <= 0
+        for item in shape
+    ):
         raise ProximityError("latent_shape is invalid")
     return shape  # type: ignore[return-value]
 
 
-def _scheduler_name(science: Mapping[str, object]) -> object:
+def _scheduler_name(science: Mapping[str, object]) -> str:
     scheduler = science.get("scheduler")
-    return scheduler.get("name") if isinstance(scheduler, Mapping) else science.get("scheduler_name")
+    name = scheduler.get("name") if isinstance(scheduler, Mapping) else None
+    if not isinstance(name, str) or not name:
+        raise ProximityError("generation scheduler name is missing")
+    return name
 
 
 def _sha256(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _display_path(path: Path, root: Path) -> str:
@@ -982,20 +987,30 @@ def _display_path(path: Path, root: Path) -> str:
 
 
 def _sscd_command(
-    model: str, scheduler: str, g: float, steps: int, seeds: int, seed_start: int
+    model: str,
+    scheduler: str,
+    guidance: float,
+    steps: int,
+    seeds: int,
+    seed_start: int,
 ) -> str:
     return (
         f"./sscd.sh --model {model} --scheduler {scheduler} "
-        f"--g {stable_float(g)} --T {steps} --N {seeds} "
+        f"--g {stable_float(guidance)} --T {steps} --N {seeds} "
         f"--seed-start {seed_start}"
     )
 
 
 def _generation_command(
-    model: str, scheduler: str, g: float, steps: int, seeds: int, seed_start: int
+    model: str,
+    scheduler: str,
+    guidance: float,
+    steps: int,
+    seeds: int,
+    seed_start: int,
 ) -> str:
     return (
         f"./generate.sh --model {model} --scheduler {scheduler} "
-        f"--g {stable_float(g)} --T {steps} --N {seeds} "
-        f"--seed-start {seed_start} --downscale 4"
+        f"--g {stable_float(guidance)} --T {steps} --N {seeds} "
+        f"--seed-start {seed_start}"
     )

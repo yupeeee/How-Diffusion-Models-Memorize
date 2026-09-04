@@ -68,7 +68,7 @@ def verify_arquivo_digest(
     value: object,
     data: bytes,
 ) -> str | None:
-    """Verify modern SHA-1 or legacy MD5 Arquivo.pt digests."""
+    """Verify SHA-1 or MD5 digests reported by Arquivo.pt."""
 
     md5_hex: str | None = None
     sha1_base32: str | None = None
@@ -541,19 +541,6 @@ def collect_arquivo_candidates(
     return recovered
 
 
-def collect_arquivo_url(
-    paths: WebsterPaths,
-    state: RecoveryState,
-    fetcher: Fetcher,
-    record: Mapping[str, object],
-    target_url: str,
-) -> list[ArchiveCandidate]:
-    """Compatibility helper for recovering one exact URL."""
-
-    captures = arquivo_captures(fetcher, str(record["record_id"]), target_url)
-    return collect_arquivo_candidates(paths, state, fetcher, record, captures)
-
-
 def recover_arquivo(
     paths: WebsterPaths,
     state: RecoveryState,
@@ -604,7 +591,6 @@ __all__ = [
     "arquivo_replay_matches",
     "build_arquivo_replay_url",
     "collect_arquivo_candidates",
-    "collect_arquivo_url",
     "parse_arquivo_response",
     "recover_arquivo",
     "select_arquivo_captures",

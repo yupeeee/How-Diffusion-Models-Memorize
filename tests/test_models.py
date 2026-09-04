@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,13 +12,22 @@ import pytest
 import torch
 
 from utils.common.io import canonical_hash
+from utils.models import devices as devices_module
+from utils.models import loading as loading_module
 from utils.models import sampling as sampling_module
-from utils.models.latent import compute_latent_distances, decode_generated_latents
+from utils.models.latent import (
+    compute_latent_distances,
+    decode_generated_latents,
+    encode_target_latent,
+    preprocess_target_image,
+    target_preprocessing_policy,
+)
 from utils.models.registry import get_model_spec, model_names
 from utils.models.sampling import (
     encode_prompt_condition,
     predict_conditional_epsilon,
     sample_trajectory,
+    validate_latent_shape,
 )
 from utils.models.schedulers import (
     build_scheduler,
@@ -54,9 +64,11 @@ class _UNet(torch.nn.Module):
         _timestep: torch.Tensor,
         *,
         encoder_hidden_states: torch.Tensor,
-    ) -> SimpleNamespace:
+        return_dict: bool,
+    ) -> tuple[torch.Tensor]:
+        assert return_dict is False
         values = encoder_hidden_states[:, 0, 0].reshape(-1, 1, 1, 1)
-        return SimpleNamespace(sample=values.expand_as(sample) + self.anchor)
+        return (values.expand_as(sample) + self.anchor,)
 
 
 class _Scheduler:
@@ -71,7 +83,9 @@ class _Scheduler:
         assert steps == 1
         self.timesteps = torch.tensor([0], device=device)
 
-    def scale_model_input(self, sample: torch.Tensor, _timestep: torch.Tensor) -> torch.Tensor:
+    def scale_model_input(
+        self, sample: torch.Tensor, _timestep: torch.Tensor
+    ) -> torch.Tensor:
         return sample
 
     def step(
@@ -87,6 +101,560 @@ class _Scheduler:
         return SimpleNamespace(prev_sample=sample - prediction)
 
 
+def _mock_device_backends(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cuda_available: bool,
+    cuda_count: int,
+    cuda_current: int = 0,
+    mps_available: bool = False,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: cuda_count)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: cuda_current)
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is None:
+        monkeypatch.setattr(
+            torch.backends,
+            "mps",
+            SimpleNamespace(is_available=lambda: mps_available),
+            raising=False,
+        )
+    else:
+        monkeypatch.setattr(
+            mps_backend,
+            "is_available",
+            lambda: mps_available,
+        )
+
+
+def test_auto_device_resolution_uses_every_visible_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=True,
+        cuda_count=3,
+        mps_available=True,
+    )
+
+    assert devices_module.resolve_devices() == (
+        torch.device("cuda:0"),
+        torch.device("cuda:1"),
+        torch.device("cuda:2"),
+    )
+
+
+def test_auto_device_resolution_falls_back_to_mps_then_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=False,
+        cuda_count=0,
+        mps_available=True,
+    )
+    assert devices_module.resolve_devices("AUTO") == (torch.device("mps"),)
+
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=False,
+        cuda_count=0,
+        mps_available=False,
+    )
+    assert devices_module.resolve_devices(" auto ") == (torch.device("cpu"),)
+
+
+def test_explicit_device_resolution_selects_exactly_one_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=True,
+        cuda_count=3,
+        cuda_current=2,
+        mps_available=True,
+    )
+
+    assert devices_module.resolve_devices("cpu") == (torch.device("cpu"),)
+    assert devices_module.resolve_devices("mps") == (torch.device("mps"),)
+    assert devices_module.resolve_devices("cuda") == (torch.device("cuda:2"),)
+    assert devices_module.resolve_devices(torch.device("cuda:1")) == (
+        torch.device("cuda:1"),
+    )
+
+
+def test_explicit_device_resolution_rejects_unavailable_or_invalid_devices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=False,
+        cuda_count=0,
+        mps_available=False,
+    )
+    with pytest.raises(devices_module.DeviceSelectionError, match="CUDA.*unavailable"):
+        devices_module.resolve_devices("cuda:0")
+    with pytest.raises(devices_module.DeviceSelectionError, match="MPS.*unavailable"):
+        devices_module.resolve_devices("mps")
+    with pytest.raises(devices_module.DeviceSelectionError, match="must not be empty"):
+        devices_module.resolve_devices(" ")
+    with pytest.raises(devices_module.DeviceSelectionError, match="must be auto"):
+        devices_module.resolve_devices("meta")
+
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=True,
+        cuda_count=2,
+    )
+    with pytest.raises(
+        devices_module.DeviceSelectionError,
+        match="index 2.*unavailable",
+    ):
+        devices_module.resolve_devices("cuda:2")
+
+
+def test_round_robin_shards_are_stable_disjoint_and_exhaustive() -> None:
+    values = tuple("abcdefg")
+    shards = tuple(
+        devices_module.round_robin_shard(
+            values,
+            worker_index=index,
+            worker_count=3,
+        )
+        for index in range(3)
+    )
+
+    assert shards == (("a", "d", "g"), ("b", "e"), ("c", "f"))
+    assigned = [value for shard in shards for value in shard]
+    assert len(assigned) == len(set(assigned)) == len(values)
+    assert sorted(assigned) == sorted(values)
+
+    with pytest.raises(ValueError, match="worker count must be positive"):
+        devices_module.round_robin_shard(values, worker_index=0, worker_count=0)
+    with pytest.raises(ValueError, match="smaller than worker count"):
+        devices_module.round_robin_shard(values, worker_index=3, worker_count=3)
+
+
+def test_worker_count_is_bounded_by_devices_and_tasks() -> None:
+    devices = tuple(torch.device("cuda", index) for index in range(3))
+    assert devices_module.worker_count_for_tasks(devices, 5) == 3
+    assert devices_module.worker_count_for_tasks(devices, 2) == 2
+    assert devices_module.worker_count_for_tasks(devices, 0) == 0
+    with pytest.raises(ValueError, match="at least one execution device"):
+        devices_module.worker_count_for_tasks((), 1)
+    with pytest.raises(ValueError, match="task count must be a non-negative integer"):
+        devices_module.worker_count_for_tasks(devices, -1)
+
+
+def test_worker_cpu_threads_are_divided_without_exceeding_existing_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured: list[int] = []
+    monkeypatch.setattr(
+        devices_module.os,
+        "sched_getaffinity",
+        lambda _pid: set(range(12)),
+    )
+    monkeypatch.setattr(devices_module.torch, "get_num_threads", lambda: 8)
+    monkeypatch.setattr(
+        devices_module.torch,
+        "set_num_threads",
+        lambda value: configured.append(value),
+    )
+
+    assert devices_module.configure_worker_cpu_threads(3) == 4
+    assert configured == [4]
+
+    configured.clear()
+    assert devices_module.configure_worker_cpu_threads(1) == 8
+    assert configured == []
+
+
+def test_worker_cpu_threads_fall_back_to_cpu_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured: list[int] = []
+    monkeypatch.setattr(
+        devices_module.os,
+        "sched_getaffinity",
+        lambda _pid: (_ for _ in ()).throw(OSError("unavailable")),
+    )
+    monkeypatch.setattr(devices_module.os, "cpu_count", lambda: 6)
+    monkeypatch.setattr(devices_module.torch, "get_num_threads", lambda: 12)
+    monkeypatch.setattr(
+        devices_module.torch,
+        "set_num_threads",
+        lambda value: configured.append(value),
+    )
+
+    assert devices_module.configure_worker_cpu_threads(4) == 1
+    assert configured == [1]
+
+
+def test_select_runtime_accepts_one_explicit_concrete_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=True,
+        cuda_count=2,
+    )
+    inspected: list[torch.device] = []
+
+    def gpu_name(device: torch.device) -> str:
+        inspected.append(torch.device(device))
+        return "Test GPU"
+
+    monkeypatch.setattr(torch.cuda, "get_device_name", gpu_name)
+    runtime = loading_module.select_runtime(torch.device("cuda:1"))
+
+    assert runtime.device == torch.device("cuda:1")
+    assert runtime.inference_dtype is torch.float16
+    assert runtime.gpu_name == "Test GPU"
+    assert inspected == [torch.device("cuda:1")]
+    assert runtime.metadata() == {
+        "device": "cuda:1",
+        "device_type": "cuda",
+        "gpu_name": "Test GPU",
+        "inference_dtype": "float16",
+    }
+
+
+def test_select_runtime_uses_expected_non_cuda_dtypes_and_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=False,
+        cuda_count=0,
+        mps_available=True,
+    )
+
+    mps = loading_module.select_runtime("mps")
+    cpu = loading_module.select_runtime("cpu")
+
+    assert mps == loading_module.RuntimeSelection(
+        torch.device("mps"),
+        torch.float16,
+        "Apple Metal Performance Shaders (MPS)",
+    )
+    assert cpu == loading_module.RuntimeSelection(
+        torch.device("cpu"),
+        torch.float32,
+        None,
+    )
+    assert capsys.readouterr().err == ""
+
+
+def test_select_runtime_preserves_no_argument_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_device_backends(
+        monkeypatch,
+        cuda_available=True,
+        cuda_count=2,
+    )
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _: "Default GPU")
+
+    runtime = loading_module.select_runtime()
+
+    assert runtime == loading_module.RuntimeSelection(
+        torch.device("cuda"),
+        torch.float16,
+        "Default GPU",
+    )
+
+
+def test_select_runtime_rejects_multi_device_auto_request() -> None:
+    with pytest.raises(loading_module.ModelLoadingError, match="resolve 'auto' first"):
+        loading_module.select_runtime("auto")
+
+
+def _compile_test_components(device: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        device=torch.device(device),
+        unet=_UNet(),
+        device_metadata={"device": device},
+    )
+
+
+def _call_compile_test_unet(components: SimpleNamespace) -> tuple[torch.Tensor]:
+    return components.unet(
+        torch.zeros((1, 1, 1, 1), dtype=torch.float32),
+        torch.tensor(0),
+        encoder_hidden_states=torch.ones((1, 1, 1), dtype=torch.float32),
+        return_dict=False,
+    )
+
+
+def _mock_public_compile_backends(
+    monkeypatch: pytest.MonkeyPatch,
+    *backends: str,
+) -> None:
+    monkeypatch.setattr(
+        loading_module.torch,
+        "compiler",
+        SimpleNamespace(list_backends=lambda: backends),
+        raising=False,
+    )
+
+
+def test_compile_loaded_unet_skips_non_cuda_without_calling_compiler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components = _compile_test_components("cpu")
+    unet = components.unet
+    eager_forward = unet.forward
+
+    def forbidden(*_: object, **__: object) -> object:
+        raise AssertionError("CPU inference must not invoke torch.compile")
+
+    monkeypatch.setattr(loading_module.torch, "compile", forbidden, raising=False)
+    _mock_public_compile_backends(monkeypatch, "inductor")
+
+    observed = loading_module.compile_loaded_unet(components)
+
+    assert observed is components
+    assert observed.unet is unet
+    assert observed.unet.forward == eager_forward
+    assert observed.device_metadata["torch_compile"] == {
+        "target": "unet.forward",
+        "status": "skipped_non_cuda",
+        "backend": None,
+        "mode": None,
+        "fullgraph": None,
+    }
+
+
+def test_compile_loaded_unet_configures_bound_forward_and_becomes_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components = _compile_test_components("cuda:1")
+    unet = components.unet
+    eager_forward = unet.forward
+    compile_calls: list[tuple[object, dict[str, object]]] = []
+    compiled_calls = 0
+
+    def fake_compile(target: object, **kwargs: object) -> object:
+        compile_calls.append((target, dict(kwargs)))
+
+        def compiled(*args: object, **call_kwargs: object) -> object:
+            nonlocal compiled_calls
+            compiled_calls += 1
+            return target(*args, **call_kwargs)  # type: ignore[operator]
+
+        return compiled
+
+    monkeypatch.setattr(loading_module.torch, "compile", fake_compile, raising=False)
+    _mock_public_compile_backends(monkeypatch, "eager", "inductor")
+
+    observed = loading_module.compile_loaded_unet(components)
+
+    assert observed is components
+    assert observed.unet is unet
+    assert len(compile_calls) == 1
+    compiled_target, compile_kwargs = compile_calls[0]
+    assert compiled_target == eager_forward
+    assert compile_kwargs == {
+        "backend": "inductor",
+        "mode": "reduce-overhead",
+        "fullgraph": True,
+    }
+    assert observed.device_metadata["torch_compile"] == {
+        "target": "unet.forward",
+        "status": "configured",
+        "backend": "inductor",
+        "mode": "reduce-overhead",
+        "fullgraph": True,
+    }
+
+    first = _call_compile_test_unet(observed)
+    second = _call_compile_test_unet(observed)
+    torch.testing.assert_close(first[0], torch.ones((1, 1, 1, 1)))
+    torch.testing.assert_close(second[0], torch.ones((1, 1, 1, 1)))
+    assert compiled_calls == 2
+    assert observed.device_metadata["torch_compile"]["status"] == "active"
+    assert loading_module.compile_loaded_unet(observed) is observed
+    assert len(compile_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "availability",
+    ("missing_compile", "noncallable_compile", "missing_inductor"),
+)
+def test_compile_loaded_unet_records_unavailable_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    availability: str,
+) -> None:
+    components = _compile_test_components("cuda:0")
+    unet = components.unet
+    eager_forward = unet.forward
+
+    if availability == "missing_compile":
+        monkeypatch.delattr(loading_module.torch, "compile", raising=False)
+    elif availability == "noncallable_compile":
+        monkeypatch.setattr(
+            loading_module.torch,
+            "compile",
+            None,
+            raising=False,
+        )
+    else:
+
+        def forbidden(*_: object, **__: object) -> object:
+            raise AssertionError("missing backend must prevent torch.compile")
+
+        monkeypatch.setattr(
+            loading_module.torch,
+            "compile",
+            forbidden,
+            raising=False,
+        )
+        _mock_public_compile_backends(monkeypatch, "eager")
+
+    observed = loading_module.compile_loaded_unet(components)
+
+    assert observed is components
+    assert observed.unet is unet
+    assert observed.unet.forward == eager_forward
+    metadata = observed.device_metadata["torch_compile"]
+    assert metadata["target"] == "unet.forward"
+    assert metadata["status"] == "unavailable"
+    assert metadata["backend"] is None
+    assert metadata["mode"] is None
+    assert metadata["fullgraph"] is None
+    assert isinstance(metadata["reason"], str)
+    _call_compile_test_unet(observed)
+
+
+def test_compile_loaded_unet_falls_back_after_immediate_setup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components = _compile_test_components("cuda:0")
+    unet = components.unet
+    eager_forward = unet.forward
+
+    def failing_compile(*_: object, **__: object) -> object:
+        raise RuntimeError("synthetic compile setup failure")
+
+    monkeypatch.setattr(
+        loading_module.torch,
+        "compile",
+        failing_compile,
+        raising=False,
+    )
+    _mock_public_compile_backends(monkeypatch, "inductor")
+
+    observed = loading_module.compile_loaded_unet(components)
+
+    assert observed is components
+    assert observed.unet is unet
+    assert observed.unet.forward == eager_forward
+    metadata = observed.device_metadata["torch_compile"]
+    assert metadata == {
+        "target": "unet.forward",
+        "status": "eager_fallback",
+        "backend": "inductor",
+        "mode": "reduce-overhead",
+        "fullgraph": True,
+        "reason": "RuntimeError: synthetic compile setup failure",
+    }
+    _call_compile_test_unet(observed)
+
+
+def test_compile_loaded_unet_lazy_error_retries_once_then_stays_eager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components = _compile_test_components("cuda:0")
+    unet = components.unet
+    original_forward = unet.forward
+    eager_calls = 0
+    compiled_calls = 0
+
+    def counted_eager(*args: object, **kwargs: object) -> object:
+        nonlocal eager_calls
+        eager_calls += 1
+        return original_forward(*args, **kwargs)
+
+    unet.forward = counted_eager
+
+    def fake_compile(target: object, **_: object) -> object:
+        assert target is counted_eager
+
+        def failing_compiled(*_: object, **__: object) -> object:
+            nonlocal compiled_calls
+            compiled_calls += 1
+            raise RuntimeError("synthetic lazy compiler failure")
+
+        return failing_compiled
+
+    monkeypatch.setattr(loading_module.torch, "compile", fake_compile, raising=False)
+    _mock_public_compile_backends(monkeypatch, "inductor")
+    observed = loading_module.compile_loaded_unet(components)
+
+    first = _call_compile_test_unet(observed)
+    assert compiled_calls == 1
+    assert eager_calls == 1
+    assert observed.unet.forward is counted_eager
+    assert observed.device_metadata["torch_compile"]["status"] == "eager_fallback"
+    assert "synthetic lazy compiler failure" in str(
+        observed.device_metadata["torch_compile"]["reason"]
+    )
+
+    second = _call_compile_test_unet(observed)
+    torch.testing.assert_close(first[0], torch.ones((1, 1, 1, 1)))
+    torch.testing.assert_close(second[0], torch.ones((1, 1, 1, 1)))
+    assert compiled_calls == 1
+    assert eager_calls == 2
+
+
+def test_compile_loaded_unet_cuda_oom_disables_compile_without_retrying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components = _compile_test_components("cuda:0")
+    unet = components.unet
+    original_forward = unet.forward
+    eager_calls = 0
+    compiled_calls = 0
+
+    def counted_eager(*args: object, **kwargs: object) -> object:
+        nonlocal eager_calls
+        eager_calls += 1
+        return original_forward(*args, **kwargs)
+
+    unet.forward = counted_eager
+
+    def fake_compile(target: object, **_: object) -> object:
+        assert target is counted_eager
+
+        def oom_compiled(*_: object, **__: object) -> object:
+            nonlocal compiled_calls
+            compiled_calls += 1
+            raise RuntimeError("synthetic CUDA out of memory")
+
+        return oom_compiled
+
+    monkeypatch.setattr(loading_module.torch, "compile", fake_compile, raising=False)
+    _mock_public_compile_backends(monkeypatch, "inductor")
+    observed = loading_module.compile_loaded_unet(components)
+
+    with pytest.raises(RuntimeError, match="synthetic CUDA out of memory"):
+        _call_compile_test_unet(observed)
+
+    assert compiled_calls == 1
+    assert eager_calls == 0
+    assert observed.unet.forward is counted_eager
+    assert observed.device_metadata["torch_compile"]["status"] == "eager_fallback"
+    assert "out of memory" in str(observed.device_metadata["torch_compile"]["reason"])
+
+    eager_result = _call_compile_test_unet(observed)
+    torch.testing.assert_close(eager_result[0], torch.ones((1, 1, 1, 1)))
+    assert compiled_calls == 1
+    assert eager_calls == 1
+
+
 def test_registry_has_one_explicit_spec_per_cli_model() -> None:
     assert model_names() == ("sdv1", "sdv2", "realvis")
     assert get_model_spec("realvis").dataset_model == "realisticvision"
@@ -95,6 +663,22 @@ def test_registry_has_one_explicit_spec_per_cli_model() -> None:
     assert sdv2.resolution == 512
     with pytest.raises(ValueError, match="Unknown model"):
         get_model_spec("unknown")
+
+
+def test_model_dependent_latent_dimensions_have_no_implicit_defaults() -> None:
+    for function in (
+        target_preprocessing_policy,
+        preprocess_target_image,
+        encode_target_latent,
+    ):
+        assert (
+            inspect.signature(function).parameters["resolution"].default
+            is inspect.Parameter.empty
+        )
+    assert (
+        inspect.signature(validate_latent_shape).parameters["expected_shape"].default
+        is inspect.Parameter.empty
+    )
 
 
 def test_latent_distances_are_raw_l2_squared_and_dimension_normalized() -> None:
@@ -215,12 +799,14 @@ def test_conditional_prediction_scales_unet_input_and_converts_unscaled_state() 
             timestep: int,
             *,
             encoder_hidden_states: torch.Tensor,
-        ) -> SimpleNamespace:
+            return_dict: bool,
+        ) -> tuple[torch.Tensor]:
+            assert return_dict is False
             assert timestep == 0
             self.calls += 1
             self.received_sample = sample.detach().clone()
             self.received_condition = encoder_hidden_states.detach().clone()
-            return SimpleNamespace(sample=torch.full_like(sample, 0.5) + self.anchor)
+            return (torch.full_like(sample, 0.5) + self.anchor,)
 
     model_samples = torch.tensor([[[[1.0001]]], [[[2.0002]]]], dtype=torch.float32).to(
         torch.float16
@@ -275,9 +861,7 @@ def test_adaptive_sampler_rolls_back_failed_microbatch_progress(
         return SimpleNamespace()
 
     monkeypatch.setattr(sampling_module, "_sample_microbatch", fake_microbatch)
-    monkeypatch.setattr(
-        sampling_module, "_is_cuda_out_of_memory", lambda *_: True
-    )
+    monkeypatch.setattr(sampling_module, "_is_cuda_out_of_memory", lambda *_: True)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
 
     parts = sampling_module._sample_adaptive(
@@ -345,7 +929,9 @@ def test_scheduler_construction_preserves_native_configuration() -> None:
         def step(self, *_: object, eta: float = 0.0) -> None:
             return None
 
-    original = SimpleNamespace(config={"prediction_type": "v_prediction", "beta_start": 0.1})
+    original = SimpleNamespace(
+        config={"prediction_type": "v_prediction", "beta_start": 0.1}
+    )
     result = build_scheduler(original, "ddim", scheduler_classes={"ddim": Built})
     assert result.config == original.config
     assert scheduler_step_kwargs(result.scheduler, "ddim") == {"eta": 0.0}
@@ -390,9 +976,14 @@ def test_only_one_sampler_and_one_denoising_loop_exist() -> None:
     loop_locations: list[Path] = []
     unet_loop_locations: list[Path] = []
     for source_path in (root / "utils").rglob("*.py"):
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"), filename=str(source_path)
+        )
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "sample_trajectory":
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "sample_trajectory"
+            ):
                 function_locations.append((source_path, node.name))
             if isinstance(node, (ast.For, ast.While)):
                 calls = [item for item in ast.walk(node) if isinstance(item, ast.Call)]
@@ -404,7 +995,10 @@ def test_only_one_sampler_and_one_denoising_loop_exist() -> None:
                     for call in calls
                 ):
                     loop_locations.append(source_path)
-                if any(isinstance(call.func, ast.Name) and call.func.id == "unet" for call in calls):
+                if any(
+                    isinstance(call.func, ast.Name) and call.func.id == "unet"
+                    for call in calls
+                ):
                     unet_loop_locations.append(source_path)
 
     expected = root / "utils/models/sampling.py"

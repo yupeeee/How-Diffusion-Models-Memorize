@@ -25,39 +25,107 @@ directory with one command:
   --g 7.5 \
   --T 50 \
   --N 20 \
-  --downscale 4
+  --num-loss-seeds 20 \
+  --loss-seed 0 \
+  --downscale 4 \
+  --device auto
 ```
 
 When `--model` is omitted, `run_all.sh` runs `sdv1`, `sdv2`, and
 `realvis` sequentially in that order. Pass, for example, `--model sdv1` to
-run only one model. For each model, the canonical orchestrator uses the
-existing Webster dataset and makes seven stage invocations in order: reference
-generation for seeds 20–39; reference SSCD; cache-only reference proximity,
-which freezes the target-pair selection; experiment generation for seeds 0
-through `N-1`; experiment SSCD; cache-only experiment proximity; and the
-Theorem 1 loss–recovery experiment. Thus the default all-model run has 21
-model stages. Pass `--download` to run or resume the shared Webster
-preparation once before the first model. The Theorem 1 stage requires the
-canonical DDIM/g7.5/T50/N20 experiment and is explicitly skipped for other
-sampling settings. A downloader exit status of `2` means some records remain
-retryable; in that case the orchestrator continues with all currently
-available prompt–image pairs. Other data errors and failures in later stages
-stop the sequence before the next model.
+run only one model. When a model and sampler configuration has no frozen
+selection, the orchestrator uses the existing Webster dataset and makes seven
+stage invocations in order: reference generation for seeds `N` through
+`2N-1`; reference SSCD; cache-only reference proximity, which freezes one
+category-blind target-pair selection from all N reference observations per
+prompt; experiment generation for seeds 0 through `N-1`; experiment SSCD;
+cache-only experiment proximity; and the Theorem 1 loss–recovery experiment.
+When the selection path already exists, `run_all.sh` first resumes cached
+reference generation so the requested preview downscale is honored, then
+invokes reference proximity to fully validate and reuse the selection. Valid
+scientific trajectories are not denoised again, and reference SSCD is skipped.
+A cached repeat for that model and sampler configuration therefore has six
+stages. A fresh default all-model run has 21 model stages; with all three
+matching selections already frozen, it has 18. An invalid existing selection
+stops the pipeline and is never overwritten.
+Pass `--download` to run or resume the shared Webster
+preparation once before the first model. Reference selection, experiment
+analysis, and Theorem 1 all receive the same model, scheduler, guidance scale,
+step count, and `N`; only the reference and experiment seed blocks differ. A
+downloader exit status of `2` means some records remain retryable; in that case
+the orchestrator continues with all currently available prompt–image pairs.
+Other data errors and failures in later stages stop the sequence before the
+next model.
+
+Theorem 1 additionally averages its conditional-loss estimate over
+`--num-loss-seeds` independent corruption draws per prompt–target pair
+(default `20`).
+`--loss-seed` (default `0`) is the deterministic root used to derive those
+draws in a stream disjoint from generation seeds. Both options affect only the
+Theorem 1 computation, so changing them does not change generation, SSCD, or
+selection cache paths. For example:
+
+```bash
+./run_all.sh --model sdv1 --num-loss-seeds 32 --loss-seed 123
+```
+
+`--device auto` uses every CUDA device visible to PyTorch. Set
+`CUDA_VISIBLE_DEVICES` to restrict that pool, or pass `--device cpu`,
+`--device mps`, `--device cuda`, or `--device cuda:N` to select exactly one
+device. GPU stages run one model replica per device and shard by whole
+prompt–target pair; every seed for a pair stays on the same device. The three
+models remain sequential, so each model can use the complete visible GPU pool.
+Download, cache-only proximity, target-latent aggregation, and plotting stay on
+the CPU: they are network/I/O or small deterministic reductions for which GPU
+transfer and distributed aggregation would add overhead.
+
+The GPU stages use independent inference processes, not gradient-oriented
+`torch.distributed` DDP: there are no gradients or model updates to synchronize.
+At startup, each stage prints the exact prompt count assigned to every device.
+The `Records`, `Denoising`, SSCD, and Theorem 1 progress ETAs are worker-local;
+in particular, one prompt still evaluates all of its seeds on one GPU, so its
+current-record ETA should not become four times shorter on four GPUs. Use the
+overall stage duration or aggregate completed-prompt rate to measure scaling.
+Generation summaries also record every device's assigned and completed rows.
+
+Each worker limits its PyTorch CPU thread pool to its share of the available
+CPUs. Generation hashes tensor files during the existing atomic write, and
+downstream stages physically validate only the generation artifact they consume.
+This preserves hash-checked resume behavior while avoiding redundant reads of
+large trajectories and predictions on shared filesystems. Exact linear scaling
+is still not guaranteed because model loading, compilation, preview decoding,
+cache traffic, and the slowest shard remain part of wall-clock time.
+
+For eligible CUDA workers, the project automatically checks for
+`torch.compile` and the Inductor backend, then compiles the validated UNet once
+per model replica. Unsupported environments and compilation failures fall back
+to eager execution; CPU and MPS execution are unchanged. The first compiled
+call pays compilation overhead, so short or cache-only runs may not become
+faster. Long runs with repeated UNet calls are expected to benefit, but the
+speedup depends on the workload, model, GPU, and software environment.
 
 Pass `--plot` to `run_all.sh` to skip every computational stage and regenerate
 only the Theorem 1 PDFs from saved CSVs. It follows the same all-model default;
 combine it with `--model` to plot one model. The experiment wrapper exposes
-the same mode directly (with `--plot-only` retained as a compatibility alias):
+the same mode directly:
 
 ```bash
-./theorem1_loss_recovery.sh --model sdv1 --plot
+./theorem1_loss_recovery.sh \
+  --model sdv1 --scheduler ddim --g 7.5 --T 50 --N 20 \
+  --num-loss-seeds 20 --loss-seed 0 --plot
 ```
 
-`N` must be positive and at most 20, so experimental randomness never overlaps
-the fixed reference pool. All invoked stage wrappers use unbuffered Python
+Plot-only mode verifies these values against the saved CSV and fails clearly
+instead of plotting results from a different experiment configuration.
+
+`N` must be positive. Experiment seeds `0` through `N-1` and reference
+seeds `N` through `2N-1` are therefore always disjoint. `run_all.sh` also
+rejects values whose reference block would exceed the supported random-seed
+domain. `--num-loss-seeds` must be positive, and `--loss-seed` must be between
+`0` and `2^63-1`, inclusive. All invoked stage wrappers use unbuffered Python
 output, and their `tqdm` progress stays visible in redirected logs: generation
 records, denoising steps, and previews; SSCD records and checkpoint bytes; and
-proximity records, analysis views, and the held-out TV and N preview galleries.
+proximity prompt–target processing.
 When `--download` is present, Webster's ten local phases are also shown.
 
 To prepare or retry Webster data independently:
@@ -66,74 +134,98 @@ To prepare or retry Webster data independently:
 ./download_webster.sh
 ```
 
-Then create or resume the fixed selection reference. Its model follows
-`--model`, but its sampling configuration and seed block are not tunable:
+Choose one model and sampler configuration, then reuse it for the reference,
+experiment, and Theorem 1 stages. Only `--seed-start` differs between the
+reference and experiment:
 
 ```bash
+MODEL=sdv1
+SCHEDULER=ddim
+GUIDANCE_SCALE=7.5
+STEPS=50
+N=20
+NUM_LOSS_SEEDS=20
+LOSS_SEED=0
+DOWNSCALE=4
+DEVICE=auto
+
+# Independent selection reference: seeds N through 2N-1.
 ./generate.sh \
-  --model sdv1 \
-  --scheduler ddim \
-  --g 7.5 \
-  --T 50 \
-  --N 20 \
-  --seed-start 20 \
-  --downscale 4
-```
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
+  --seed-start "$N" \
+  --downscale "$DOWNSCALE" \
+  --device "$DEVICE"
 
-```bash
 ./sscd.sh \
-  --model sdv1 \
-  --scheduler ddim \
-  --g 7.5 \
-  --T 50 \
-  --N 20 \
-  --seed-start 20
-```
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
+  --seed-start "$N" \
+  --device "$DEVICE"
 
-```bash
 ./compute_proximity.sh \
-  --model sdv1 \
-  --scheduler ddim \
-  --g 7.5 \
-  --T 50 \
-  --N 20 \
-  --seed-start 20
-```
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
+  --seed-start "$N"
 
-That cache-only proximity call creates or validates the frozen selection. Run
-the experiment only after it succeeds. This example uses all experimental
-seeds 0–19; a smaller `N` uses the prefix 0 through `N-1`:
-
-```bash
+# Matching experiment: seeds 0 through N-1.
 ./generate.sh \
-  --model sdv1 \
-  --scheduler ddim \
-  --g 7.5 \
-  --T 50 \
-  --N 20 \
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
   --seed-start 0 \
-  --downscale 4
-```
+  --downscale "$DOWNSCALE" \
+  --device "$DEVICE"
 
-```bash
 ./sscd.sh \
-  --model sdv1 \
-  --scheduler ddim \
-  --g 7.5 \
-  --T 50 \
-  --N 20 \
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
+  --seed-start 0 \
+  --device "$DEVICE"
+
+./compute_proximity.sh \
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
   --seed-start 0
+
+# Theorem 1 uses the same experiment generation cache.
+./theorem1_loss_recovery.sh \
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
+  --num-loss-seeds "$NUM_LOSS_SEEDS" \
+  --loss-seed "$LOSS_SEED" \
+  --device "$DEVICE"
 ```
 
-```bash
-./compute_proximity.sh \
-  --model sdv1 \
-  --scheduler ddim \
-  --g 7.5 \
-  --T 50 \
-  --N 20 \
-  --seed-start 0
-```
+For direct theorem runs, `--sample-batch-size` remains a performance-only
+option (default `8`). It changes inference chunking, not the loss draws or
+scientific sample counts, and is intentionally not a `run_all.sh` option.
+
+The reference proximity call creates or validates the frozen selection from
+all seeds `N` through `2N-1`. Run the experiment only after it succeeds. When
+`run_all.sh` finds that exact configuration's selection path, it makes the same
+cached-generation resume and validation calls, but does not launch reference
+SSCD.
 
 Supported models are `sdv1`, `sdv2`, and `realvis`; supported schedulers are
 `ddim` and `ddpm`. The RealisticVision dataset directory remains named
@@ -152,9 +244,9 @@ and formats. Valid recovered images are skipped without a network request; a
 missing or visibly corrupt artifact alone is audited and reactivated. The
 final validation phase still performs full dataset checks. Completed misses
 stay completed, while only pending or retryable records proceed to network
-recovery. Old `unresolved` records are narrowly reopened when either the versioned
-audited-mirror strategy or Arquivo.pt strategy is newer than the one that
-produced their prior miss.
+recovery. An unresolved record is narrowly reopened when
+either the versioned audited-mirror strategy or Arquivo.pt strategy is newer
+than the one that produced its completed miss.
 
 The ten logical phases cover local validation/cache reuse, official assets,
 direct URLs, the audited ground-truth mirror, Wayback, Arquivo.pt, Common
@@ -201,10 +293,10 @@ Wayback and Arquivo.pt are sequential and rate-limited. Arquivo.pt performs
 exact-URL version-history queries and samples four metadata pages across the
 complete newest-to-oldest history, rather than inspecting only recent captures.
 One target-wide budget allows at most 12 replay requests across all safe URL
-variants. Replay identity and every recognized legacy MD5 or modern SHA-1
-digest are verified; malformed reported digests are rejected, and supplied,
-requested, and final replay URLs are recorded separately. Arquivo requests do
-not follow redirects.
+variants. Replay identity and every recognized MD5 or SHA-1 digest are
+verified; malformed reported digests are rejected, and supplied, requested,
+and final replay URLs are recorded separately. Arquivo requests do not follow
+redirects.
 
 Common Crawl's public CDX lookup is also sequential and rate-limited. The
 [Common Crawl FAQ](https://commoncrawl.org/faq) asks clients not to issue
@@ -231,8 +323,7 @@ Tune the direct stage without discarding resumable state, for example:
 ```
 
 The same options are accepted by `run_all.sh`, but affect it only when
-`--download` is present. `--per-host` is an alias for
-`--per-host-concurrency` in both entry points.
+`--download` is present.
 
 ### Generation cache
 
@@ -274,19 +365,22 @@ report model-specific image latents is immediately after generation creates
 or resumes those cached target tensors.
 
 Every seed role lives beneath one shared base-run directory. Experiment caches
-use `experiment_S0_N<N>`, the fixed selection reference uses
-`reference_S20_N20`, and any other nonzero seed block uses
-`seed_S<seed-start>_N<N>`. The canonical pair is therefore:
+use `experiment_S0_N<N>`, its matching selection reference uses
+`reference_S<N>_N<N>`, and any other nonzero seed block uses
+`seed_S<seed-start>_N<N>`. The matching pair is therefore:
 
 ```text
-logs/<model>_ddim_g7.5_T50_N20/
-├── experiment_S0_N20/
-└── reference_S20_N20/
+logs/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/
+├── experiment_S0_N<N>/
+└── reference_S<N>_N<N>/
 ```
 
 A record is resumed only when its marker, configuration identity, file hashes,
 shapes, and dtypes validate. Existing valid scientific tensors are never
-overwritten.
+overwritten. Changing `--downscale` on resume regenerates only the
+non-scientific preview montages and their preview provenance; it does not
+regenerate trajectories, predictions, target latents, or other scientific
+artifacts.
 
 The sampler keeps one explicit full-trajectory loop. It supports DDIM and DDPM,
 stores both unguided branches in canonical epsilon space, and then gives the
@@ -304,125 +398,108 @@ sampler.
 ### Frozen target-pair selection
 
 Target-pair selection happens only during cache-based proximity analysis. The
-frozen reference selection is model-specific, while its boundary and rules are
-fixed across all supported models:
+frozen reference is specific to the model, scheduler, guidance scale, step
+count, and `N`, but the decision rule is identical for every MV, RV, TV, N, or
+otherwise labelled prompt. The exact reference run path is
+`logs/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/reference_S<N>_N<N>`, and
+all N independent observations from seeds `N` through `2N-1` jointly determine
+each whole-prompt decision.
 
-- a TV prompt is included iff its arithmetic mean paired-target SSCD over
-  reference seeds 20–29 is greater than or equal to `0.25`;
-- an N prompt is included iff its arithmetic mean paired-target SSCD over
-  reference seeds 20–29 is greater than or equal to `0.25`;
-- MV and RV retain their prior unconditional-inclusion behavior;
-- reference seeds 30–39 compute validation diagnostics only and never affect
-  inclusion;
-- experimental seeds 0–19 affect neither selection nor reference validation;
-  and
-- terminal latent proximity, latent-distance thresholds, Pearson/Spearman
-  correlation, and plot appearance never affect inclusion.
+For each prompt, selection computes Spearman's rank correlation between
+terminal latent L2 distance and paired-target SSCD. A finite negative
+correlation means that smaller L2 tends to accompany higher SSCD, so the prompt
+is included exactly when `prompt_spearman < 0`. A finite zero or positive
+correlation is discarded. Missing, duplicate, or non-finite seed observations
+make the prompt unusable, as does a constant L2 or SSCD vector for which the
+correlation is undefined; unusable prompts are never silently included. Prompt
+kind is retained only for audit and never changes the rule.
 
-Thus both TV and N prompts exactly at `0.25` are included. The boundary is
-never re-optimized per model or per run.
-Selection artifacts record schema version 4 and policy
-`target_pair_selection_tv_ge_0_25_n_ge_0_25`; N decisions use
-`included_n_target_supported` and `excluded_n_target_unsupported` status
-vocabulary.
-Each model builds one frozen selection only from the exact reference run
-`<model>_ddim_g7.5_T50_S20_N20`, containing seeds 20–39, and stores it in
-`data/webster/selection/<dataset-model>/reference_S20_N20/`. Experiment runs
-starting at seed 0 with `N <= 20` reuse that frozen model-specific selection.
-If it is missing, proximity exits with the exact three reference commands
-required to create it.
+Experimental seeds are an independent pool starting at 0 and never affect
+selection. An experiment uses seeds 0 through `N-1` and applies
+the already-frozen decisions for its exact model and sampler configuration.
+Generation trajectories, noise predictions, target latents, preview montages,
+and SSCD tensors remain intact for discarded and unusable prompts; selection
+filters only the analysis.
 
-The selection unit is the whole prompt–target pair. Excluded TV and N prompts
-below the boundary remain intact as target-unsupported diagnostics:
-generation trajectories, noise predictions, target latents, generated
-previews, and SSCD tensors are all preserved. Every seed for those prompts is
-removed only from the target-supported selected analysis. Older or wrong-policy
-frozen selections—including schema-2 TV-only selections and schema-3 selections
-with the reversed N rule—are rejected rather than overwritten. Through
-proximity, the incompatibility reports only the exact frozen-selection and
-current derived proximity directories that must be archived or removed before
-rebuilding; no raw cache directory should be changed.
+The authoritative reference result contains only:
+
+```text
+data/webster/selection/<dataset>/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/reference_S<N>_N<N>/
+├── selection.csv
+├── config.json
+├── summary.json
+└── proximity_vs_sscd.png
+```
+
+`selection.csv` has exactly N seed rows per prompt. It records `prompt`,
+`kind`, `l2_norm`, `sscd`, the per-seed observation status, the repeated
+prompt-level Spearman correlation and decision, and the reference provenance.
+`generated_image_path` points to the existing seed-ascending preview montage;
+`generated_image_tile_index` identifies its zero-based row-major tile, so
+indices `0` through `N-1` map directly to seeds `N` through `2N-1`. No image
+is copied into the selection directory. `config.json` records the model,
+sampler values, frozen policy, seed set, and provenance hashes, while
+`summary.json` records concise decision and observation counts. The scatter in
+`proximity_vs_sscd.png` is rebuilt from `selection.csv` and contains the
+reference-seed observations for included prompts. It is a derived,
+rebuildable visualization rather than part of the frozen scientific identity.
+
+If the selection is missing, experiment proximity exits with the exact three
+reference commands required to create it. A frozen selection whose evidence or
+policy differs is rejected rather than overwritten; the error identifies the
+exact derived selection directory to archive or remove, while raw generation
+and SSCD records remain untouched.
 
 Later mechanism experiments use the same API:
 
 ```python
 from utils.data.selection import load_target_pair_selection
 
-selection = load_target_pair_selection(root, model_name="sdv1")
+selection = load_target_pair_selection(
+    root,
+    model_name=MODEL,
+    scheduler_name=SCHEDULER,
+    guidance_scale=GUIDANCE_SCALE,
+    num_inference_steps=STEPS,
+    num_seeds=N,
+)
 ```
 
-The returned object exposes `included_indices`, `excluded_indices`,
-`selected_tv_indices`, `excluded_tv_indices`, `selected_n_indices`,
-`excluded_n_indices`, `frame`, `configuration`, and `sha256`.
+The returned object exposes its model and sampler identity, `num_seeds`,
+`included_indices`, `excluded_indices`, `prompt_frame`, `frame`,
+`configuration`, and `sha256`.
 
 ### Proximity outputs
 
-`compute_proximity.sh` reads cached terminal and target latents, joins every
-seed with its cached SSCD score, freezes or validates the reference selection,
-and writes:
+The successful reference invocation writes no second proximity-output tree;
+the frozen selection directory contains its three authoritative data and
+provenance files plus the derived scatter shown above.
+For an experiment, `compute_proximity.sh` reads cached terminal and target
+latents, joins every seed with its cached SSCD score, applies the frozen
+selection, and writes only:
 
 ```text
 outputs/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/proximity/
-├── experiment_S0_N<N>/
-│   └── ...
-└── reference_S20_N20/
-    ├── records/<original_index>.pt
-    ├── paired_all.{csv,parquet}
-    ├── paired_selected.{csv,parquet}
-    ├── selection.csv
-    ├── selected_tv.csv
-    ├── excluded_tv.csv
-    ├── selected_n.csv
-    ├── excluded_n.csv
-    ├── threshold_diagnostics.csv
-    ├── held_out_tv/
-    │   ├── gallery.html
-    │   ├── manifest.csv
-    │   ├── config.json
-    │   ├── summary.json
-    │   └── prompts/<original_index>/
-    │       ├── generated.png
-    │       └── prompt.txt
-    ├── held_out_n/
-    │   ├── gallery.html
-    │   ├── manifest.csv
-    │   ├── config.json
-    │   ├── summary.json
-    │   └── prompts/<original_index>/
-    │       ├── generated.png
-    │       └── prompt.txt
-    ├── proximity_vs_sscd_all.{png,pdf}
-    ├── proximity_vs_sscd_selected.{png,pdf}
-    ├── failed.csv
+└── experiment_S0_N<N>/
+    ├── proximity.csv
+    ├── proximity_vs_sscd.png
     ├── run_config.json
     └── summary.json
 ```
 
-The fixed reference namespace is `reference_S20_N20`; experiment namespaces
-are `experiment_S0_N<N>`. Both live under the experiment run's single
-`proximity/` directory. Their generation caches follow the same grouping under
-`logs/<model>_ddim_g7.5_T50_N20/`.
-
-`paired_all` contains every completed prompt and seed; selection never removes
-rows from `paired_all`. For an experiment, `paired_selected` contains every
-experiment seed for every included prompt. It is the sole paper-facing,
-target-supported selected table and correlation view. There is no
-`paired_evaluation` artifact:
-reference seeds 30–39 are diagnostics, not an experimental half-split.
-Reference proximity output itself is also not paper-facing. The frozen
-selection hash and its explicit TV/N category rules, fixed boundary, selection
-seeds, and validation seeds are recorded in `run_config.json` inside each
-seed-role namespace.
-
-`held_out_tv/` and `held_out_n/` are non-scientific visual diagnostics for,
-respectively, whole excluded TV prompts and whole excluded N prompts. They do
-not refer to the validation seeds as “held out.” Each `gallery.html` shows the
-exact prompt beside its seed-ascending generated montage. Each `manifest.csv`
-records identity, normalized category, selection reason, selection and
-validation SSCD means, seeds, source path, and hashes. A reference run therefore
-shows seeds 20–39, while an experiment run shows that experiment's seeds
-(normally 0–19). Missing or copied previews and gallery creation never affect
-selection, paired tables, correlations, or scientific hashes.
+`proximity.csv` retains every experimental seed row, including rows from
+included, discarded, and unusable prompts, together with the frozen decision
+and its reason for auditability. It also records
+`experiment_prompt_spearman`, repeated on each prompt's rows and left blank
+when the experimental L2 or SSCD vector is constant or has fewer than two
+observations. The scatter shows the seed-level observations for included
+prompts. Its annotation and `summary.json` aggregate one experimental
+Spearman value per included prompt: selected and evaluable prompt counts, the
+count and fraction of evaluable prompts with rho below zero, and median rho.
+No pooled seed-row correlation is reported. `run_config.json` pins the
+generation, SSCD, and selection identities. Plotting reloads `proximity.csv`;
+it does not rerun diffusion or create duplicate tables, image galleries, or
+copied previews.
 
 ## Offline validation
 

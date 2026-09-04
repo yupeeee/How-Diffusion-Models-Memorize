@@ -1376,7 +1376,7 @@ class RecoveryEngine:
                 reason=reason,
             )
 
-    def _reactivate_legacy_unresolved(self) -> None:
+    def _reactivate_unresolved_for_updated_strategies(self) -> None:
         metadata_getter = getattr(self.state, "get_run_metadata", None)
         strategies = (
             (
@@ -2292,7 +2292,7 @@ class RecoveryEngine:
 
     def run(self) -> None:
         self._verify_downloaded_artifacts()
-        self._reactivate_legacy_unresolved()
+        self._reactivate_unresolved_for_updated_strategies()
         self.stage_exact_reuse()
         self.stage_official_assets()
         self.stage_direct()

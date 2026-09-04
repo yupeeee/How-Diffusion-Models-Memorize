@@ -27,7 +27,7 @@ class LatentDistances:
     latent_rmse: torch.Tensor
 
 
-def target_preprocessing_policy(resolution: int = 512) -> dict[str, object]:
+def target_preprocessing_policy(resolution: int) -> dict[str, object]:
     """Return the complete JSON-ready empirical-target preprocessing policy."""
 
     size = _positive_integer(resolution, "resolution")
@@ -53,7 +53,7 @@ def target_preprocessing_policy(resolution: int = 512) -> dict[str, object]:
 def preprocess_target_image(
     image: Image.Image,
     *,
-    resolution: int = 512,
+    resolution: int,
 ) -> torch.Tensor:
     """Apply the fixed image policy and return a float32 ``[1, 3, H, W]`` tensor."""
 
@@ -73,7 +73,7 @@ def encode_target_latent(
     vae: Any,
     device: str | torch.device,
     *,
-    resolution: int = 512,
+    resolution: int,
     expected_channels: int | None = None,
     encoding_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:

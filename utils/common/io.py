@@ -146,7 +146,9 @@ def atomic_write_csv(
     temporary = _temporary_sibling(path)
     try:
         with temporary.open("x", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer = csv.DictWriter(
+                handle, fieldnames=fieldnames, extrasaction="ignore"
+            )
             writer.writeheader()
             writer.writerows(rows)
             handle.flush()
@@ -162,10 +164,12 @@ def csv_safe_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy(deep=True)
     for column in result.columns:
         result[column] = result[column].map(
-            lambda value: canonical_json(value)
-            if isinstance(value, (list, tuple, dict, set, frozenset))
-            or hasattr(value, "tolist")
-            else value
+            lambda value: (
+                canonical_json(value)
+                if isinstance(value, (list, tuple, dict, set, frozenset))
+                or hasattr(value, "tolist")
+                else value
+            )
         )
     return result
 
@@ -218,6 +222,27 @@ def atomic_copy(source: str | Path, destination: str | Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+class _HashingWriter:
+    """Forward binary writes while hashing exactly the persisted byte stream."""
+
+    def __init__(self, handle: Any) -> None:
+        self._handle = handle
+        self._digest = hashlib.sha256()
+
+    def write(self, content: bytes) -> int:
+        written = self._handle.write(content)
+        if not isinstance(written, int) or written < 0 or written > len(content):
+            raise CacheIOError("tensor cache writer returned an invalid byte count")
+        self._digest.update(memoryview(content)[:written])
+        return written
+
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
+
+
 def atomic_torch_save(value: object, destination: str | Path) -> str:
     """Validate and atomically save one tensor-only payload, returning its hash."""
 
@@ -226,14 +251,17 @@ def atomic_torch_save(value: object, destination: str | Path) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = _temporary_sibling(path)
     try:
+        digest: str
         with temporary.open("xb") as handle:
-            torch.save(value, handle)
+            writer = _HashingWriter(handle)
+            torch.save(value, writer)
             handle.flush()
             os.fsync(handle.fileno())
+            digest = writer.hexdigest()
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-    return file_sha256(path)
+    return digest
 
 
 def safe_torch_load(path: str | Path) -> object:

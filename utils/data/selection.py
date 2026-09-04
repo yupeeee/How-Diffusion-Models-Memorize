@@ -1,1086 +1,1086 @@
-"""Fixed, frozen, model-specific Webster target-pair selection.
+"""Freeze prompt selection from terminal-L2/SSCD proximity evidence.
 
-Ordinary experiments use seeds 0--19. Selection is built from a distinct
-reference run: seeds 20--29 affect prompt inclusion, while seeds 30--39 are a
-reference-only validation half. Experimental scores, validation scores,
-latent proximity, and correlations never affect inclusion.
+Selection uses all reference seeds N--2N-1, where N is the experiment seed
+count. A prompt is included exactly when
+its within-prompt Spearman correlation between L2 distance and SSCD is finite
+and negative. Webster kind is audit metadata and never affects the decision.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
-import tempfile
-import json
 import math
 import operator
+import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+import shutil
+import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import fmean, median
 from typing import Any
 
 import pandas as pd
 
-from utils.common.cli import generation_run_name
+from utils.common.cli import (
+    generation_cache_namespace,
+    generation_cache_parent_name,
+    generation_run_name,
+    stable_float,
+    validate_seed_block,
+)
 from utils.common.io import (
     atomic_write_frame_csv,
-    atomic_write_frame_parquet,
     atomic_write_json,
     canonical_hash,
     read_json,
 )
+from utils.data.webster import normalize_webster_type
 from utils.experiments.cache import generation_log_relative_path
 
-REFERENCE_SSCD_BOUNDARY = 0.25
-# Retain the old public name for callers that use the TV-specific spelling.
-TV_MEAN_SSCD_THRESHOLD = REFERENCE_SSCD_BOUNDARY
-REFERENCE_SCHEDULER, REFERENCE_GUIDANCE_SCALE = "ddim", 7.5
-REFERENCE_NUM_INFERENCE_STEPS, REFERENCE_SEED_START = 50, 20
-REFERENCE_NUM_SEEDS = 20
-SELECTION_SEEDS = tuple(range(20, 30))
-REFERENCE_VALIDATION_SEEDS = tuple(range(30, 40))
-REFERENCE_SEEDS = SELECTION_SEEDS + REFERENCE_VALIDATION_SEEDS
-SELECTION_POLICY = "target_pair_selection_tv_ge_0_25_n_ge_0_25"
-SELECTION_SCHEMA_VERSION = 4
-THRESHOLD_SENSITIVITY = (0.15, 0.20, 0.22, 0.25, 0.30, 0.35, 0.40)
-INCLUDED_NON_TV, INCLUDED_TV_TARGET_SUPPORTED = "included_non_tv", "included_tv_target_supported"
-EXCLUDED_TV_TARGET_UNSUPPORTED = "excluded_tv_target_unsupported"
-INCLUDED_N_TARGET_SUPPORTED = "included_n_target_supported"
-EXCLUDED_N_TARGET_UNSUPPORTED = "excluded_n_target_unsupported"
-MISSING_REFERENCE_SSCD, INVALID_RECORD = "missing_reference_sscd", "invalid_record"
+SELECTION_POLICY = "prompt_spearman_l2_sscd_lt_zero"
+INCLUDED_PROXIMITY_RULE = "included_proximity_rule"
+DISCARDED_PROXIMITY_RULE = "discarded_proximity_rule"
+UNUSABLE_REFERENCE_OBSERVATIONS = "unusable_reference_observations"
 
-_MODEL_DATASET = {
-    "sdv1": "sdv1", "sdv2": "sdv2", "realvis": "realisticvision"
-}
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-_IDENTITY_COLUMNS = tuple(
-    "original_index record_id source_row_number prompt_raw "
-    "webster_overfit_type_raw target_image_sha256".split()
-)
 SELECTION_COLUMNS = tuple(
-    "model_name original_index record_id source_row_number prompt_raw "
-    "target_image_sha256 webster_overfit_type_raw "
-    "webster_overfit_type_normalized reference_run_name "
-    "reference_generation_hash reference_sscd_hash selection_seed_values "
-    "reference_validation_seed_values selection_mean_sscd selection_median_sscd "
-    "selection_min_sscd selection_max_sscd selection_fraction_ge_0_25 "
-    "reference_validation_mean_sscd reference_validation_median_sscd "
-    "comparison_operator selection_rule_passes reference_validation_rule_passes "
-    "selection_validation_agree include_target_pair "
-    "selection_status selection_reason target_semantics threshold "
-    "selection_policy selection_hash".split()
+    "model_name original_index record_id source_row_number seed prompt kind "
+    "target_image_sha256 generated_image_path generated_image_tile_index "
+    "l2_norm sscd observation_status observation_error prompt_spearman include_prompt "
+    "selection_status selection_reason reference_run_name "
+    "reference_generation_hash reference_sscd_hash selection_policy selection_hash".split()
 )
-DIAGNOSTIC_COLUMNS = tuple(
-    "category comparison_operator threshold included_prompt_count "
-    "excluded_prompt_count scored_prompt_count missing_prompt_count "
-    "validation_scored_prompt_count validation_missing_prompt_count "
-    "selection_validation_agreement_count "
-    "selection_validation_disagreement_count is_fixed_threshold "
-    "otsu_threshold otsu_lower_neighbor otsu_upper_neighbor "
-    "otsu_lower_count otsu_upper_count".split()
+_IDENTITY_COLUMNS = tuple(
+    "original_index record_id source_row_number prompt kind target_image_sha256".split()
 )
-_FILES = tuple(
-    "selection.parquet selection.csv selected_tv.csv excluded_tv.csv "
-    "selected_n.csv excluded_n.csv "
-    "threshold_diagnostics.csv config.json summary.json".split()
-)
-_FROZEN_COMPATIBILITY_CONFIG_FIELDS = tuple(
-    "schema_version selection_policy model_name dataset_model_name "
-    "reference_run_name reference_scheduler reference_guidance_scale "
-    "reference_num_inference_steps reference_seed_start reference_num_seeds "
-    "reference_seeds selection_seeds reference_validation_seeds boundary "
-    "threshold category_rules "
-    "decision_scope selection_metric reference_validation_values_affect_selection "
-    "proximity_affects_selection correlation_affects_selection "
-    "sscd_checkpoint_sha256 sscd_preprocessing_hash".split()
-)
+_MODELS = {"sdv1": "sdv1", "sdv2": "sdv2", "realvis": "realisticvision"}
+_HASH = re.compile(r"[0-9a-f]{64}")
+_FILES = ("selection.csv", "config.json", "summary.json")
+
 
 class TargetPairSelectionError(RuntimeError):
-    """Invalid selection input or artifact."""
+    """Selection evidence or a frozen selection is invalid."""
 
 
 class TargetPairSelectionMissingError(TargetPairSelectionError):
-    """Missing frozen selection."""
+    """The required frozen selection does not exist."""
 
 
 class FrozenTargetPairSelectionError(TargetPairSelectionError):
-    """Frozen evidence mismatch."""
+    """New evidence conflicts with an existing frozen selection."""
 
 
-class StaleTargetPairSelectionError(FrozenTargetPairSelectionError):
-    """A frozen artifact implements an older scientific selection policy."""
-
-
-@dataclass(frozen=True, slots=True)
-class OtsuDiagnostic:
-    """The exact best split between neighboring sorted prompt means."""
-    threshold: float
-    lower_neighbor: float
-    upper_neighbor: float
-    lower_count: int
-    upper_count: int
-    between_class_variance: float
 @dataclass(frozen=True, slots=True)
 class TargetPairSelection:
-    """One validated frozen prompt selection and its audit values."""
+    """A validated seed-level selection audit."""
+
     root: Path
     model_name: str
+    scheduler_name: str
+    guidance_scale: float
+    num_inference_steps: int
+    num_seeds: int
     frame: pd.DataFrame
     configuration: Mapping[str, object]
     sha256: str
-    diagnostics: pd.DataFrame
+
+    @property
+    def prompt_frame(self) -> pd.DataFrame:
+        return (
+            self.frame.drop_duplicates("original_index").reset_index(drop=True).copy()
+        )
+
     @property
     def included_indices(self) -> frozenset[str]:
-        return _indices(self.frame, self.frame["include_target_pair"].astype(bool))
+        rows = self.prompt_frame
+        return frozenset(rows.loc[rows["include_prompt"], "original_index"].astype(str))
+
     @property
     def excluded_indices(self) -> frozenset[str]:
-        return _indices(self.frame, ~self.frame["include_target_pair"].astype(bool))
-    @property
-    def selected_tv_indices(self) -> frozenset[str]:
-        mask = self.frame["include_target_pair"].astype(bool) & self.frame[
-            "webster_overfit_type_normalized"
-        ].eq("TV")
-        return _indices(self.frame, mask)
+        rows = self.prompt_frame
+        return frozenset(
+            rows.loc[~rows["include_prompt"], "original_index"].astype(str)
+        )
 
-    @property
-    def excluded_tv_indices(self) -> frozenset[str]:
-        mask = ~self.frame["include_target_pair"].astype(bool) & self.frame[
-            "webster_overfit_type_normalized"
-        ].eq("TV")
-        return _indices(self.frame, mask)
-
-    @property
-    def selected_n_indices(self) -> frozenset[str]:
-        mask = self.frame["include_target_pair"].astype(bool) & self.frame[
-            "webster_overfit_type_normalized"
-        ].eq("N")
-        return _indices(self.frame, mask)
-
-    @property
-    def excluded_n_indices(self) -> frozenset[str]:
-        mask = ~self.frame["include_target_pair"].astype(bool) & self.frame[
-            "webster_overfit_type_normalized"
-        ].eq("N")
-        return _indices(self.frame, mask)
 
 FrameInput = pd.DataFrame | str | Path
 ConfigurationInput = Mapping[str, object] | str | Path
+
+
 def is_reference_configuration(
-    *, model_name: str, scheduler_name: str, guidance_scale: float,
-    num_inference_steps: int, num_seeds: int, seed_start: int = 0,
+    *,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+    seed_start: int,
 ) -> bool:
-    """Return whether CLI values identify the sole selection-building run."""
+    """Return whether CLI values identify the N-seed reference run."""
+
     try:
-        guidance = float(guidance_scale)
-        steps = operator.index(num_inference_steps)
-        seeds = operator.index(num_seeds)
+        _, _, _, _, count = _reference_values(
+            model_name,
+            scheduler_name,
+            guidance_scale,
+            num_inference_steps,
+            num_seeds,
+        )
         first_seed = operator.index(seed_start)
-    except (TypeError, ValueError, OverflowError):
+    except (TargetPairSelectionError, TypeError, ValueError, OverflowError):
         return False
-    return (
-        model_name in _MODEL_DATASET
-        and scheduler_name == REFERENCE_SCHEDULER
-        and math.isfinite(guidance)
-        and guidance == REFERENCE_GUIDANCE_SCALE
-        and not isinstance(num_inference_steps, bool)
-        and not isinstance(num_seeds, bool)
-        and not isinstance(seed_start, bool)
-        and steps == REFERENCE_NUM_INFERENCE_STEPS
-        and seeds == REFERENCE_NUM_SEEDS
-        and first_seed == REFERENCE_SEED_START
+    return not isinstance(seed_start, bool) and first_seed == count
+
+
+def reference_run_name(
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+) -> str:
+    model, scheduler, guidance, steps, count = _reference_values(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
     )
-def reference_run_name(model_name: str) -> str:
     return generation_run_name(
-        _model(model_name),
-        REFERENCE_SCHEDULER,
-        REFERENCE_GUIDANCE_SCALE,
-        REFERENCE_NUM_INFERENCE_STEPS,
-        REFERENCE_NUM_SEEDS,
-        seed_start=REFERENCE_SEED_START,
+        model,
+        scheduler,
+        guidance,
+        steps,
+        count,
+        seed_start=count,
     )
-def reference_run_path(model_name: str) -> Path:
+
+
+def reference_run_path(
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+) -> Path:
+    model, scheduler, guidance, steps, count = _reference_values(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+    )
     return generation_log_relative_path(
-        model_name=_model(model_name),
-        scheduler_name=REFERENCE_SCHEDULER,
-        guidance_scale=REFERENCE_GUIDANCE_SCALE,
-        num_inference_steps=REFERENCE_NUM_INFERENCE_STEPS,
-        num_seeds=REFERENCE_NUM_SEEDS,
-        seed_start=REFERENCE_SEED_START,
+        model_name=model,
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
+        seed_start=count,
     )
-def reference_selection_command(model_name: str) -> str:
-    model = _model(model_name)
+
+
+def reference_selection_command(
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+) -> str:
+    model, scheduler, guidance, steps, count = _reference_values(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+    )
+    common = (
+        f"--model {model} --scheduler {scheduler} --g {stable_float(guidance)} "
+        f"--T {steps} "
+        f"--N {count} --seed-start {count}"
+    )
     return (
-        f"./generate.sh --model {model} --scheduler ddim --g 7.5 "
-        "--T 50 --N 20 --seed-start 20 --downscale 4\n"
-        f"./sscd.sh --model {model} --scheduler ddim --g 7.5 "
-        "--T 50 --N 20 --seed-start 20\n"
-        f"./compute_proximity.sh --model {model} --scheduler ddim --g 7.5 "
-        "--T 50 --N 20 --seed-start 20"
+        f"./generate.sh {common}\n./sscd.sh {common}\n./compute_proximity.sh {common}"
     )
-def target_pair_selection_directory(root: str | Path, *, model_name: str) -> Path:
+
+
+def target_pair_selection_directory(
+    root: str | Path,
+    *,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+) -> Path:
+    model, scheduler, guidance, steps, count = _reference_values(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+    )
+    parent = generation_cache_parent_name(model, scheduler, guidance, steps, count)
+    namespace = generation_cache_namespace(
+        model, scheduler, guidance, steps, count, seed_start=count
+    )
     return (
         Path(root).expanduser().resolve()
         / "data/webster/selection"
-        / _MODEL_DATASET[_model(model_name)]
-        / "reference_S20_N20"
+        / _MODELS[model]
+        / parent
+        / namespace
     )
+
+
 def build_target_pair_selection(
     root: str | Path,
     *,
     model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
     paired_frame: FrameInput,
     reference_run_config: ConfigurationInput | None = None,
     sscd_config: ConfigurationInput | None = None,
     records_frame: FrameInput | None = None,
 ) -> TargetPairSelection:
-    """Build and freeze a selection from local reference SSCD rows."""
+    """Build and atomically freeze the seed-level audit."""
+
     project_root = Path(root).expanduser().resolve()
-    model = _model(model_name)
-    run_directory = project_root / reference_run_path(model)
-    run_config = _configuration(
-        reference_run_config, run_directory / "run_config.json", "generation config"
+    model, scheduler, guidance, steps, count = _reference_values(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
     )
-    score_config = _configuration(
-        sscd_config, run_directory / "sscd_config.json", "SSCD config"
+    run = project_root / reference_run_path(model, scheduler, guidance, steps, count)
+    generation = _read_config(
+        reference_run_config, run / "run_config.json", "generation config"
     )
-    generation_hash = _validate_reference_run(run_config, model)
-    sscd_hash = _validate_reference_sscd(score_config, generation_hash)
-    paired = _frame(paired_frame, "paired SSCD")
-    records = _prompt_records(paired, records_frame, model)
+    sscd = _read_config(sscd_config, run / "sscd_config.json", "SSCD config")
+    generation_hash = _validate_generation(
+        generation, model, scheduler, guidance, steps, count
+    )
+    sscd_hash = _validate_sscd(sscd, generation_hash, count)
+
+    paired = _read_frame(paired_frame, "paired reference observations")
+    source = paired if records_frame is None else _read_frame(records_frame, "records")
+    records = _prompt_records(source, derived=records_frame is None, model=model)
+    observations = _observations(
+        paired, set(records["original_index"]), num_seeds=count
+    )
     manifest = _manifest(
-        records, _score_map(paired, set(records["original_index"].astype(str))),
-        model, generation_hash, sscd_hash,
+        records,
+        observations,
+        model,
+        scheduler,
+        guidance,
+        steps,
+        generation_hash,
+        sscd_hash,
+        count,
     )
-    config = _selection_config(model, generation_hash, sscd_hash, score_config)
     digest = compute_target_pair_selection_hash(
-        manifest, model_name=model, reference_generation_hash=generation_hash,
+        manifest,
+        model_name=model,
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
+        reference_generation_hash=generation_hash,
         reference_sscd_hash=sscd_hash,
     )
     manifest["selection_hash"] = digest
-    config["selection_hash"] = digest
-    labels = manifest["webster_overfit_type_normalized"]
-    tv = labels.eq("TV")
-    normal = labels.eq("N")
+    config = _selection_config(
+        model,
+        scheduler,
+        guidance,
+        steps,
+        count,
+        generation_hash,
+        sscd_hash,
+        sscd["sscd_checkpoint_sha256"],
+        sscd["sscd_preprocessing_hash"],
+        digest,
+    )
     selection = TargetPairSelection(
         root=project_root,
         model_name=model,
-        frame=manifest.loc[:, SELECTION_COLUMNS].reset_index(drop=True),
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
+        frame=manifest,
         configuration=config,
         sha256=digest,
-        diagnostics=build_threshold_diagnostics(
-            manifest.loc[tv, "selection_mean_sscd"],
-            total_tv_count=int(tv.sum()),
-            tv_validation_means=manifest.loc[
-                tv, "reference_validation_mean_sscd"
-            ],
-            n_selection_means=manifest.loc[normal, "selection_mean_sscd"],
-            total_n_count=int(normal.sum()),
-            n_validation_means=manifest.loc[
-                normal, "reference_validation_mean_sscd"
-            ],
-        ),
     )
     validate_target_pair_selection(selection)
-    destination = target_pair_selection_directory(project_root, model_name=model)
-    if destination.exists():
-        frozen = load_target_pair_selection(project_root, model_name=model)
-        if frozen.sha256 != digest and not _matches_frozen_selection_evidence(
-            frozen, selection
-        ):
+
+    destination = target_pair_selection_directory(
+        project_root,
+        model_name=model,
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
+    )
+    if destination.exists() or destination.is_symlink():
+        frozen = load_target_pair_selection(
+            project_root,
+            model_name=model,
+            scheduler_name=scheduler,
+            guidance_scale=guidance,
+            num_inference_steps=steps,
+            num_seeds=count,
+        )
+        if frozen.sha256 != digest:
             raise FrozenTargetPairSelectionError(
                 f"Reference evidence would change frozen selection {destination}: "
                 f"{frozen.sha256} != {digest}"
             )
         return frozen
     _write_selection(selection, destination)
-    return load_target_pair_selection(project_root, model_name=model)
-
-
-def _matches_frozen_selection_evidence(
-    frozen: TargetPairSelection,
-    candidate: TargetPairSelection,
-) -> bool:
-    """Accept aggregate-hash drift only when frozen decision evidence is exact."""
-
-    if any(
-        frozen.configuration.get(key) != candidate.configuration.get(key)
-        for key in _FROZEN_COMPATIBILITY_CONFIG_FIELDS
-    ):
-        return False
-    generation_hash = frozen.configuration.get("reference_generation_hash")
-    sscd_hash = frozen.configuration.get("reference_sscd_hash")
-    if not _is_hash(generation_hash) or not _is_hash(sscd_hash):
-        return False
-    compatible_digest = compute_target_pair_selection_hash(
-        candidate.frame,
-        model_name=candidate.model_name,
-        reference_generation_hash=str(generation_hash),
-        reference_sscd_hash=str(sscd_hash),
+    return load_target_pair_selection(
+        project_root,
+        model_name=model,
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
     )
-    return compatible_digest == frozen.sha256
-def ensure_reference_target_pair_selection(
+
+
+def load_target_pair_selection(
     root: str | Path,
     *,
     model_name: str,
-    paired_frame: FrameInput | None = None,
-    reference_run_config: ConfigurationInput | None = None,
-    sscd_config: ConfigurationInput | None = None,
-    records_frame: FrameInput | None = None,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
 ) -> TargetPairSelection:
-    """Load a frozen selection, building only when reference rows are supplied."""
-    if paired_frame is not None:
-        return build_target_pair_selection(
-            root, model_name=model_name, paired_frame=paired_frame,
-            reference_run_config=reference_run_config, sscd_config=sscd_config,
-            records_frame=records_frame,
-        )
-    if any(item is not None for item in (reference_run_config, sscd_config, records_frame)):
-        raise TargetPairSelectionError("paired_frame is required with reference inputs")
-    if target_pair_selection_directory(root, model_name=model_name).exists():
-        return load_target_pair_selection(root, model_name=model_name)
-    _raise_missing(root, model_name)
-def load_target_pair_selection(
-    root: str | Path, *, model_name: str,
-) -> TargetPairSelection:
-    """Strictly load one frozen model-specific selection."""
+    """Load and fully validate the three frozen artifacts."""
+
     project_root = Path(root).expanduser().resolve()
-    model = _model(model_name)
-    directory = target_pair_selection_directory(project_root, model_name=model)
+    model, scheduler, guidance, steps, count = _reference_values(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+    )
+    directory = target_pair_selection_directory(
+        project_root,
+        model_name=model,
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
+    )
     if not directory.exists():
-        _raise_missing(project_root, model)
-    _raise_if_stale_selection(directory)
+        _raise_missing(project_root, model, scheduler, guidance, steps, count)
+    if not directory.is_dir() or directory.is_symlink():
+        raise TargetPairSelectionError(f"Invalid selection directory: {directory}")
     missing = [name for name in _FILES if not (directory / name).is_file()]
     if missing:
         raise TargetPairSelectionError(
             f"Incomplete frozen selection {directory}; missing: {', '.join(missing)}"
         )
+    if any((directory / name).is_symlink() for name in _FILES):
+        raise TargetPairSelectionError(
+            "Frozen selection artifacts must not be symlinks"
+        )
     try:
-        frame = pd.read_parquet(directory / "selection.parquet")
-        selection_csv = pd.read_csv(
-            directory / "selection.csv", dtype={"original_index": str}
+        frame = pd.read_csv(
+            directory / "selection.csv",
+            dtype={
+                "original_index": str,
+                "record_id": str,
+                "prompt": str,
+                "kind": str,
+                "target_image_sha256": str,
+                "generated_image_path": str,
+            },
+            keep_default_na=False,
+            float_precision="round_trip",
         )
-        selected_tv_csv = pd.read_csv(
-            directory / "selected_tv.csv", dtype={"original_index": str}
-        )
-        excluded_tv_csv = pd.read_csv(
-            directory / "excluded_tv.csv", dtype={"original_index": str}
-        )
-        selected_n_csv = pd.read_csv(
-            directory / "selected_n.csv", dtype={"original_index": str}
-        )
-        excluded_n_csv = pd.read_csv(
-            directory / "excluded_n.csv", dtype={"original_index": str}
-        )
-        diagnostics = pd.read_csv(directory / "threshold_diagnostics.csv")
         config = read_json(directory / "config.json")
         summary = read_json(directory / "summary.json")
-    except (OSError, ValueError, RuntimeError) as error:
-        raise TargetPairSelectionError(f"Cannot read selection {directory}: {error}") from error
+    except (OSError, RuntimeError, ValueError) as error:
+        raise TargetPairSelectionError(
+            f"Cannot read selection {directory}: {error}"
+        ) from error
+    frame = _normalize_csv(frame)
     digest = config.get("selection_hash")
     if not _is_hash(digest):
         raise TargetPairSelectionError("config.json selection_hash is invalid")
     selection = TargetPairSelection(
-        project_root, model, frame, config, str(digest), diagnostics
+        root=project_root,
+        model_name=model,
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
+        frame=frame,
+        configuration=config,
+        sha256=str(digest),
     )
     validate_target_pair_selection(selection)
-    _validate_selection_sidecars(
-        frame,
-        selection_csv,
-        selected_tv_csv,
-        excluded_tv_csv,
-        selected_n_csv,
-        excluded_n_csv,
-    )
     if summary != _summary(selection):
         raise TargetPairSelectionError("Frozen selection summary is inconsistent")
     return selection
+
+
 def validate_target_pair_selection(selection: TargetPairSelection) -> None:
-    """Validate the canonical manifest, fixed configuration, and digest."""
-    model = _model(selection.model_name)
-    config = selection.configuration
+    """Validate fixed provenance, seed groups, decisions, and content hash."""
+
+    model, scheduler, guidance, steps, count = _reference_values(
+        selection.model_name,
+        selection.scheduler_name,
+        selection.guidance_scale,
+        selection.num_inference_steps,
+        selection.num_seeds,
+    )
+    frame, config = selection.frame, selection.configuration
+    if tuple(frame.columns) != SELECTION_COLUMNS or frame.empty:
+        raise TargetPairSelectionError("selection.csv has an invalid schema")
+    if not pd.api.types.is_bool_dtype(frame["include_prompt"]):
+        raise TargetPairSelectionError("include_prompt must contain booleans")
     expected = _selection_config(
-        model, str(config.get("reference_generation_hash")),
-        str(config.get("reference_sscd_hash")), config,
+        model,
+        scheduler,
+        guidance,
+        steps,
+        count,
+        str(config.get("reference_generation_hash")),
+        str(config.get("reference_sscd_hash")),
+        config.get("sscd_checkpoint_sha256"),
+        config.get("sscd_preprocessing_hash"),
+        selection.sha256,
     )
-    expected["selection_hash"] = selection.sha256
-    missing_config_keys = sorted(set(expected) - set(config))
-    extra_config_keys = sorted(set(config) - set(expected))
-    if missing_config_keys or extra_config_keys:
-        details = []
-        if missing_config_keys:
-            details.append("missing: " + ", ".join(missing_config_keys))
-        if extra_config_keys:
-            details.append("unexpected: " + ", ".join(extra_config_keys))
+    if dict(config) != expected:
         raise TargetPairSelectionError(
-            "Invalid selection config keys; " + "; ".join(details)
+            "config.json does not match the selection contract"
         )
-    wrong = [key for key, value in expected.items() if config.get(key) != value]
-    if wrong:
-        raise TargetPairSelectionError("Invalid selection config fields: " + ", ".join(wrong))
-    required_hashes = tuple(
-        "reference_generation_hash reference_sscd_hash sscd_checkpoint_sha256 "
-        "sscd_preprocessing_hash".split()
-    )
-    if any(not _is_hash(config.get(key)) for key in required_hashes):
-        raise TargetPairSelectionError("Selection config contains an invalid provenance hash")
-    frame = selection.frame
-    missing = sorted(set(SELECTION_COLUMNS) - set(frame.columns))
-    if missing or frame.empty:
-        detail = ", ".join(missing) if missing else "empty manifest"
-        raise TargetPairSelectionError(f"Invalid selection schema: {detail}")
-    if frame["original_index"].astype(str).duplicated().any():
-        raise TargetPairSelectionError("Selection repeats original_index")
-    if (
-        not pd.api.types.is_bool_dtype(frame["include_target_pair"])
-        or frame["include_target_pair"].isna().any()
+    if any(
+        not _is_hash(config[key])
+        for key in (
+            "reference_generation_hash",
+            "reference_sscd_hash",
+            "sscd_checkpoint_sha256",
+            "sscd_preprocessing_hash",
+            "selection_hash",
+        )
     ):
-        raise TargetPairSelectionError("include_target_pair must contain booleans")
-    scalar_expectations = {
+        raise TargetPairSelectionError("Selection provenance hash is invalid")
+    fixed = {
         "model_name": model,
-        "reference_run_name": reference_run_name(model),
+        "reference_run_name": reference_run_name(
+            model, scheduler, guidance, steps, count
+        ),
         "reference_generation_hash": config["reference_generation_hash"],
         "reference_sscd_hash": config["reference_sscd_hash"],
-        "threshold": TV_MEAN_SSCD_THRESHOLD,
         "selection_policy": SELECTION_POLICY,
         "selection_hash": selection.sha256,
     }
-    if any(not frame[key].eq(value).all() for key, value in scalar_expectations.items()):
-        raise TargetPairSelectionError("Manifest row provenance is inconsistent")
-    normalized = frame["webster_overfit_type_raw"].map(normalize_webster_overfit_type)
-    if not normalized.eq(frame["webster_overfit_type_normalized"]).all():
-        raise TargetPairSelectionError("Manifest contains an invalid normalized label")
-    score_map: dict[str, dict[int, float | None]] = {}
-    for row in frame.to_dict(orient="records"):
-        index = _index(row["original_index"])
-        selection_values = _stored_scores(
-            row["selection_seed_values"], "selection_seed_values"
+    if any(not frame[column].eq(value).all() for column, value in fixed.items()):
+        raise TargetPairSelectionError("Selection row provenance is inconsistent")
+    expected_order = frame.sort_values(
+        ["source_row_number", "original_index", "seed"], kind="stable"
+    ).reset_index(drop=True)
+    if not frame.reset_index(drop=True).equals(expected_order):
+        raise TargetPairSelectionError("selection.csv rows are not canonically ordered")
+    for index, group in frame.groupby("original_index", sort=False):
+        _validate_prompt_group(
+            str(index), group, model, scheduler, guidance, steps, count
         )
-        reference_validation_values = _stored_scores(
-            row["reference_validation_seed_values"], "reference_validation_seed_values"
-        )
-        score_map[index] = {
-            **dict(zip(SELECTION_SEEDS, selection_values, strict=True)),
-            **dict(zip(REFERENCE_VALIDATION_SEEDS, reference_validation_values, strict=True)),
-        }
-    rebuilt = _manifest(
-        frame.loc[:, _IDENTITY_COLUMNS],
-        score_map,
-        model,
-        str(config["reference_generation_hash"]),
-        str(config["reference_sscd_hash"]),
-    )
-    decision_columns = [
-        "original_index", "selection_seed_values", "reference_validation_seed_values",
-        "selection_mean_sscd", "selection_median_sscd", "selection_min_sscd",
-        "selection_max_sscd", "selection_fraction_ge_0_25",
-        "reference_validation_mean_sscd", "reference_validation_median_sscd",
-        "comparison_operator", "selection_rule_passes",
-        "reference_validation_rule_passes", "selection_validation_agree",
-        "include_target_pair", "selection_status", "selection_reason",
-        "target_semantics",
-    ]
-    actual_decisions = frame.loc[:, decision_columns].reset_index(drop=True).copy()
-    rebuilt_decisions = rebuilt.loc[:, decision_columns].reset_index(drop=True).copy()
-    for column in ("selection_seed_values", "reference_validation_seed_values"):
-        actual_decisions[column] = actual_decisions[column].map(
-            lambda value, label=column: _stored_scores(value, label)
-        )
-        rebuilt_decisions[column] = rebuilt_decisions[column].map(
-            lambda value, label=column: _stored_scores(value, label)
-        )
-    try:
-        pd.testing.assert_frame_equal(
-            actual_decisions,
-            rebuilt_decisions,
-            check_dtype=False,
-            check_exact=True,
-        )
-    except AssertionError as error:
-        raise TargetPairSelectionError(
-            "Manifest decisions or SSCD statistics are inconsistent"
-        ) from error
-    labels = frame["webster_overfit_type_normalized"]
-    tv = labels.eq("TV")
-    normal = labels.eq("N")
-    expected_diagnostics = build_threshold_diagnostics(
-        frame.loc[tv, "selection_mean_sscd"],
-        total_tv_count=int(tv.sum()),
-        tv_validation_means=frame.loc[tv, "reference_validation_mean_sscd"],
-        n_selection_means=frame.loc[normal, "selection_mean_sscd"],
-        total_n_count=int(normal.sum()),
-        n_validation_means=frame.loc[
-            normal, "reference_validation_mean_sscd"
-        ],
-    )
-    actual_diagnostics = selection.diagnostics.reset_index(drop=True).copy()
-    rebuilt_diagnostics = expected_diagnostics.copy()
-    for column in DIAGNOSTIC_COLUMNS:
-        actual_diagnostics[column] = actual_diagnostics[column].map(
-            lambda value: math.nan if _missing(value) else value
-        )
-        rebuilt_diagnostics[column] = rebuilt_diagnostics[column].map(
-            lambda value: math.nan if _missing(value) else value
-        )
-    try:
-        pd.testing.assert_frame_equal(
-            actual_diagnostics,
-            rebuilt_diagnostics,
-            check_dtype=False,
-            check_exact=False,
-            rtol=1e-12,
-            atol=1e-15,
-        )
-    except AssertionError as error:
-        raise TargetPairSelectionError(
-            "Threshold diagnostics are inconsistent"
-        ) from error
     digest = compute_target_pair_selection_hash(
-        frame, model_name=model,
+        frame,
+        model_name=model,
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
         reference_generation_hash=str(config["reference_generation_hash"]),
         reference_sscd_hash=str(config["reference_sscd_hash"]),
     )
     if digest != selection.sha256:
-        raise TargetPairSelectionError(f"Selection hash mismatch: {selection.sha256} != {digest}")
+        raise TargetPairSelectionError(
+            f"Selection hash mismatch: {selection.sha256} != {digest}"
+        )
+
+
 def apply_target_pair_selection(
-    frame: pd.DataFrame, selection: TargetPairSelection,
+    frame: pd.DataFrame, selection: TargetPairSelection
 ) -> pd.DataFrame:
-    """Keep every row for included prompts and exclude whole rejected prompts."""
+    """Keep every input row belonging to an included prompt."""
+
     if "original_index" not in frame:
         raise TargetPairSelectionError("Table is missing original_index")
     result = frame.copy(deep=True)
     indices = result["original_index"].map(_index)
-    known = set(selection.frame["original_index"].astype(str))
+    known = set(selection.prompt_frame["original_index"])
     unknown = sorted(set(indices) - known)
     if unknown:
-        raise TargetPairSelectionError(f"Prompts absent from selection: {', '.join(unknown[:5])}")
-    mask = indices.isin(selection.included_indices)
-    return result.loc[mask].reset_index(drop=True)
-def exact_two_class_otsu(values: Iterable[object]) -> OtsuDiagnostic | None:
-    """Compute exact two-class Otsu over sorted values, without histogram bins."""
-    ordered = sorted(_finite_values(values))
-    if len(ordered) < 2 or ordered[0] == ordered[-1]:
-        return None
-    total, prefix, best = sum(ordered), 0.0, None
-    for position, (lower, upper) in enumerate(zip(ordered, ordered[1:])):
-        prefix += lower
-        if lower == upper:
-            continue
-        left, right = position + 1, len(ordered) - position - 1
-        score = left * right * (prefix / left - (total - prefix) / right) ** 2
-        if best is None or score > best[0]:
-            best = score, position
-    assert best is not None
-    score, position = best
-    lower, upper = ordered[position : position + 2]
-    return OtsuDiagnostic(
-        (lower + upper) / 2, lower, upper, position + 1,
-        len(ordered) - position - 1, score / len(ordered) ** 2,
-    )
-def build_threshold_diagnostics(
-    tv_selection_means: Iterable[object],
-    *,
-    total_tv_count: int | None = None,
-    tv_validation_means: Iterable[object] | None = None,
-    n_selection_means: Iterable[object] | None = None,
-    total_n_count: int | None = None,
-    n_validation_means: Iterable[object] | None = None,
-) -> pd.DataFrame:
-    """Return threshold sensitivity for both category-specific directions."""
-
-    rows = _category_threshold_diagnostics(
-        "TV",
-        tv_selection_means,
-        tv_validation_means,
-        total_count=total_tv_count,
-    )
-    if n_selection_means is not None:
-        rows.extend(
-            _category_threshold_diagnostics(
-                "N",
-                n_selection_means,
-                n_validation_means,
-                total_count=total_n_count,
-            )
-        )
-    return pd.DataFrame(rows, columns=DIAGNOSTIC_COLUMNS)
-
-
-def _category_threshold_diagnostics(
-    category: str,
-    selection_means: Iterable[object],
-    validation_means: Iterable[object] | None,
-    *,
-    total_count: int | None,
-) -> list[dict[str, object]]:
-    comparison_operator = _comparison_operator(category)
-    if comparison_operator is None:
-        raise TargetPairSelectionError(f"No threshold rule for category {category}")
-    selection_values = [_number(value) for value in selection_means]
-    observed_count = len(selection_values)
-    total = observed_count if total_count is None else int(total_count)
-    if total < observed_count or total < 0:
         raise TargetPairSelectionError(
-            f"total_{category.casefold()}_count is smaller than prompt values"
+            "Prompts absent from selection: " + ", ".join(unknown[:5])
         )
-    selection_values.extend([None] * (total - observed_count))
-    if validation_means is None:
-        validation_values: list[float | None] = [None] * total
-    else:
-        validation_values = [_number(value) for value in validation_means]
-        if len(validation_values) != observed_count:
-            raise TargetPairSelectionError(
-                f"{category} validation values do not align with selection values"
-            )
-        validation_values.extend([None] * (total - observed_count))
-    finite_selection = [value for value in selection_values if value is not None]
-    finite_validation = [value for value in validation_values if value is not None]
-    otsu = exact_two_class_otsu(finite_selection)
-    rows: list[dict[str, object]] = []
-    for threshold in THRESHOLD_SENSITIVITY:
-        selection_passes = [
-            _score_passes(category, value, threshold=threshold)
-            for value in selection_values
-        ]
-        validation_passes = [
-            _score_passes(category, value, threshold=threshold)
-            for value in validation_values
-        ]
-        comparable = [
-            (selection_pass, validation_pass)
-            for selection_pass, validation_pass in zip(
-                selection_passes, validation_passes, strict=True
-            )
-            if selection_pass is not None and validation_pass is not None
-        ]
-        included = sum(value is True for value in selection_passes)
-        rows.append(
-            {
-                "category": category,
-                "comparison_operator": comparison_operator,
-                "threshold": threshold,
-                "included_prompt_count": included,
-                "excluded_prompt_count": total - included,
-                "scored_prompt_count": len(finite_selection),
-                "missing_prompt_count": total - len(finite_selection),
-                "validation_scored_prompt_count": len(finite_validation),
-                "validation_missing_prompt_count": total - len(finite_validation),
-                "selection_validation_agreement_count": sum(
-                    left == right for left, right in comparable
-                ),
-                "selection_validation_disagreement_count": sum(
-                    left != right for left, right in comparable
-                ),
-                "is_fixed_threshold": threshold == REFERENCE_SSCD_BOUNDARY,
-                "otsu_threshold": None if otsu is None else otsu.threshold,
-                "otsu_lower_neighbor": None if otsu is None else otsu.lower_neighbor,
-                "otsu_upper_neighbor": None if otsu is None else otsu.upper_neighbor,
-                "otsu_lower_count": None if otsu is None else otsu.lower_count,
-                "otsu_upper_count": None if otsu is None else otsu.upper_count,
-            }
-        )
-    return rows
+    return result.loc[indices.isin(selection.included_indices)].reset_index(drop=True)
+
+
 def compute_target_pair_selection_hash(
     frame: pd.DataFrame,
     *,
     model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
     reference_generation_hash: str,
     reference_sscd_hash: str,
-    threshold: float = TV_MEAN_SSCD_THRESHOLD,
 ) -> str:
-    """Hash policy inputs and selection-half evidence, never outcome metrics."""
-    model = _model(model_name)
+    """Hash every seed observation and deterministic prompt decision."""
+
+    model, scheduler, guidance, steps, count = _reference_values(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+    )
+    reference_seeds = _reference_seeds(count)
     if not _is_hash(reference_generation_hash) or not _is_hash(reference_sscd_hash):
         raise TargetPairSelectionError("Selection provenance hash is invalid")
-    fields = (
-        "original_index", "record_id", "source_row_number", "prompt_raw",
-        "target_image_sha256", "webster_overfit_type_raw",
-        "webster_overfit_type_normalized", "selection_seed_values",
-        "comparison_operator", "selection_rule_passes",
-        "include_target_pair", "selection_status", "selection_reason", "target_semantics",
+    columns = tuple(
+        column for column in SELECTION_COLUMNS if column != "selection_hash"
     )
-    missing = sorted(set(fields) - set(frame.columns))
+    missing = sorted(set(columns) - set(frame.columns))
     if missing:
         raise TargetPairSelectionError("Cannot hash without: " + ", ".join(missing))
     rows = [
-        {field: _json(row.get(field)) for field in fields}
+        {column: _json(row[column]) for column in columns}
         for row in frame.sort_values(
-            ["source_row_number", "original_index"], kind="stable"
-        ).to_dict(orient="records")
+            ["source_row_number", "original_index", "seed"], kind="stable"
+        )
+        .loc[:, columns]
+        .to_dict(orient="records")
     ]
-    return canonical_hash({
-        "schema_version": SELECTION_SCHEMA_VERSION,
-        "selection_policy": SELECTION_POLICY,
-        "model_name": model,
-        "dataset_model_name": _MODEL_DATASET[model],
-        "reference_run_name": reference_run_name(model),
-        "reference_generation_hash": reference_generation_hash,
-        "reference_sscd_hash": reference_sscd_hash,
-        "boundary": float(threshold),
-        "threshold": float(threshold),
-        "category_rules": _category_rules(boundary=float(threshold)),
-        "selection_seeds": list(SELECTION_SEEDS),
-        "reference_validation_seeds": list(REFERENCE_VALIDATION_SEEDS),
-        "rows": rows,
-    })
-def normalize_webster_overfit_type(value: object) -> str:
-    """Apply the repository's canonical Webster category normalization."""
-
-    # Keep the selection API stable while avoiding a module-load dependency
-    # between the dataset and frozen-selection implementations.
-    from utils.data.webster import normalize_webster_type
-
-    return normalize_webster_type(value)
+    return canonical_hash(
+        {
+            "selection_policy": SELECTION_POLICY,
+            "model_name": model,
+            "dataset_model_name": _MODELS[model],
+            "reference_scheduler": scheduler,
+            "reference_guidance_scale": guidance,
+            "reference_num_inference_steps": steps,
+            "reference_run_name": reference_run_name(
+                model, scheduler, guidance, steps, count
+            ),
+            "reference_generation_hash": reference_generation_hash,
+            "reference_sscd_hash": reference_sscd_hash,
+            "reference_seeds": list(reference_seeds),
+            "selection_metric": "spearman(l2_norm,sscd)",
+            "include_when": "prompt_spearman < 0",
+            "rows": rows,
+        }
+    )
 
 
-def _category_rules(
-    *, boundary: float = REFERENCE_SSCD_BOUNDARY,
-) -> dict[str, dict[str, object]]:
-    return {
-        "TV": {
-            "selection_metric": "mean_reference_sscd",
-            "comparison_operator": ">=",
-            "boundary": boundary,
-            "include_when": "mean_reference_sscd >= boundary",
-        },
-        "N": {
-            "selection_metric": "mean_reference_sscd",
-            "comparison_operator": ">=",
-            "boundary": boundary,
-            "include_when": "mean_reference_sscd >= boundary",
-        },
-        "MV": {"decision": "unconditional_include_preserved"},
-        "RV": {"decision": "unconditional_include_preserved"},
-        "UNKNOWN": {"decision": "unconditional_include_preserved"},
-    }
+def spearman_correlation(left: Sequence[float], right: Sequence[float]) -> float:
+    """Compute Spearman rho as Pearson correlation of average ranks."""
 
-
-def _comparison_operator(label: str) -> str | None:
-    return {"TV": ">=", "N": ">="}.get(label)
-
-
-def _score_passes(
-    label: str,
-    value: float | None,
-    *,
-    threshold: float = REFERENCE_SSCD_BOUNDARY,
-) -> bool | None:
-    if value is None:
-        return None
-    if label in {"TV", "N"}:
-        return value >= threshold
-    return None
+    if len(left) != len(right) or len(left) < 2:
+        return math.nan
+    values = [float(value) for value in (*left, *right)]
+    if not all(math.isfinite(value) for value in values):
+        return math.nan
+    left_rank = pd.Series(left, dtype="float64").rank(method="average").tolist()
+    right_rank = pd.Series(right, dtype="float64").rank(method="average").tolist()
+    left_mean = math.fsum(left_rank) / len(left_rank)
+    right_mean = math.fsum(right_rank) / len(right_rank)
+    left_centered = [value - left_mean for value in left_rank]
+    right_centered = [value - right_mean for value in right_rank]
+    denominator = math.sqrt(
+        math.fsum(value * value for value in left_centered)
+        * math.fsum(value * value for value in right_centered)
+    )
+    if denominator == 0.0:
+        return math.nan
+    return (
+        math.fsum(x * y for x, y in zip(left_centered, right_centered, strict=True))
+        / denominator
+    )
 
 
 def _manifest(
-    records: pd.DataFrame, scores: Mapping[str, Mapping[int, float | None]], model: str,
-    generation_hash: str, sscd_hash: str,
+    records: pd.DataFrame,
+    observations: Mapping[str, Mapping[int, Mapping[str, object]]],
+    model: str,
+    scheduler: str,
+    guidance: float,
+    steps: int,
+    generation_hash: str,
+    sscd_hash: str,
+    num_seeds: int,
 ) -> pd.DataFrame:
-    rows = []
+    count = _num_seeds(num_seeds)
+    reference_seeds = _reference_seeds(count)
+    rows: list[dict[str, object]] = []
     for record in records.to_dict(orient="records"):
-        index = _index(record["original_index"])
-        raw = _scalar(record["webster_overfit_type_raw"])
-        label = normalize_webster_overfit_type(raw)
-        by_seed = scores.get(index, {})
-        selection_values = [_number(by_seed.get(seed)) for seed in SELECTION_SEEDS]
-        reference_validation_values = [_number(by_seed.get(seed)) for seed in REFERENCE_VALIDATION_SEEDS]
-        selection_stats, reference_validation_stats = _stats(selection_values), _stats(reference_validation_values)
-        comparison_operator = _comparison_operator(label)
-        selection_rule_passes = _score_passes(
-            label, None if selection_stats is None else selection_stats[0]
-        )
-        reference_validation_rule_passes = _score_passes(
-            label,
-            None if reference_validation_stats is None else reference_validation_stats[0],
-        )
-        selection_validation_agree = (
-            None
-            if selection_rule_passes is None
-            or reference_validation_rule_passes is None
-            else selection_rule_passes == reference_validation_rule_passes
-        )
-        decision = _decision(_valid_record(record), label, selection_stats)
-        rows.append({
-            "model_name": model, "original_index": index,
-            "record_id": _scalar(record["record_id"]), "source_row_number": _scalar(record["source_row_number"]),
-            "prompt_raw": _scalar(record["prompt_raw"]),
-            "target_image_sha256": _scalar(record["target_image_sha256"]),
-            "webster_overfit_type_raw": raw, "webster_overfit_type_normalized": label,
-            "reference_run_name": reference_run_name(model),
-            "reference_generation_hash": generation_hash, "reference_sscd_hash": sscd_hash,
-            "selection_seed_values": selection_values, "reference_validation_seed_values": reference_validation_values,
-            "selection_mean_sscd": _stat(selection_stats, 0), "selection_median_sscd": _stat(selection_stats, 1),
-            "selection_min_sscd": _stat(selection_stats, 2), "selection_max_sscd": _stat(selection_stats, 3),
-            "selection_fraction_ge_0_25": (
-                math.nan if selection_stats is None else
-                sum(value >= TV_MEAN_SSCD_THRESHOLD for value in selection_values) / 10
+        index = str(record["original_index"])
+        per_seed = []
+        for tile, seed in enumerate(reference_seeds):
+            observed = observations.get(index, {}).get(
+                seed,
+                {
+                    "l2_norm": math.nan,
+                    "sscd": math.nan,
+                    "observation_status": "missing",
+                    "observation_error": "reference observation is missing",
+                },
+            )
+            per_seed.append(
+                {"seed": seed, "generated_image_tile_index": tile, **observed}
+            )
+        rho, include, status, reason = _decision(per_seed)
+        common = {
+            "model_name": model,
+            **{column: record[column] for column in _IDENTITY_COLUMNS},
+            "generated_image_path": (
+                reference_run_path(model, scheduler, guidance, steps, count)
+                / "image"
+                / f"{index}.png"
+            ).as_posix(),
+            "prompt_spearman": rho,
+            "include_prompt": include,
+            "selection_status": status,
+            "selection_reason": reason,
+            "reference_run_name": reference_run_name(
+                model, scheduler, guidance, steps, count
             ),
-            "reference_validation_mean_sscd": _stat(reference_validation_stats, 0), "reference_validation_median_sscd": _stat(reference_validation_stats, 1),
-            "comparison_operator": comparison_operator,
-            "selection_rule_passes": selection_rule_passes,
-            "reference_validation_rule_passes": reference_validation_rule_passes,
-            "selection_validation_agree": selection_validation_agree,
-            "include_target_pair": decision[0], "selection_status": decision[1],
-            "selection_reason": decision[2], "target_semantics": decision[3],
-            "threshold": TV_MEAN_SSCD_THRESHOLD, "selection_policy": SELECTION_POLICY,
+            "reference_generation_hash": generation_hash,
+            "reference_sscd_hash": sscd_hash,
+            "selection_policy": SELECTION_POLICY,
             "selection_hash": "",
-        })
-    frame = pd.DataFrame(rows, columns=SELECTION_COLUMNS).sort_values(
-        ["source_row_number", "original_index"], kind="stable", ignore_index=True
+        }
+        rows.extend({**common, **observed} for observed in per_seed)
+    return pd.DataFrame(rows, columns=SELECTION_COLUMNS).sort_values(
+        ["source_row_number", "original_index", "seed"],
+        kind="stable",
+        ignore_index=True,
     )
-    for column in (
-        "selection_rule_passes",
-        "reference_validation_rule_passes",
-        "selection_validation_agree",
-    ):
-        frame[column] = frame[column].astype("boolean")
-    return frame
-def _decision(valid: bool, label: str, stats: tuple[float, float, float, float] | None,
-              ) -> tuple[bool, str, str, str | None]:
-    if not valid:
-        return False, INVALID_RECORD, "invalid_prompt_or_target", None
-    if label not in {"TV", "N"}:
-        return True, INCLUDED_NON_TV, "non_tv_current_policy", "current_non_tv_policy"
-    if stats is None:
-        semantics = (
-            "unsupported_template_target"
-            if label == "TV"
-            else "n_target_support_unresolved"
+
+
+def _decision(
+    observations: Sequence[Mapping[str, object]],
+) -> tuple[float, bool, str, str]:
+    issues = sorted(
+        {
+            str(row["observation_status"])
+            for row in observations
+            if row["observation_status"] != "complete"
+        }
+    )
+    if issues:
+        return (
+            math.nan,
+            False,
+            UNUSABLE_REFERENCE_OBSERVATIONS,
+            "invalid_reference_observations:" + ",".join(issues),
         )
-        return False, MISSING_REFERENCE_SSCD, "reference_scores_unavailable", semantics
-    if label == "TV" and stats[0] >= REFERENCE_SSCD_BOUNDARY:
-        return True, INCLUDED_TV_TARGET_SUPPORTED, "tv_selection_mean_sscd_ge_0_25", "empirically_singleton_compatible_tv"
-    if label == "TV":
-        return False, EXCLUDED_TV_TARGET_UNSUPPORTED, "tv_selection_mean_sscd_lt_0_25", "unsupported_template_target"
-    if stats[0] >= REFERENCE_SSCD_BOUNDARY:
-        return True, INCLUDED_N_TARGET_SUPPORTED, "n_selection_mean_sscd_ge_0_25", "n_target_supported_under_frozen_reference_criterion"
-    return (
-        False,
-        EXCLUDED_N_TARGET_UNSUPPORTED,
-        "n_selection_mean_sscd_lt_0_25",
-        "n_target_unsupported_under_frozen_reference_criterion",
-    )
-def _prompt_records(paired: pd.DataFrame, source: FrameInput | None,
-                    model: str) -> pd.DataFrame:
-    frame = paired.copy(deep=True) if source is None else _frame(source, "records")
-    if "webster_overfit_type_raw" not in frame:
-        if "webster_overfit_type" not in frame:
-            raise TargetPairSelectionError("Prompt identity lacks webster_overfit_type_raw")
-        frame["webster_overfit_type_raw"] = frame["webster_overfit_type"]
-    missing = sorted(set(_IDENTITY_COLUMNS) - set(frame.columns))
+    l2 = [float(row["l2_norm"]) for row in observations]
+    sscd = [float(row["sscd"]) for row in observations]
+    if len(set(l2)) == 1:
+        return math.nan, False, UNUSABLE_REFERENCE_OBSERVATIONS, "constant_l2_norm"
+    if len(set(sscd)) == 1:
+        return math.nan, False, UNUSABLE_REFERENCE_OBSERVATIONS, "constant_sscd"
+    rho = spearman_correlation(l2, sscd)
+    if not math.isfinite(rho):
+        return (
+            math.nan,
+            False,
+            UNUSABLE_REFERENCE_OBSERVATIONS,
+            "undefined_prompt_spearman",
+        )
+    if rho < 0.0:
+        return rho, True, INCLUDED_PROXIMITY_RULE, "prompt_spearman_lt_0"
+    return rho, False, DISCARDED_PROXIMITY_RULE, "prompt_spearman_ge_0"
+
+
+def _prompt_records(source: pd.DataFrame, *, derived: bool, model: str) -> pd.DataFrame:
+    missing = sorted(set(_IDENTITY_COLUMNS) - set(source.columns))
     if missing:
-        suffix = " or provide records_frame" if source is None else ""
-        raise TargetPairSelectionError("Prompt identity lacks: " + ", ".join(missing) + suffix)
-    if "model_name" in frame:
-        observed = {str(value) for value in frame["model_name"] if not _missing(value)}
-        if not observed or not observed.issubset({model, _MODEL_DATASET[model]}):
+        suffix = " or provide records_frame" if derived else ""
+        raise TargetPairSelectionError(
+            "Prompt identity lacks: " + ", ".join(missing) + suffix
+        )
+    if "model_name" in source:
+        observed = {str(value) for value in source["model_name"] if not _missing(value)}
+        if not observed or not observed.issubset({model, _MODELS[model]}):
             raise TargetPairSelectionError(f"Prompt records do not belong to {model}")
-    frame = frame.loc[:, _IDENTITY_COLUMNS].copy()
+    frame = source.loc[:, _IDENTITY_COLUMNS].copy()
     frame["original_index"] = frame["original_index"].map(_index)
-    if source is None:
+    if derived:
         rows = []
         for index, group in frame.groupby("original_index", sort=False):
             row = {"original_index": index}
-            for field in _IDENTITY_COLUMNS[1:]:
-                values = [_scalar(value) for value in group[field]]
+            for column in _IDENTITY_COLUMNS[1:]:
+                values = [_scalar(value) for value in group[column]]
                 if len({repr(value) for value in values}) != 1:
-                    raise TargetPairSelectionError(f"Identity differs for {index}: {field}")
-                row[field] = values[0]
+                    raise TargetPairSelectionError(
+                        f"Prompt identity differs for {index}: {column}"
+                    )
+                row[column] = values[0]
             rows.append(row)
         frame = pd.DataFrame(rows, columns=_IDENTITY_COLUMNS)
     elif frame["original_index"].duplicated().any():
         raise TargetPairSelectionError("records_frame must have one row per prompt")
+    for row in frame.to_dict(orient="records"):
+        if not isinstance(row["record_id"], str) or not row["record_id"].strip():
+            raise TargetPairSelectionError("record_id must be a non-empty string")
+        if not isinstance(row["prompt"], str):
+            raise TargetPairSelectionError("prompt must be a string")
+        if _integer(row["source_row_number"], "source_row_number") < 0:
+            raise TargetPairSelectionError("source_row_number must be non-negative")
+        if not _is_hash(row["target_image_sha256"]):
+            raise TargetPairSelectionError("target_image_sha256 is invalid")
+    frame["source_row_number"] = frame["source_row_number"].map(
+        lambda value: _integer(value, "source_row_number")
+    )
+    frame["kind"] = frame["kind"].map(normalize_webster_type)
     return frame.sort_values(
         ["source_row_number", "original_index"], kind="stable", ignore_index=True
     )
-def _score_map(paired: pd.DataFrame,
-               known: set[str]) -> dict[str, dict[int, float | None]]:
-    required = {"original_index", "seed", "sscd_cosine_similarity"}
+
+
+def _observations(
+    paired: pd.DataFrame,
+    known: set[str],
+    *,
+    num_seeds: int,
+) -> dict[str, dict[int, dict[str, object]]]:
+    reference_seeds = frozenset(_reference_seeds(num_seeds))
+    required = {
+        "original_index",
+        "seed",
+        "l2_norm",
+        "sscd",
+        "observation_status",
+        "observation_error",
+    }
     missing = sorted(required - set(paired.columns))
     if missing:
-        raise TargetPairSelectionError("paired SSCD lacks: " + ", ".join(missing))
-    result: dict[str, dict[int, float | None]] = {}
-    for row in paired.loc[:, list(required)].to_dict(orient="records"):
-        index, seed = _index(row["original_index"]), _int(row["seed"], "seed")
+        raise TargetPairSelectionError(
+            "Paired reference observations lack: " + ", ".join(missing)
+        )
+    grouped: dict[str, dict[int, list[Mapping[str, object]]]] = {}
+    for row in paired.loc[:, sorted(required)].to_dict(orient="records"):
+        index = _index(row["original_index"])
         if index not in known:
             raise TargetPairSelectionError(f"Unknown paired prompt {index}")
-        if seed not in REFERENCE_SEEDS:
-            raise TargetPairSelectionError(f"Reference seed outside 20--39: {seed}")
-        if seed in result.setdefault(index, {}):
-            raise TargetPairSelectionError(f"Duplicate score for {index}, seed {seed}")
-        result[index][seed] = _number(row["sscd_cosine_similarity"])
+        seed = _integer(row["seed"], "seed")
+        if seed not in reference_seeds:
+            first, last = min(reference_seeds), max(reference_seeds)
+            raise TargetPairSelectionError(
+                f"Reference seed outside {first}--{last}: {seed}"
+            )
+        grouped.setdefault(index, {}).setdefault(seed, []).append(row)
+    result: dict[str, dict[int, dict[str, object]]] = {}
+    for index, seeds in grouped.items():
+        result[index] = {}
+        for seed, rows in seeds.items():
+            if len(rows) != 1:
+                result[index][seed] = {
+                    "l2_norm": math.nan,
+                    "sscd": math.nan,
+                    "observation_status": "duplicate",
+                    "observation_error": (
+                        f"duplicate reference observations for prompt {index}, seed {seed}"
+                    ),
+                }
+                continue
+            row = rows[0]
+            source_status = str(row["observation_status"]).strip()
+            source_error = str(row["observation_error"]).strip()
+            if source_status != "complete":
+                result[index][seed] = {
+                    "l2_norm": math.nan,
+                    "sscd": math.nan,
+                    "observation_status": source_status or "failed",
+                    "observation_error": source_error or "reference observation failed",
+                }
+                continue
+            l2, l2_issue = _metric(row["l2_norm"], "l2_norm")
+            sscd, sscd_issue = _metric(row["sscd"], "sscd")
+            issues = [issue for issue in (l2_issue, sscd_issue) if issue]
+            result[index][seed] = {
+                "l2_norm": l2,
+                "sscd": sscd,
+                "observation_status": "complete" if not issues else "+".join(issues),
+                "observation_error": "" if not issues else ",".join(issues),
+            }
     return result
-def _selection_config(model: str, generation_hash: str, sscd_hash: str,
-                      sscd: Mapping[str, object]) -> dict[str, object]:
+
+
+def _metric(value: object, name: str) -> tuple[float, str | None]:
+    if _missing(value) or value == "":
+        return math.nan, f"missing_{name}"
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return math.nan, f"nonnumeric_{name}"
+    if not math.isfinite(number):
+        return math.nan, f"nonfinite_{name}"
+    if name == "l2_norm" and number < 0:
+        return math.nan, "negative_l2_norm"
+    if name == "sscd" and not -1.00001 <= number <= 1.00001:
+        return math.nan, "out_of_range_sscd"
+    return number, None
+
+
+def _validate_prompt_group(
+    index: str,
+    group: pd.DataFrame,
+    model: str,
+    scheduler: str,
+    guidance: float,
+    steps: int,
+    num_seeds: int,
+) -> None:
+    count = _num_seeds(num_seeds)
+    if len(group) != count:
+        raise TargetPairSelectionError(
+            f"Prompt {index} must contain exactly {count} rows"
+        )
+    seeds = tuple(_integer(value, "seed") for value in group["seed"])
+    tiles = tuple(
+        _integer(value, "tile") for value in group["generated_image_tile_index"]
+    )
+    if seeds != _reference_seeds(count) or tiles != tuple(range(count)):
+        raise TargetPairSelectionError(
+            f"Prompt {index} seed or tile sequence is invalid"
+        )
+    image = (
+        reference_run_path(model, scheduler, guidance, steps, count)
+        / "image"
+        / f"{index}.png"
+    ).as_posix()
+    if not group["generated_image_path"].eq(image).all():
+        raise TargetPairSelectionError(f"Prompt {index} image path is invalid")
+    constant = (
+        "record_id",
+        "source_row_number",
+        "prompt",
+        "kind",
+        "target_image_sha256",
+        "prompt_spearman",
+        "include_prompt",
+        "selection_status",
+        "selection_reason",
+    )
+    for column in constant:
+        values = [_json(value) for value in group[column]]
+        if any(value != values[0] for value in values[1:]):
+            raise TargetPairSelectionError(f"Prompt {index} has inconsistent {column}")
+    if group.iloc[0]["kind"] not in {"MV", "RV", "TV", "N", "UNKNOWN"}:
+        raise TargetPairSelectionError(f"Prompt {index} kind is invalid")
+    observations = []
+    for row in group.to_dict(orient="records"):
+        status = str(row["observation_status"])
+        error = str(row["observation_error"])
+        l2 = _optional_float(row["l2_norm"], "l2_norm")
+        sscd = _optional_float(row["sscd"], "sscd")
+        if status == "complete" and (math.isnan(l2) or math.isnan(sscd) or error):
+            raise TargetPairSelectionError(
+                f"Prompt {index} has an invalid complete row"
+            )
+        if status != "complete" and not error:
+            raise TargetPairSelectionError(
+                f"Prompt {index} has an unexplained failed row"
+            )
+        observations.append({"l2_norm": l2, "sscd": sscd, "observation_status": status})
+    rho, include, status, reason = _decision(observations)
+    stored_rho = _optional_float(group.iloc[0]["prompt_spearman"], "prompt_spearman")
+    first = group.iloc[0]
+    if not _same_float(rho, stored_rho):
+        raise TargetPairSelectionError(f"Prompt {index} Spearman value is inconsistent")
+    if (
+        bool(first["include_prompt"]) != include
+        or first["selection_status"] != status
+        or first["selection_reason"] != reason
+    ):
+        raise TargetPairSelectionError(f"Prompt {index} decision is inconsistent")
+
+
+def _selection_config(
+    model: str,
+    scheduler: str,
+    guidance: float,
+    steps: int,
+    num_seeds: int,
+    generation_hash: str,
+    sscd_hash: str,
+    checkpoint_hash: object,
+    preprocessing_hash: object,
+    selection_hash: str,
+) -> dict[str, object]:
+    count = _num_seeds(num_seeds)
+    reference_seeds = _reference_seeds(count)
     return {
-        "schema_version": SELECTION_SCHEMA_VERSION, "selection_policy": SELECTION_POLICY,
-        "model_name": model, "dataset_model_name": _MODEL_DATASET[model],
-        "reference_run_name": reference_run_name(model),
-        "reference_run_path": reference_run_path(model).as_posix(),
-        "reference_scheduler": REFERENCE_SCHEDULER, "reference_guidance_scale": REFERENCE_GUIDANCE_SCALE,
-        "reference_num_inference_steps": REFERENCE_NUM_INFERENCE_STEPS,
-        "reference_seed_start": REFERENCE_SEED_START,
-        "reference_num_seeds": REFERENCE_NUM_SEEDS,
-        "reference_seeds": list(REFERENCE_SEEDS),
-        "selection_seeds": list(SELECTION_SEEDS),
-        "reference_validation_seeds": list(REFERENCE_VALIDATION_SEEDS),
-        "boundary": REFERENCE_SSCD_BOUNDARY,
-        "threshold": REFERENCE_SSCD_BOUNDARY,
-        "category_rules": _category_rules(),
-        "decision_scope": "prompt_all_experiment_seeds",
-        "selection_metric": "mean_sscd_over_selection_seeds",
-        "reference_validation_values_affect_selection": False, "proximity_affects_selection": False,
-        "correlation_affects_selection": False,
-        "reference_generation_hash": generation_hash, "reference_sscd_hash": sscd_hash,
-        "sscd_checkpoint_sha256": sscd.get("sscd_checkpoint_sha256"), "sscd_preprocessing_hash": sscd.get("sscd_preprocessing_hash"),
-        "selection_hash": "",
+        "selection_policy": SELECTION_POLICY,
+        "model_name": model,
+        "dataset_model_name": _MODELS[model],
+        "reference_run_name": reference_run_name(
+            model, scheduler, guidance, steps, count
+        ),
+        "reference_run_path": reference_run_path(
+            model, scheduler, guidance, steps, count
+        ).as_posix(),
+        "reference_scheduler": scheduler,
+        "reference_guidance_scale": guidance,
+        "reference_num_inference_steps": steps,
+        "reference_seed_start": count,
+        "reference_num_seeds": count,
+        "reference_seeds": list(reference_seeds),
+        "selection_metric": "spearman(l2_norm,sscd)",
+        "include_when": "prompt_spearman < 0",
+        "decision_scope": "whole_prompt",
+        "kind_affects_selection": False,
+        "unusable_evidence_is_included": False,
+        "generated_image_path_base": "project_root",
+        "generated_image_tile_order": "zero_based_row_major_reference_seed_order",
+        "reference_generation_hash": generation_hash,
+        "reference_sscd_hash": sscd_hash,
+        "sscd_checkpoint_sha256": checkpoint_hash,
+        "sscd_preprocessing_hash": preprocessing_hash,
+        "selection_hash": selection_hash,
     }
-def _validate_reference_run(config: Mapping[str, object], model: str) -> str:
-    science, digest = config.get("scientific_config"), config.get("scientific_config_hash")
-    if not isinstance(science, Mapping) or not _is_hash(digest) or canonical_hash(science) != digest:
-        raise TargetPairSelectionError("Reference generation scientific hash is invalid")
-    scheduler = science.get("scheduler")
-    scheduler = scheduler.get("name") if isinstance(scheduler, Mapping) else scheduler
+
+
+def _validate_generation(
+    config: Mapping[str, object],
+    model: str,
+    scheduler: str,
+    guidance: float,
+    steps: int,
+    num_seeds: int,
+) -> str:
+    count = _num_seeds(num_seeds)
+    science, digest = (
+        config.get("scientific_config"),
+        config.get("scientific_config_hash"),
+    )
+    if (
+        not isinstance(science, Mapping)
+        or not _is_hash(digest)
+        or canonical_hash(science) != digest
+    ):
+        raise TargetPairSelectionError(
+            "Reference generation scientific hash is invalid"
+        )
+    scheduler_metadata = science.get("scheduler")
+    scheduler_name = (
+        scheduler_metadata.get("name")
+        if isinstance(scheduler_metadata, Mapping)
+        else scheduler_metadata
+    )
     expected = {
         "model_cli_name": model,
-        "dataset_model": _MODEL_DATASET[model],
-        "guidance_scale": REFERENCE_GUIDANCE_SCALE,
-        "num_inference_steps": REFERENCE_NUM_INFERENCE_STEPS,
-        "num_seeds": REFERENCE_NUM_SEEDS,
-        "seeds": list(REFERENCE_SEEDS),
+        "dataset_model": _MODELS[model],
+        "guidance_scale": guidance,
+        "num_inference_steps": steps,
+        "num_seeds": count,
+        "seeds": list(_reference_seeds(count)),
     }
     wrong = [key for key, value in expected.items() if science.get(key) != value]
-    if scheduler != REFERENCE_SCHEDULER:
+    if scheduler_name != scheduler:
         wrong.append("scheduler")
     if wrong:
-        raise TargetPairSelectionError("Reference generation differs at: " + ", ".join(wrong))
+        raise TargetPairSelectionError(
+            "Reference generation differs at: " + ", ".join(wrong)
+        )
     return str(digest)
-def _validate_reference_sscd(config: Mapping[str, object], generation_hash: str) -> str:
+
+
+def _validate_sscd(
+    config: Mapping[str, object], generation_hash: str, num_seeds: int
+) -> str:
     from utils.experiments.sscd import sscd_configuration_hash
+
+    count = _num_seeds(num_seeds)
 
     digest = config.get("configuration_hash")
     if not _is_hash(digest) or sscd_configuration_hash(config) != digest:
         raise TargetPairSelectionError("Reference SSCD configuration hash is invalid")
     expected = {
         "generation_scientific_config_hash": generation_hash,
-        "num_seeds": REFERENCE_NUM_SEEDS,
-        "seeds": list(REFERENCE_SEEDS),
+        "num_seeds": count,
+        "seeds": list(_reference_seeds(count)),
     }
     wrong = [key for key, value in expected.items() if config.get(key) != value]
     if wrong:
         raise TargetPairSelectionError("Reference SSCD differs at: " + ", ".join(wrong))
-    if any(not _is_hash(config.get(key)) for key in (
-        "sscd_checkpoint_sha256", "sscd_preprocessing_hash"
-    )):
+    if any(
+        not _is_hash(config.get(key))
+        for key in ("sscd_checkpoint_sha256", "sscd_preprocessing_hash")
+    ):
         raise TargetPairSelectionError("Reference SSCD provenance hash is invalid")
     return str(digest)
+
+
 def _write_selection(selection: TargetPairSelection, directory: Path) -> None:
     directory.parent.mkdir(parents=True, exist_ok=True)
-    if directory.exists() or directory.is_symlink():
-        raise FrozenTargetPairSelectionError(
-            f"Refusing to replace frozen selection directory: {directory}"
-        )
     temporary = Path(
         tempfile.mkdtemp(
-            prefix=f".{directory.name}.",
-            suffix=".tmp",
-            dir=directory.parent,
+            prefix=f".{directory.name}.", suffix=".tmp", dir=directory.parent
         )
     )
     try:
-        frame = selection.frame
-        tv = frame["webster_overfit_type_normalized"].eq("TV")
-        normal = frame["webster_overfit_type_normalized"].eq("N")
-        included = frame["include_target_pair"].astype(bool)
-        atomic_write_frame_parquet(frame, temporary / "selection.parquet")
-        atomic_write_frame_csv(frame, temporary / "selection.csv")
-        atomic_write_frame_csv(frame.loc[tv & included], temporary / "selected_tv.csv")
-        atomic_write_frame_csv(frame.loc[tv & ~included], temporary / "excluded_tv.csv")
-        atomic_write_frame_csv(frame.loc[normal & included], temporary / "selected_n.csv")
-        atomic_write_frame_csv(frame.loc[normal & ~included], temporary / "excluded_n.csv")
-        atomic_write_frame_csv(
-            selection.diagnostics, temporary / "threshold_diagnostics.csv"
-        )
-        atomic_write_json(temporary / "summary.json", _summary(selection))
+        atomic_write_frame_csv(selection.frame, temporary / "selection.csv")
         atomic_write_json(temporary / "config.json", selection.configuration)
+        atomic_write_json(temporary / "summary.json", _summary(selection))
         descriptor = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
         os.replace(temporary, directory)
-        parent_descriptor = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
+        descriptor = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.fsync(parent_descriptor)
+            os.fsync(descriptor)
         finally:
-            os.close(parent_descriptor)
+            os.close(descriptor)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
 def _summary(selection: TargetPairSelection) -> dict[str, object]:
-    frame = selection.frame
-    tv = frame["webster_overfit_type_normalized"].eq("TV")
-    normal = frame["webster_overfit_type_normalized"].eq("N")
-    included = frame["include_target_pair"].astype(bool)
-    selected_tv = frame.loc[tv & included]
-    selected_n = frame.loc[normal & included]
-    tv_validation = pd.to_numeric(
-        selected_tv["reference_validation_mean_sscd"], errors="coerce"
-    )
-    n_validation = pd.to_numeric(
-        selected_n["reference_validation_mean_sscd"], errors="coerce"
-    )
-    otsu = exact_two_class_otsu(frame.loc[tv, "selection_mean_sscd"])
+    prompts = selection.prompt_frame
+    included = prompts["include_prompt"]
+    unusable = prompts["selection_status"].eq(UNUSABLE_REFERENCE_OBSERVATIONS)
     return {
-        "schema_version": SELECTION_SCHEMA_VERSION, "selection_policy": SELECTION_POLICY,
-        "model_name": selection.model_name, "selection_hash": selection.sha256,
-        "boundary": REFERENCE_SSCD_BOUNDARY,
-        "threshold": REFERENCE_SSCD_BOUNDARY, "total_prompt_count": len(frame),
-        "included_prompt_count": int(included.sum()), "excluded_prompt_count": int((~included).sum()),
-        "non_tv_prompt_count": int((~tv).sum()),
-        "unconditional_category_prompt_count": int((~tv & ~normal).sum()),
-        "unconditionally_included_category_prompt_count": int(
-            (~tv & ~normal & included).sum()
-        ),
-        "tv_prompt_count": int(tv.sum()), "n_prompt_count": int(normal.sum()),
-        "included_tv_prompt_count": len(selected_tv),
-        "selected_tv_prompt_count": len(selected_tv),
-        "excluded_tv_prompt_count": int((tv & ~included).sum()),
-        "included_n_prompt_count": len(selected_n),
-        "selected_n_prompt_count": len(selected_n),
-        "excluded_n_prompt_count": int((normal & ~included).sum()),
-        "tv_selection_validation_agreement_count": int(
-            frame.loc[tv, "selection_validation_agree"].eq(True).sum()
-        ),
-        "tv_selection_validation_disagreement_count": int(
-            frame.loc[tv, "selection_validation_agree"].eq(False).sum()
-        ),
-        "n_selection_validation_agreement_count": int(
-            frame.loc[normal, "selection_validation_agree"].eq(True).sum()
-        ),
-        "n_selection_validation_disagreement_count": int(
-            frame.loc[normal, "selection_validation_agree"].eq(False).sum()
-        ),
-        "status_counts": {
-            str(key): int(value) for key, value in
-            frame["selection_status"].value_counts().sort_index().items()
-        },
-        "otsu_threshold": None if otsu is None else otsu.threshold,
-        "otsu_lower_neighbor": None if otsu is None else otsu.lower_neighbor, "otsu_upper_neighbor": None if otsu is None else otsu.upper_neighbor,
-        "selected_tv_complete_reference_validation_count": int(tv_validation.notna().sum()),
-        "selected_tv_reference_validation_mean_ge_0_25_count": int(tv_validation.ge(0.25).sum()),
-        "all_selected_tv_reference_validation_mean_ge_0_25": bool(
-            len(selected_tv) == tv_validation.notna().sum() and tv_validation.ge(0.25).all()
-        ),
-        "selected_n_complete_reference_validation_count": int(n_validation.notna().sum()),
-        "selected_n_reference_validation_mean_ge_0_25_count": int(n_validation.ge(0.25).sum()),
-        "all_selected_n_reference_validation_mean_ge_0_25": bool(
-            len(selected_n) == n_validation.notna().sum() and n_validation.ge(0.25).all()
-        ),
+        "complete": True,
+        "selection_policy": SELECTION_POLICY,
+        "model_name": selection.model_name,
+        "selection_hash": selection.sha256,
+        "reference_generation_hash": selection.configuration[
+            "reference_generation_hash"
+        ],
+        "reference_sscd_hash": selection.configuration["reference_sscd_hash"],
+        "reference_observation_count": len(selection.frame),
+        "total_prompt_count": len(prompts),
+        "included_prompt_count": int(included.sum()),
+        "discarded_prompt_count": int((~included & ~unusable).sum()),
+        "unusable_prompt_count": int(unusable.sum()),
     }
-def _configuration(source: ConfigurationInput | None, default: Path,
-                   label: str) -> dict[str, Any]:
+
+
+def _read_config(
+    source: ConfigurationInput | None, default: Path, label: str
+) -> dict[str, Any]:
     if isinstance(source, Mapping):
         return dict(source)
     path = default if source is None else Path(source)
@@ -1090,137 +1090,62 @@ def _configuration(source: ConfigurationInput | None, default: Path,
         return read_json(path)
     except RuntimeError as error:
         raise TargetPairSelectionError(f"Invalid {label}: {error}") from error
-def _frame(source: FrameInput, label: str) -> pd.DataFrame:
+
+
+def _read_frame(source: FrameInput, label: str) -> pd.DataFrame:
     if isinstance(source, pd.DataFrame):
         return source.copy(deep=True)
     path = Path(source)
-    if not path.is_file():
-        raise TargetPairSelectionError(f"Missing {label}: {path}")
+    if not path.is_file() or path.suffix.casefold() != ".csv":
+        raise TargetPairSelectionError(f"{label} must be a DataFrame or CSV")
     try:
-        if path.suffix.casefold() == ".parquet":
-            return pd.read_parquet(path)
-        if path.suffix.casefold() == ".csv":
-            return pd.read_csv(path, dtype={"original_index": str})
-    except (OSError, ValueError) as error:
-        raise TargetPairSelectionError(f"Cannot read {label} {path}: {error}") from error
-    raise TargetPairSelectionError(f"{label} must be a DataFrame, .csv, or .parquet")
-def _stats(values: Sequence[float | None]) -> tuple[float, float, float, float] | None:
-    if len(values) != 10 or any(value is None for value in values):
-        return None
-    numbers = [float(value) for value in values if value is not None]
-    return fmean(numbers), median(numbers), min(numbers), max(numbers)
-def _stored_scores(value: object, label: str) -> list[float | None]:
-    values = _json(value)
-    if not isinstance(values, list) or len(values) != 10:
-        raise TargetPairSelectionError(f"{label} must contain exactly 10 scores")
-    return [_number(item) for item in values]
-def _validate_selection_sidecars(
-    frame: pd.DataFrame,
-    selection_csv: pd.DataFrame,
-    selected_tv_csv: pd.DataFrame,
-    excluded_tv_csv: pd.DataFrame,
-    selected_n_csv: pd.DataFrame,
-    excluded_n_csv: pd.DataFrame,
-) -> None:
-    tv = frame["webster_overfit_type_normalized"].eq("TV")
-    normal = frame["webster_overfit_type_normalized"].eq("N")
-    included = frame["include_target_pair"]
-    comparisons = (
-        (selection_csv, frame, "selection.csv"),
-        (selected_tv_csv, frame.loc[tv & included], "selected_tv.csv"),
-        (excluded_tv_csv, frame.loc[tv & ~included], "excluded_tv.csv"),
-        (selected_n_csv, frame.loc[normal & included], "selected_n.csv"),
-        (excluded_n_csv, frame.loc[normal & ~included], "excluded_n.csv"),
-    )
-    for observed, expected, label in comparisons:
-        _assert_selection_sidecar(observed, expected, label)
-
-
-def _assert_selection_sidecar(
-    observed: pd.DataFrame, expected: pd.DataFrame, label: str,
-) -> None:
-    if tuple(observed.columns) != SELECTION_COLUMNS:
-        raise TargetPairSelectionError(f"{label} schema differs from selection.parquet")
-    actual = _normalize_selection_sidecar(observed, label)
-    canonical = _normalize_selection_sidecar(expected, "selection.parquet")
-    try:
-        pd.testing.assert_frame_equal(
-            actual.reset_index(drop=True),
-            canonical.reset_index(drop=True),
-            check_dtype=False,
-            check_exact=False,
-            rtol=1e-14,
-            atol=1e-15,
+        return pd.read_csv(
+            path,
+            dtype={"original_index": str},
+            keep_default_na=False,
+            float_precision="round_trip",
         )
-    except AssertionError as error:
+    except (OSError, ValueError) as error:
         raise TargetPairSelectionError(
-            f"{label} differs from selection.parquet"
+            f"Cannot read {label} {path}: {error}"
         ) from error
 
 
-def _normalize_selection_sidecar(frame: pd.DataFrame, label: str) -> pd.DataFrame:
-    result = frame.loc[:, SELECTION_COLUMNS].copy()
-    for column in ("selection_seed_values", "reference_validation_seed_values"):
-        def parse_scores(value: object, *, field: str = column) -> list[float | None]:
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except json.JSONDecodeError as error:
-                    raise TargetPairSelectionError(
-                        f"{label} {field} is not valid JSON"
-                    ) from error
-            return _stored_scores(value, field)
-
-        result[column] = result[column].map(parse_scores)
-    if len(result) and not pd.api.types.is_bool_dtype(result["include_target_pair"]):
-        raise TargetPairSelectionError(
-            f"{label} include_target_pair must contain booleans"
-        )
-    result["include_target_pair"] = result["include_target_pair"].astype(bool)
-    numeric = {
-        "source_row_number", "selection_mean_sscd", "selection_median_sscd",
-        "selection_min_sscd", "selection_max_sscd",
-        "selection_fraction_ge_0_25", "reference_validation_mean_sscd",
-        "reference_validation_median_sscd", "threshold",
-    }
-    for column in numeric:
-        try:
-            result[column] = pd.to_numeric(result[column], errors="raise")
-        except (TypeError, ValueError) as error:
-            raise TargetPairSelectionError(
-                f"{label} {column} must be numeric"
-            ) from error
-    for column in set(SELECTION_COLUMNS) - numeric - {
-        "selection_seed_values", "reference_validation_seed_values", "include_target_pair",
-    }:
+def _normalize_csv(frame: pd.DataFrame) -> pd.DataFrame:
+    if tuple(frame.columns) != SELECTION_COLUMNS:
+        raise TargetPairSelectionError("selection.csv has an invalid schema")
+    result = frame.copy()
+    for column in ("source_row_number", "seed", "generated_image_tile_index"):
+        result[column] = pd.to_numeric(result[column], errors="raise").astype("int64")
+    for column in ("l2_norm", "sscd", "prompt_spearman"):
         result[column] = result[column].map(
-            lambda value: "" if _missing(value) else str(value)
+            lambda value, name=column: _optional_float(value, name)
         )
-    return result
-def _valid_record(row: Mapping[str, object]) -> bool:
-    try:
-        source_row = _int(row.get("source_row_number"), "source_row_number")
-    except TargetPairSelectionError:
-        return False
-    return (
-        source_row >= 0
-        and isinstance(row.get("record_id"), str) and bool(str(row["record_id"]).strip())
-        and isinstance(row.get("prompt_raw"), str)
-        and _is_hash(row.get("target_image_sha256"))
-    )
-def _finite_values(values: Iterable[object]) -> list[float]:
-    return [number for number in (_number(value) for value in values) if number is not None]
-def _number(value: object) -> float | None:
-    if _missing(value):
-        return None
+    if not pd.api.types.is_bool_dtype(result["include_prompt"]):
+        values = {"True": True, "False": False}
+        if not result["include_prompt"].isin(values).all():
+            raise TargetPairSelectionError("include_prompt must contain booleans")
+        result["include_prompt"] = result["include_prompt"].map(values).astype(bool)
+    return result.loc[:, SELECTION_COLUMNS]
+
+
+def _optional_float(value: object, label: str) -> float:
+    if _missing(value) or value == "":
+        return math.nan
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError) as error:
-        raise TargetPairSelectionError(f"SSCD score is not numeric: {value!r}") from error
-    return number if math.isfinite(number) else None
-def _stat(stats: tuple[float, ...] | None, position: int) -> float:
-    return math.nan if stats is None else stats[position]
-def _int(value: object, label: str) -> int:
+        raise TargetPairSelectionError(f"{label} must be numeric") from error
+    if not math.isfinite(number):
+        raise TargetPairSelectionError(f"{label} must be finite or blank")
+    return number
+
+
+def _same_float(left: float, right: float) -> bool:
+    return (math.isnan(left) and math.isnan(right)) or left == right
+
+
+def _integer(value: object, label: str) -> int:
     if isinstance(value, bool):
         raise TargetPairSelectionError(f"{label} must be an integer")
     try:
@@ -1233,6 +1158,8 @@ def _int(value: object, label: str) -> int:
         if not math.isfinite(number) or not number.is_integer():
             raise TargetPairSelectionError(f"{label} must be an integer")
         return int(number)
+
+
 def _index(value: object) -> str:
     if _missing(value):
         raise TargetPairSelectionError("original_index is missing")
@@ -1240,16 +1167,74 @@ def _index(value: object) -> str:
     if not text or text in {".", ".."} or Path(text).name != text or "\\" in text:
         raise TargetPairSelectionError(f"Unsafe original_index: {value!r}")
     return text
-def _model(value: object) -> str:
-    if not isinstance(value, str) or value not in _MODEL_DATASET:
+
+
+def _num_seeds(value: object) -> int:
+    try:
+        if isinstance(value, bool):
+            raise TypeError
+        count = operator.index(value)
+        validate_seed_block(count, count)
+    except (TypeError, ValueError) as error:
         raise TargetPairSelectionError(
-            f"Unknown model {value!r}; expected one of: {', '.join(_MODEL_DATASET)}"
+            "num_seeds must define a valid experiment and reference seed block"
+        ) from error
+    return count
+
+
+def _reference_values(
+    model_name: object,
+    scheduler_name: object,
+    guidance_scale: object,
+    num_inference_steps: object,
+    num_seeds: object,
+) -> tuple[str, str, float, int, int]:
+    model = _model(model_name)
+    count = _num_seeds(num_seeds)
+    try:
+        if not isinstance(scheduler_name, str):
+            raise TypeError
+        if isinstance(guidance_scale, bool):
+            raise TypeError
+        guidance = float(guidance_scale)
+        if not math.isfinite(guidance):
+            raise ValueError
+        if isinstance(num_inference_steps, bool):
+            raise TypeError
+        steps = operator.index(num_inference_steps)
+        generation_run_name(
+            model,
+            scheduler_name,
+            guidance,
+            steps,
+            count,
+            seed_start=count,
+        )
+    except (TypeError, ValueError, OverflowError) as error:
+        raise TargetPairSelectionError(
+            "model, scheduler, guidance scale, steps, and N must define a valid "
+            "reference run"
+        ) from error
+    return model, scheduler_name, guidance, steps, count
+
+
+def _reference_seeds(num_seeds: int) -> tuple[int, ...]:
+    count = _num_seeds(num_seeds)
+    return tuple(range(count, 2 * count))
+
+
+def _model(value: object) -> str:
+    if not isinstance(value, str) or value not in _MODELS:
+        raise TargetPairSelectionError(
+            f"Unknown model {value!r}; expected one of: {', '.join(_MODELS)}"
         )
     return value
+
+
 def _is_hash(value: object) -> bool:
-    return isinstance(value, str) and _SHA256.fullmatch(value) is not None
-def _indices(frame: pd.DataFrame, mask: pd.Series) -> frozenset[str]:
-    return frozenset(frame.loc[mask, "original_index"].astype(str))
+    return isinstance(value, str) and _HASH.fullmatch(value) is not None
+
+
 def _missing(value: object) -> bool:
     if value is None:
         return True
@@ -1257,61 +1242,51 @@ def _missing(value: object) -> bool:
         return bool(pd.isna(value))
     except (TypeError, ValueError):
         return False
+
+
 def _scalar(value: object) -> object:
     if _missing(value):
         return None
-    if hasattr(value, "item"):
-        return value.item()
-    return value
+    return value.item() if hasattr(value, "item") else value
+
+
 def _json(value: object) -> object:
-    value = value.tolist() if hasattr(value, "tolist") else value
+    if _missing(value):
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_json(item) for item in value]
-    return _scalar(value)
-def _raise_missing(root: str | Path, model_name: str) -> None:
-    model = _model(model_name)
-    directory = target_pair_selection_directory(root, model_name=model)
-    legacy_directory = directory.parent
-    legacy_note = ""
-    if (legacy_directory / "config.json").is_file():
-        legacy_note = (
-            f"\nPreserved schema-1 selection is incompatible: {legacy_directory}"
-        )
-    raise TargetPairSelectionMissingError(
-        f"Frozen schema-{SELECTION_SCHEMA_VERSION} target-pair selection is missing: {directory}\n"
-        f"Required reference run: {reference_run_path(model).as_posix()}\n"
-        f"Create it with:\n{reference_selection_command(model)}"
-        f"{legacy_note}"
+    return value
+
+
+def _raise_missing(
+    root: str | Path,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+) -> None:
+    model, scheduler, guidance, steps, count = _reference_values(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
     )
-
-
-def _raise_if_stale_selection(directory: Path) -> None:
-    """Reject prior scientific policies before reporting current files missing."""
-
-    config_path = directory / "config.json"
-    if not config_path.is_file() or config_path.is_symlink():
-        return
-    try:
-        config = read_json(config_path)
-    except RuntimeError:
-        return
-    if not isinstance(config, Mapping):
-        return
-    stale_schemas = {2, 3}
-    stale_policies = {
-        "target_pair_selection",
-        "target_pair_selection_tv_ge_0_25_n_lt_0_25",
-    }
-    if not (
-        config.get("schema_version") in stale_schemas
-        or config.get("selection_policy") in stale_policies
-    ):
-        return
-    raise StaleTargetPairSelectionError(
-        "Stale prior-policy frozen target-pair selection is incompatible with "
-        f"schema {SELECTION_SCHEMA_VERSION} and policy {SELECTION_POLICY}.\n"
-        "Archive or remove only this exact derived selection directory before "
-        f"rebuilding:\n- {directory}\n"
-        "Preserve generation trajectories, noise predictions, target latents, "
-        "generated previews, and SSCD tensors."
+    directory = target_pair_selection_directory(
+        root,
+        model_name=model,
+        scheduler_name=scheduler,
+        guidance_scale=guidance,
+        num_inference_steps=steps,
+        num_seeds=count,
+    )
+    raise TargetPairSelectionMissingError(
+        f"Frozen target-pair selection is missing: {directory}\n"
+        f"Required reference run: "
+        f"{reference_run_path(model, scheduler, guidance, steps, count).as_posix()}\n"
+        f"Create it with:\n"
+        f"{reference_selection_command(model, scheduler, guidance, steps, count)}"
     )

@@ -10,16 +10,24 @@ import re
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 import torch
 
 from .registry import ModelSpec
-from .devices import DeviceNormalizationError, devices_match
+from .devices import (
+    DeviceNormalizationError,
+    DeviceSelectionError,
+    devices_match,
+    resolve_devices,
+)
 
 RevisionResolver = Callable[[str], str]
 _TRUE_ENVIRONMENT_VALUES = frozenset({"1", "on", "true", "yes"})
+_TORCH_COMPILE_BACKEND = "inductor"
+_TORCH_COMPILE_MODE = "reduce-overhead"
 
 
 class ModelLoadingError(RuntimeError):
@@ -76,7 +84,7 @@ class LoadedModelComponents:
     model_revision: str
     vae_id: str
     vae_revision: str
-    device_metadata: dict[str, str | None]
+    device_metadata: dict[str, object]
     package_versions: dict[str, str | None]
 
     @property
@@ -99,8 +107,185 @@ def dtype_name(dtype: torch.dtype) -> str:
     return text.removeprefix("torch.")
 
 
-def select_runtime(*, warn_without_cuda: bool = True) -> RuntimeSelection:
-    """Select CUDA, MPS, or CPU and the experiment's shared inference dtype."""
+def compile_loaded_unet(
+    components: LoadedModelComponents,
+) -> LoadedModelComponents:
+    """Compile one validated CUDA UNet, retaining an automatic eager fallback.
+
+    Compilation is configured once per loaded worker replica. PyTorch compiles
+    lazily on the first forward call, so the guarded forward retries that same
+    call eagerly if compilation fails. CUDA OOM remains visible to the caller's
+    existing adaptive batching logic.
+    """
+
+    try:
+        device = torch.device(components.device)
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise ModelLoadingError("loaded UNet device is invalid") from error
+    metadata = components.device_metadata
+    if not isinstance(metadata, dict):
+        raise ModelLoadingError("loaded component device metadata is invalid")
+    if "torch_compile" in metadata:
+        return components
+
+    compilation: dict[str, object] = {
+        "target": "unet.forward",
+        "status": "skipped_non_cuda",
+        "backend": None,
+        "mode": None,
+        "fullgraph": None,
+    }
+    metadata["torch_compile"] = compilation
+    if device.type != "cuda":
+        return components
+
+    compiler = getattr(torch, "compile", None)
+    if not callable(compiler):
+        compilation.update(
+            status="unavailable",
+            reason="torch.compile is not callable",
+        )
+        _report_compile_fallback(device, str(compilation["reason"]))
+        return components
+
+    compiler_namespace = getattr(torch, "compiler", None)
+    list_backends = getattr(compiler_namespace, "list_backends", None)
+    if callable(list_backends):
+        try:
+            backends = tuple(str(value) for value in list_backends())
+        except Exception as error:
+            compilation.update(
+                status="unavailable",
+                reason=(
+                    "cannot inspect torch.compile backends: "
+                    f"{type(error).__name__}: {error}"
+                ),
+            )
+            _report_compile_fallback(device, str(compilation["reason"]))
+            return components
+        if _TORCH_COMPILE_BACKEND not in backends:
+            compilation.update(
+                status="unavailable",
+                reason="TorchInductor backend is unavailable",
+            )
+            _report_compile_fallback(device, str(compilation["reason"]))
+            return components
+
+    unet = components.unet
+    eager_forward = getattr(unet, "forward", None)
+    if not callable(eager_forward):
+        compilation.update(
+            status="unavailable",
+            reason="loaded UNet has no callable forward method",
+        )
+        _report_compile_fallback(device, str(compilation["reason"]))
+        return components
+    instance_attributes = getattr(unet, "__dict__", {})
+    had_instance_forward = "forward" in instance_attributes
+    previous_instance_forward = instance_attributes.get("forward")
+    try:
+        compiled_forward = compiler(
+            eager_forward,
+            backend=_TORCH_COMPILE_BACKEND,
+            mode=_TORCH_COMPILE_MODE,
+            fullgraph=True,
+        )
+        if not callable(compiled_forward):
+            raise TypeError("torch.compile returned a non-callable object")
+    except Exception as error:
+        compilation.update(
+            status="eager_fallback",
+            backend=_TORCH_COMPILE_BACKEND,
+            mode=_TORCH_COMPILE_MODE,
+            fullgraph=True,
+            reason=f"{type(error).__name__}: {error}",
+        )
+        _report_compile_fallback(device, str(compilation["reason"]))
+        return components
+
+    compilation.update(
+        status="configured",
+        backend=_TORCH_COMPILE_BACKEND,
+        mode=_TORCH_COMPILE_MODE,
+        fullgraph=True,
+    )
+
+    def restore_eager_forward() -> None:
+        if had_instance_forward:
+            setattr(unet, "forward", previous_instance_forward)
+        else:
+            delattr(unet, "forward")
+
+    @wraps(eager_forward)
+    def guarded_forward(*args: object, **kwargs: object) -> object:
+        try:
+            output = compiled_forward(*args, **kwargs)
+        except Exception as compile_error:
+            restore_eager_forward()
+            compilation.update(
+                status="eager_fallback",
+                reason=f"{type(compile_error).__name__}: {compile_error}",
+            )
+            _report_compile_fallback(device, str(compilation["reason"]))
+            if _is_cuda_out_of_memory(compile_error, device):
+                raise
+            return eager_forward(*args, **kwargs)
+        compilation["status"] = "active"
+        return output
+
+    setattr(unet, "forward", guarded_forward)
+    print(
+        "torch.compile configured UNet on "
+        f"{device} (backend={_TORCH_COMPILE_BACKEND}, "
+        f"mode={_TORCH_COMPILE_MODE}, fullgraph=True); "
+        "the first forward includes compilation.",
+        file=sys.stderr,
+    )
+    return components
+
+
+def _report_compile_fallback(device: torch.device, reason: str) -> None:
+    print(
+        f"torch.compile disabled for UNet on {device}; using eager inference "
+        f"({reason}).",
+        file=sys.stderr,
+    )
+
+
+def _is_cuda_out_of_memory(error: Exception, device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    out_of_memory_type = getattr(torch.cuda, "OutOfMemoryError", ())
+    return (
+        isinstance(error, out_of_memory_type)
+        or "out of memory" in str(error).casefold()
+    )
+
+
+def select_runtime(
+    device: str | torch.device | None = None,
+    *,
+    warn_without_cuda: bool = True,
+) -> RuntimeSelection:
+    """Select one execution device and the experiment's inference dtype.
+
+    With no explicit device this preserves the original CUDA, MPS, then CPU
+    preference. Multi-device ``auto`` requests must first be expanded with
+    :func:`utils.models.devices.resolve_devices` and passed here one at a time.
+    """
+
+    if device is not None:
+        if isinstance(device, str) and device.strip().casefold() == "auto":
+            raise ModelLoadingError(
+                "select_runtime requires one concrete device; resolve 'auto' first"
+            )
+        try:
+            selected = resolve_devices(device)
+        except DeviceSelectionError as error:
+            raise ModelLoadingError(str(error)) from error
+        if len(selected) != 1:  # Defensive: explicit requests resolve singly.
+            raise ModelLoadingError("select_runtime requires one concrete device")
+        return _runtime_for_device(selected[0])
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -126,6 +311,26 @@ def select_runtime(*, warn_without_cuda: bool = True) -> RuntimeSelection:
     return runtime
 
 
+def _runtime_for_device(device: torch.device) -> RuntimeSelection:
+    if device.type == "cuda":
+        try:
+            gpu_name = torch.cuda.get_device_name(device)
+        except Exception as error:
+            raise ModelLoadingError(
+                f"cannot inspect requested CUDA device {device}"
+            ) from error
+        return RuntimeSelection(device, torch.float16, gpu_name)
+    if device.type == "mps":
+        return RuntimeSelection(
+            device,
+            torch.float16,
+            "Apple Metal Performance Shaders (MPS)",
+        )
+    if device.type == "cpu":
+        return RuntimeSelection(device, torch.float32, None)
+    raise ModelLoadingError(f"unsupported execution device: {device}")
+
+
 def configure_reproducibility() -> None:
     """Disable nondeterministic acceleration used by neither sampler."""
 
@@ -140,10 +345,7 @@ def configure_reproducibility() -> None:
             cudnn_backend.allow_tf32 = False
         if hasattr(cudnn_backend, "benchmark"):
             cudnn_backend.benchmark = False
-    try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    except TypeError:  # pragma: no cover - for older supported Torch releases
-        torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def package_version_metadata() -> dict[str, str | None]:

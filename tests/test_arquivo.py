@@ -268,7 +268,7 @@ def test_exact_arquivo_recovery_preserves_verified_candidate(
         )
 
 
-def test_arquivo_digest_options_cover_legacy_modern_and_ambiguous() -> None:
+def test_arquivo_digest_options_cover_md5_sha1_and_ambiguous() -> None:
     assert arquivo_module.arquivo_digest_options(
         "0123456789abcdef0123456789abcdef"
     ) == ("md5:0123456789abcdef0123456789abcdef",)
