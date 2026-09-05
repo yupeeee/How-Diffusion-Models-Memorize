@@ -24,6 +24,7 @@ from utils.common.io import (
 )
 
 from .cache import (
+    CompletedGenerationRecord,
     GENERATION_SCHEMA_VERSION,
     GENERATION_SELECTION_POLICY,
     SAMPLER_CONTRACT_VERSION,
@@ -35,6 +36,9 @@ from .cache import (
 
 STATISTICS_SCHEMA_VERSION = 1
 STATISTICS_DIRECTORY_NAME = "target_latent_statistics"
+TARGET_LATENT_MARKER_FINGERPRINT_FIELD = (
+    "generation_target_latent_marker_fingerprint_sha256"
+)
 
 
 class TargetLatentStatisticsError(RuntimeError):
@@ -49,6 +53,34 @@ class TargetLatentStatisticsResult:
     mean_path: Path
     population_std_path: Path
     report: Mapping[str, Any]
+
+
+def target_latent_marker_fingerprint(
+    records: Sequence[CompletedGenerationRecord],
+) -> str:
+    """Hash only marker fields that identify the target-latent population."""
+
+    identities: list[dict[str, object]] = []
+    for record in sorted(records, key=lambda item: item.original_index):
+        image_hash = record.metadata.get("target_image_sha256")
+        tensor_hashes = record.metadata.get("tensor_file_sha256")
+        target_hash = (
+            tensor_hashes.get("target_latent")
+            if isinstance(tensor_hashes, Mapping)
+            else None
+        )
+        if not _is_sha256(image_hash) or not _is_sha256(target_hash):
+            raise TargetLatentStatisticsError(
+                f"target latent {record.original_index} has invalid marker hashes"
+            )
+        identities.append(
+            {
+                "original_index": record.original_index,
+                "target_image_sha256": image_hash,
+                "tensor_file_sha256": {"target_latent": target_hash},
+            }
+        )
+    return canonical_hash({"records": identities})
 
 
 @dataclass(slots=True)
@@ -195,6 +227,7 @@ def compute_target_latent_statistics(
         raise TargetLatentStatisticsError(
             f"generation run has no completed target latents: {run_directory}"
         )
+    marker_fingerprint = target_latent_marker_fingerprint(records)
 
     science = configuration.get("scientific_config")
     if not isinstance(science, Mapping):
@@ -304,6 +337,7 @@ def compute_target_latent_statistics(
         "vae_revision": science.get("vae_revision"),
         "vae_scaling_factor": scaling_factor,
         "scientific_config_hash": science_hash,
+        TARGET_LATENT_MARKER_FINGERPRINT_FIELD: marker_fingerprint,
         "input_identity_sha256": canonical_hash(
             {
                 "scientific_config_hash": science_hash,

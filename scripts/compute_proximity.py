@@ -12,6 +12,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.common.cli import add_run_arguments  # noqa: E402
+from utils.data.selection import (  # noqa: E402
+    DEFAULT_SELECTION_STRATEGY,
+    SELECTION_STRATEGIES,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,7 +25,22 @@ def build_parser() -> argparse.ArgumentParser:
         description="Compute terminal latent proximity from local caches only.",
         allow_abbrev=False,
     )
-    return add_run_arguments(parser, include_device=False)
+    add_run_arguments(parser, include_device=False)
+    parser.add_argument(
+        "--selection-strategy",
+        choices=SELECTION_STRATEGIES,
+        default=DEFAULT_SELECTION_STRATEGY,
+        help=(
+            "prompt filter fitted to the reference observations: GMM posterior, "
+            "GMM evidence, or Spearman (default: gmm)"
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="recompute and replace this strategy's cached proximity outputs",
+    )
+    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -38,6 +57,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_inference_steps=arguments.T,
         num_seeds=arguments.N,
         seed_start=arguments.seed_start,
+        overwrite=arguments.overwrite,
+        selection_strategy=arguments.selection_strategy,
     )
     print(f"Summary: {summary.paths.summary_json}")
     return summary.exit_code

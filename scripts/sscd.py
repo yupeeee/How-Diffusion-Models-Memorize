@@ -19,7 +19,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Compute SSCD from cached full-resolution endpoints.",
         allow_abbrev=False,
     )
-    return add_run_arguments(parser)
+    add_run_arguments(parser)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="recompute and atomically replace every cached SSCD score",
+    )
+    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -40,8 +46,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_seeds=arguments.N,
         seed_start=arguments.seed_start,
         device=arguments.device,
+        overwrite=arguments.overwrite,
     )
     print(f"Summary: {result.summary_path}")
+    if result.complete_cache_hit:
+        print(
+            "SSCD scoring was skipped because every expected score is complete; "
+            "pass --overwrite to recompute it."
+        )
     return int(result.exit_code)
 
 

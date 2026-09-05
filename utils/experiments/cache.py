@@ -347,16 +347,21 @@ def save_generation_tensors(
     unconditional_predictions: torch.Tensor,
     conditional_predictions: torch.Tensor,
     target_latent: torch.Tensor,
+    overwrite: bool = False,
 ) -> dict[str, str]:
-    """Write the three scientific files exactly once for an unfinished record."""
+    """Atomically write one record, replacing it only when explicitly requested."""
 
     original_index = safe_index(index)
+    if not isinstance(overwrite, bool):
+        raise ValueError("overwrite must be a boolean")
     destinations = (
         paths.latent_path(original_index),
         paths.noise_prediction_path(original_index),
         paths.target_latent_path(original_index),
     )
-    if any(path.exists() or path.is_symlink() for path in destinations):
+    if not overwrite and any(
+        path.exists() or path.is_symlink() for path in destinations
+    ):
         raise GenerationCacheError(
             f"refusing to overwrite an existing scientific tensor for {original_index}"
         )
@@ -373,13 +378,19 @@ def save_generation_tensors(
 
 
 def publish_completion_marker(
-    paths: GenerationPaths, index: object, metadata: Mapping[str, object]
+    paths: GenerationPaths,
+    index: object,
+    metadata: Mapping[str, object],
+    *,
+    overwrite: bool = False,
 ) -> Path:
     """Atomically publish a marker after tensors and preview are complete."""
 
     original_index = safe_index(index)
+    if not isinstance(overwrite, bool):
+        raise ValueError("overwrite must be a boolean")
     marker = paths.record_path(original_index)
-    if marker.exists() or marker.is_symlink():
+    if not overwrite and (marker.exists() or marker.is_symlink()):
         raise GenerationCacheError(f"refusing to overwrite completion marker {marker}")
     values = dict(metadata)
     values["original_index"] = original_index
@@ -422,20 +433,22 @@ def quarantine_record(paths: GenerationPaths, index: object) -> tuple[Path, ...]
     original_index = safe_index(index)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     destination = paths.stale_directory / f"{stamp}_{original_index}"
+    # Unpublish the completion marker first. If a later move fails, no consumer
+    # can mistake the partially quarantined bundle for a completed record.
     sources = (
+        paths.record_path(original_index),
+        paths.pending_record_path(original_index),
         paths.latent_path(original_index),
         paths.noise_prediction_path(original_index),
         paths.target_latent_path(original_index),
         paths.image_path(original_index),
-        paths.record_path(original_index),
-        paths.pending_record_path(original_index),
     )
     moved: list[Path] = []
     for source in sources:
         if not source.exists() and not source.is_symlink():
             continue
-        destination.mkdir(parents=True, exist_ok=True)
-        target = destination / source.name
+        target = destination / source.parent.name / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
             raise GenerationCacheError(f"stale destination already exists: {target}")
         os.replace(source, target)

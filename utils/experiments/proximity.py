@@ -23,6 +23,12 @@ from utils.common.io import (
     safe_torch_load,
     utc_now,
 )
+from utils.data.selection import (
+    DEFAULT_SELECTION_STRATEGY,
+    TargetPairSelectionError,
+    normalize_selection_strategy,
+    reference_completion_fingerprint,
+)
 from utils.data.webster import normalize_webster_type
 from utils.models.latent import compute_latent_distances
 
@@ -36,6 +42,8 @@ from .cache import (
 )
 from .plotting import (
     AnalysisStatistics,
+    PROXIMITY_FIGURE_FILENAMES,
+    PROXIMITY_FIGURES,
     write_analysis_outputs,
     write_selection_figure,
 )
@@ -46,7 +54,8 @@ OBSERVATION_COLUMNS = tuple(
     "l2_norm sscd observation_status observation_error".split()
 )
 ANALYSIS_COLUMNS = OBSERVATION_COLUMNS + tuple(
-    "prompt_spearman include_prompt selection_status selection_reason".split()
+    "selection_strategy prompt_spearman prompt_gmm_evidence_seed_count "
+    "include_prompt selection_status selection_reason".split()
 )
 FAILED_COLUMNS = tuple(
     "original_index record_id source_row_number issue_type reason "
@@ -75,6 +84,7 @@ class ProximityPaths:
         role: str,
         seed_start: int,
         num_seeds: int,
+        selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
     ) -> "ProximityPaths":
         generation = Path(generation_run)
         if not generation.is_absolute():
@@ -87,7 +97,8 @@ class ProximityPaths:
                     "output_run_name is required outside the logs directory"
                 ) from error
         namespace = f"{role}_S{seed_start}_N{num_seeds}"
-        output = root / "outputs" / output_run_name / "proximity" / namespace
+        strategy = normalize_selection_strategy(selection_strategy)
+        output = root / "outputs" / output_run_name / "proximity" / strategy / namespace
         return cls(root, generation, output)
 
     @classmethod
@@ -125,7 +136,6 @@ class _GenerationRecord:
     completed: CompletedGenerationRecord
     paths: GenerationPaths
     generated_image_path: str
-    marker_sha256: str
 
 
 def _record_progress(values: Sequence[Any]) -> Iterable[Any]:
@@ -192,11 +202,16 @@ def run_proximity(
     num_inference_steps: int,
     num_seeds: int,
     seed_start: int,
+    overwrite: bool,
+    selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
 ) -> ProximitySummary:
     """Build on reference seeds N..2N-1 or report a frozen experiment."""
 
     started = time.monotonic()
     root = Path(project_root).expanduser().resolve()
+    if not isinstance(overwrite, bool):
+        raise ProximityError("overwrite must be a boolean")
+    strategy = normalize_selection_strategy(selection_strategy)
     arguments = {
         "model_name": model_name,
         "scheduler_name": scheduler_name,
@@ -230,9 +245,10 @@ def run_proximity(
         role=role,
         seed_start=seed_start,
         num_seeds=num_seeds,
+        selection_strategy=strategy,
     )
 
-    if role == "reference":
+    if role == "reference" and not overwrite:
         frozen = _frozen_reference_result(
             root,
             cache.run_directory,
@@ -241,6 +257,7 @@ def run_proximity(
             guidance_scale,
             num_inference_steps,
             num_seeds,
+            strategy,
         )
         if frozen is not None:
             return frozen
@@ -279,16 +296,44 @@ def run_proximity(
 
     selection = None
     if role == "experiment":
-        from utils.data.selection import load_target_pair_selection
-
-        selection = load_target_pair_selection(
-            root,
-            model_name=model_name,
-            scheduler_name=scheduler_name,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            num_seeds=num_seeds,
+        from utils.data.selection import (
+            TargetPairSelectionMissingError,
+            load_target_pair_selection,
+            target_pair_selection_directory,
         )
+
+        try:
+            selection = load_target_pair_selection(
+                root,
+                model_name=model_name,
+                scheduler_name=scheduler_name,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                num_seeds=num_seeds,
+                selection_strategy=strategy,
+            )
+        except TargetPairSelectionMissingError:
+            raise
+        except TargetPairSelectionError as error:
+            directory = target_pair_selection_directory(
+                root,
+                model_name=model_name,
+                scheduler_name=scheduler_name,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                num_seeds=num_seeds,
+                selection_strategy=strategy,
+            )
+            raise _stale_selection_error(
+                directory,
+                model_name,
+                scheduler_name,
+                guidance_scale,
+                num_inference_steps,
+                num_seeds,
+                strategy,
+                str(error),
+            ) from error
 
     records = list_completed_records(cache)
     if not records:
@@ -353,6 +398,8 @@ def run_proximity(
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
             num_seeds=num_seeds,
+            overwrite=overwrite,
+            selection_strategy=strategy,
             paired_frame=observations,
             records_frame=_reference_records_frame(records, model_name),
             reference_run_config=generation,
@@ -366,6 +413,7 @@ def run_proximity(
             guidance_scale,
             num_inference_steps,
             num_seeds,
+            strategy,
         )
         assert result is not None
         return result
@@ -377,9 +425,9 @@ def run_proximity(
     configuration = _analysis_configuration(
         paths, run_name, generation, sscd, selection
     )
-    _write_configuration(paths.run_config_json, configuration)
+    _write_configuration(paths.run_config_json, configuration, overwrite=overwrite)
     if failures:
-        _remove_optional(paths.output_directory / "proximity_vs_sscd.png")
+        _remove_figure_outputs(paths.output_directory)
         atomic_write_frame_csv(analysis, paths.output_directory / "proximity.csv")
         atomic_write_frame_csv(
             pd.DataFrame(failures, columns=FAILED_COLUMNS), paths.failed_csv
@@ -419,6 +467,7 @@ def _frozen_reference_result(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
+    selection_strategy: str,
 ) -> ProximitySummary | None:
     from utils.data.selection import (
         load_target_pair_selection,
@@ -432,17 +481,62 @@ def _frozen_reference_result(
         guidance_scale=guidance_scale,
         num_inference_steps=num_inference_steps,
         num_seeds=num_seeds,
+        selection_strategy=selection_strategy,
     )
     if not directory.exists() and not directory.is_symlink():
         return None
-    selection = load_target_pair_selection(
-        root,
-        model_name=model_name,
-        scheduler_name=scheduler_name,
-        guidance_scale=guidance_scale,
-        num_inference_steps=num_inference_steps,
-        num_seeds=num_seeds,
-    )
+    try:
+        selection = load_target_pair_selection(
+            root,
+            model_name=model_name,
+            scheduler_name=scheduler_name,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            num_seeds=num_seeds,
+            selection_strategy=selection_strategy,
+        )
+    except TargetPairSelectionError as error:
+        raise _stale_selection_error(
+            directory,
+            model_name,
+            scheduler_name,
+            guidance_scale,
+            num_inference_steps,
+            num_seeds,
+            selection_strategy,
+            str(error),
+        ) from error
+    try:
+        observed_fingerprint = reference_completion_fingerprint(generation_run)
+    except TargetPairSelectionError as error:
+        raise _stale_selection_error(
+            directory,
+            model_name,
+            scheduler_name,
+            guidance_scale,
+            num_inference_steps,
+            num_seeds,
+            selection_strategy,
+            str(error),
+        ) from error
+    expected_fingerprint = selection.configuration["reference_completion_fingerprint"]
+    if canonical_json(observed_fingerprint) != canonical_json(expected_fingerprint):
+        changed = ", ".join(
+            label
+            for label in ("generation", "sscd")
+            if canonical_json(observed_fingerprint[label])
+            != canonical_json(expected_fingerprint[label])
+        )
+        raise _stale_selection_error(
+            directory,
+            model_name,
+            scheduler_name,
+            guidance_scale,
+            num_inference_steps,
+            num_seeds,
+            selection_strategy,
+            f"changed marker groups: {changed}",
+        )
     paths = ProximityPaths.frozen_selection(root, generation_run, directory)
     summary = read_json(paths.summary_json)
     if summary.get("selection_hash") != selection.sha256:
@@ -567,7 +661,6 @@ def _validated_record(
         completed,
         paths,
         _display_path(paths.image_path(index), root),
-        file_sha256(completed.marker_path),
     )
 
 
@@ -608,7 +701,6 @@ def _sscd_scores(
         "record_id": record.metadata["record_id"],
         "source_row_number": record.completed.source_row_number,
         "prompt_raw": record.metadata["prompt_raw"],
-        "generation_record_sha256": record.marker_sha256,
         "generation_scientific_config_hash": generation["scientific_config_hash"],
         "generation_latent_sha256": record.metadata["tensor_file_sha256"]["latent"],
         "target_image_sha256": record.metadata.get("target_image_sha256"),
@@ -770,7 +862,9 @@ def _annotate_selection(
         "target_image_sha256",
     )
     decisions = (
+        "selection_strategy",
         "prompt_spearman",
+        "prompt_gmm_evidence_seed_count",
         "include_prompt",
         "selection_status",
         "selection_reason",
@@ -829,6 +923,7 @@ def _analysis_configuration(
         "generation_scientific_config_hash": generation["scientific_config_hash"],
         "sscd_configuration_hash": sscd["configuration_hash"],
         "selection_policy": selection.configuration["selection_policy"],
+        "selection_strategy": selection.configuration["selection_strategy"],
         "selection_hash": selection.sha256,
         "model_name": science["model_cli_name"],
         "scheduler_name": _scheduler_name(science),
@@ -840,21 +935,47 @@ def _analysis_configuration(
         "distance": "euclidean_l2",
         "outputs": {
             "table": "proximity.csv",
-            "figure": "proximity_vs_sscd.png",
+            "figures": _figure_filename_catalog(),
         },
     }
 
 
-def _write_configuration(path: Path, desired: Mapping[str, object]) -> None:
+def _write_configuration(
+    path: Path, desired: Mapping[str, object], *, overwrite: bool = False
+) -> None:
     if path.exists() or path.is_symlink():
         if path.is_symlink() or not path.is_file():
             raise ProximityError(f"unsafe existing analysis configuration: {path}")
-        if canonical_json(read_json(path)) != canonical_json(desired):
+        existing = read_json(path)
+        if canonical_json(existing) == canonical_json(desired) and not overwrite:
+            return
+        if not overwrite:
+            if canonical_json(_without_derived_outputs(existing)) == canonical_json(
+                _without_derived_outputs(desired)
+            ):
+                atomic_write_json(path, desired)
+                return
             raise ProximityError(
                 f"existing analysis configuration is incompatible: {path}"
             )
-        return
     atomic_write_json(path, desired)
+
+
+def _without_derived_outputs(value: object) -> object:
+    """Exclude the rebuildable output catalog from analysis identity checks."""
+
+    if not isinstance(value, Mapping):
+        return value
+    result = dict(value)
+    result.pop("outputs", None)
+    return result
+
+
+def _figure_filename_catalog() -> dict[str, dict[str, str]]:
+    return {
+        scope: {file_format: filename for file_format, filename in formats.items()}
+        for scope, formats in PROXIMITY_FIGURES.items()
+    }
 
 
 def _summary(
@@ -878,6 +999,7 @@ def _summary(
         "generation_scientific_config_hash": generation["scientific_config_hash"],
         "sscd_configuration_hash": sscd["configuration_hash"],
         "selection_policy": selection.configuration["selection_policy"],
+        "selection_strategy": selection.configuration["selection_strategy"],
         "selection_hash": selection.sha256,
         "total_prompt_count": len(prompts),
         "included_prompt_count": int(included.sum()),
@@ -897,9 +1019,16 @@ def _summary(
     else:
         assert statistics is not None
         values["prompt_spearman_summary"] = statistics.as_dict()
-        values["figure"] = _display_path(
-            paths.output_directory / "proximity_vs_sscd.png", paths.project_root
-        )
+        values["figures"] = {
+            scope: {
+                file_format: _display_path(
+                    paths.output_directory / filename,
+                    paths.project_root,
+                )
+                for file_format, filename in formats.items()
+            }
+            for scope, formats in PROXIMITY_FIGURES.items()
+        }
     return values
 
 
@@ -949,6 +1078,13 @@ def _remove_optional(path: Path) -> None:
         path.unlink()
     elif path.exists():
         raise ProximityError(f"derived output is not a regular file: {path}")
+
+
+def _remove_figure_outputs(output_directory: Path) -> None:
+    """Remove only the known derived proximity figures after a failed run."""
+
+    for filename in PROXIMITY_FIGURE_FILENAMES:
+        _remove_optional(output_directory / filename)
 
 
 def _latent_shape(value: object) -> tuple[int, int, int]:
@@ -1013,4 +1149,35 @@ def _generation_command(
         f"./generate.sh --model {model} --scheduler {scheduler} "
         f"--g {stable_float(guidance)} --T {steps} --N {seeds} "
         f"--seed-start {seed_start}"
+    )
+
+
+def _stale_selection_error(
+    directory: Path,
+    model: str,
+    scheduler: str,
+    guidance: float,
+    steps: int,
+    seeds: int,
+    selection_strategy: str,
+    detail: str,
+) -> ProximityError:
+    command = (
+        f"./compute_proximity.sh --model {model} --scheduler {scheduler} "
+        f"--g {stable_float(guidance)} --T {steps} --N {seeds} "
+        f"--seed-start {seeds} --selection-strategy {selection_strategy} "
+        "--overwrite"
+    )
+    pipeline_command = (
+        f"./run_all.sh --model {model} --scheduler {scheduler} "
+        f"--g {stable_float(guidance)} --T {steps} --N {seeds} "
+        f"--selection-strategy {selection_strategy}"
+    )
+    return ProximityError(
+        f"frozen selection cannot be reused: {directory}\n{detail}\n"
+        "Ensure the reference generation and SSCD marker caches are complete, "
+        f"then rebuild only this selection with:\n{command}\n"
+        "Or rerun the pipeline while rebuilding only selection/proximity "
+        "artifacts (without regenerating trajectories or SSCD):\n"
+        f"{pipeline_command}"
     )

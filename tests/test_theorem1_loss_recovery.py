@@ -23,6 +23,8 @@ from scripts import theorem1_loss_recovery as experiment
 
 EXPECTED_COLUMNS = (
     "record_id",
+    "selection_strategy",
+    "selection_hash",
     "model_name",
     "scheduler_name",
     "guidance_scale",
@@ -45,6 +47,22 @@ EXPECTED_COLUMNS = (
     "status",
     "error",
 )
+SELECTION_HASH = "c" * 64
+
+
+def _selection(
+    *,
+    included: Sequence[str],
+    excluded: Sequence[str] = (),
+    strategy: str = "gmm",
+    selection_hash: str = SELECTION_HASH,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        included_indices=frozenset(included),
+        excluded_indices=frozenset(excluded),
+        selection_strategy=strategy,
+        sha256=selection_hash,
+    )
 
 
 def _prediction_samples(
@@ -67,6 +85,7 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
     }
     assert options == {
         "--model",
+        "--selection-strategy",
         "--scheduler",
         "--g",
         "--T",
@@ -82,6 +101,7 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
 
     arguments = parser.parse_args([])
     assert arguments.model == "sdv1"
+    assert arguments.selection_strategy == "gmm"
     assert arguments.scheduler == "ddim"
     assert arguments.g == pytest.approx(7.5)
     assert arguments.num_inference_steps == 50
@@ -94,6 +114,15 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
     assert arguments.device == "auto"
     assert arguments.plot is False
     assert parser.parse_args(["--plot"]).plot is True
+    assert (
+        parser.parse_args(["--selection-strategy", "spearman"]).selection_strategy
+        == "spearman"
+    )
+    assert (
+        parser.parse_args(["--selection-strategy", "gmm-evidence"])
+        .selection_strategy
+        == "gmm-evidence"
+    )
     assert parser.parse_args(["--device", "CUDA:2"]).device == "cuda:2"
     expected_output_directories = {
         model_name: (
@@ -101,21 +130,37 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
             / "outputs"
             / f"{model_name}_ddim_g7.5_T50_N20"
             / "theorem1_loss_recovery"
+            / "gmm"
+            / SELECTION_HASH
         )
         for model_name in ("sdv1", "sdv2", "realvis")
     }
     assert {
         model_name: experiment._default_output_directory(
-            model_name, "ddim", 7.5, 50, 20
+            model_name, "ddim", 7.5, 50, 20, "gmm", SELECTION_HASH
         )
         for model_name in expected_output_directories
     } == expected_output_directories
     assert len(set(expected_output_directories.values())) == 3
-    assert experiment._default_output_directory("sdv1", "ddpm", 3.25, 12, 3) == (
+    assert experiment._default_output_directory(
+        "sdv1", "ddpm", 3.25, 12, 3, "spearman", "d" * 64
+    ) == (
         experiment.ROOT
         / "outputs"
         / "sdv1_ddpm_g3.25_T12_N3"
         / "theorem1_loss_recovery"
+        / "spearman"
+        / ("d" * 64)
+    )
+    assert experiment._default_output_directory(
+        "sdv1", "ddpm", 3.25, 12, 3, "gmm-evidence", "e" * 64
+    ) == (
+        experiment.ROOT
+        / "outputs"
+        / "sdv1_ddpm_g3.25_T12_N3"
+        / "theorem1_loss_recovery"
+        / "gmm-evidence"
+        / ("e" * 64)
     )
 
     smoke = parser.parse_args(
@@ -162,10 +207,15 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
         parser.parse_args(["--plot-only"])
     with pytest.raises(SystemExit):
         parser.parse_args(["--device", "cuda:-1"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--selection-strategy", "kmeans"])
 
     assert experiment.CSV_COLUMNS == EXPECTED_COLUMNS
     assert experiment.CSV_NAME == "theorem1_loss_recovery.csv"
-    assert experiment.FIGURE_NAME == "theorem1_loss_recovery.pdf"
+    assert experiment.FIGURE_FILENAMES == (
+        "theorem1_loss_recovery.png",
+        "theorem1_loss_recovery.pdf",
+    )
 
 
 def test_run_experiment_requires_explicit_device() -> None:
@@ -173,6 +223,37 @@ def test_run_experiment_requires_explicit_device() -> None:
         inspect.signature(experiment.run_experiment).parameters["device"].default
         is inspect.Parameter.empty
     )
+
+
+def test_output_directory_accepts_only_the_csv_and_both_figure_formats(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "theorem1"
+    output.mkdir()
+    for filename in (experiment.CSV_NAME, *experiment.FIGURE_FILENAMES):
+        (output / filename).write_bytes(b"existing artifact")
+
+    assert experiment._prepare_output_directory(output) == output.resolve()
+
+    unexpected = output / "unrelated.log"
+    unexpected.write_text("unrelated", encoding="utf-8")
+    with pytest.raises(
+        experiment.ExperimentError,
+        match="output directory contains unexpected artifacts: unrelated.log",
+    ):
+        experiment._prepare_output_directory(output)
+
+    invalid_output = tmp_path / "invalid-theorem1"
+    invalid_output.mkdir()
+    invalid_name = invalid_output / experiment.FIGURE_FILENAMES[0]
+    invalid_name.mkdir()
+    with pytest.raises(
+        experiment.ExperimentError,
+        match=(
+            "output directory contains unexpected artifacts: theorem1_loss_recovery.png"
+        ),
+    ):
+        experiment._prepare_output_directory(invalid_output)
 
 
 def test_nondefault_generation_contract_uses_exact_sampler_cache(
@@ -309,6 +390,88 @@ def test_nondefault_generation_contract_uses_exact_sampler_cache(
         "science-hash",
         (0, 1, 2),
     )
+
+
+def test_mean_sscd_does_not_depend_on_preview_sensitive_generation_marker_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker_path = tmp_path / "7.json"
+    score_path = tmp_path / "7.pt"
+    marker_path.write_text("{}", encoding="utf-8")
+    score_path.write_bytes(b"fixed score tensor")
+    configuration_hash = "b" * 64
+    scientific_hash = "a" * 64
+    latent_hash = "d" * 64
+    score_hash = "e" * 64
+    metadata = {
+        "original_index": "7",
+        "record_id": "sdv1-0007",
+        "source_row_number": 8,
+        "prompt_raw": "selected prompt",
+        "target_image_sha256": "f" * 64,
+    }
+    marker = {
+        **metadata,
+        "model_id": "model",
+        "model_revision": "revision",
+        "num_seeds": 2,
+        "seeds": [0, 1],
+        "similarity": experiment.SCORE_DEFINITION,
+        "sscd_configuration_hash": configuration_hash,
+        "generation_scientific_config_hash": scientific_hash,
+        "generation_latent_sha256": latent_hash,
+        "generation_record_sha256": "outdated-preview-audit-hash",
+        "score_sha256": score_hash,
+    }
+    contract = SimpleNamespace(
+        sscd_error=None,
+        sscd_configuration={"seeds": [0, 1]},
+        sscd_configuration_hash=configuration_hash,
+        scientific_hash=scientific_hash,
+        science={"model_id": "model", "model_revision": "revision"},
+        sscd_paths=SimpleNamespace(
+            marker_path=lambda index: (
+                marker_path if index == "7" else pytest.fail("wrong marker index")
+            ),
+            score_path=lambda index: (
+                score_path if index == "7" else pytest.fail("wrong score index")
+            ),
+        ),
+        paths=SimpleNamespace(
+            record_path=lambda _index: pytest.fail(
+                "preview-sensitive generation record must not be hashed"
+            )
+        ),
+    )
+    monkeypatch.setattr(experiment, "read_json", lambda path: marker)
+    monkeypatch.setattr(
+        experiment,
+        "file_sha256",
+        lambda path: (
+            score_hash
+            if path == score_path
+            else pytest.fail(f"unexpected hash request: {path}")
+        ),
+    )
+    monkeypatch.setattr(
+        experiment,
+        "safe_torch_load",
+        lambda path: (
+            torch.tensor([0.2, 0.6], dtype=torch.float32)
+            if path == score_path
+            else pytest.fail(f"unexpected tensor load: {path}")
+        ),
+    )
+
+    result = experiment._load_mean_target_sscd(
+        contract=contract,
+        metadata=metadata,
+        generation_seeds=(0, 1),
+        generation_marker={"tensor_file_sha256": {"latent": latent_hash}},
+    )
+
+    assert result == pytest.approx(0.4)
 
 
 def test_active_scheduler_uses_requested_name_and_inference_steps(
@@ -751,22 +914,34 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
             "target_image_sha256": "a" * 64,
         },
         {
-            "record_id": "realisticvision-0001",
+            "record_id": "realisticvision-discarded",
             "model_name": "realisticvision",
-            "prompt": "second prompt",
-            "prompt_raw": "second prompt",
+            "prompt": "discarded prompt",
+            "prompt_raw": "discarded prompt",
             "image": object(),
             "original_index": "101",
             "source_row_number": 11,
             "target_image_sha256": "b" * 64,
         },
+        {
+            "record_id": "realisticvision-0001",
+            "model_name": "realisticvision",
+            "prompt": "third prompt",
+            "prompt_raw": "third prompt",
+            "image": object(),
+            "original_index": "102",
+            "source_row_number": 12,
+            "target_image_sha256": "c" * 64,
+        },
     ]
+    accessed_dataset_positions: list[int] = []
 
     class FakeDataset:
         def __len__(self) -> int:
             return len(records)
 
         def __getitem__(self, index: int) -> dict[str, object]:
+            accessed_dataset_positions.append(index)
             return dict(records[index])
 
         def iter_metadata(self):  # type: ignore[no-untyped-def]
@@ -819,6 +994,17 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
         return FakeDataset()
 
     monkeypatch.setattr(experiment, "WebsterDataset", fake_dataset)
+    selection_requests: list[dict[str, object]] = []
+
+    def load_selection(_root: Path, **kwargs: object) -> SimpleNamespace:
+        selection_requests.append(dict(kwargs))
+        return _selection(
+            included=("100", "102"),
+            excluded=("101",),
+            strategy="spearman",
+        )
+
+    monkeypatch.setattr(experiment, "_load_frozen_selection", load_selection)
     loaded_contract_arguments: list[tuple[object, ...]] = []
 
     def load_contract(*args: object, **_kwargs: object) -> object:
@@ -889,7 +1075,7 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     ) -> torch.Tensor:
         assert contract is generation_contract
         assert generation_marker["validated_record_id"] == metadata["record_id"]
-        if metadata["record_id"] == records[1]["record_id"]:
+        if metadata["record_id"] == records[2]["record_id"]:
             raise RuntimeError("synthetic target failure")
         return torch.ones((1, 2, 2), dtype=torch.float32)
 
@@ -953,10 +1139,12 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
 
     plotted: list[tuple[Path, Path]] = []
 
-    def fake_plot(csv_path: Path, figure_path: Path, **_: object) -> None:
+    def fake_plot(csv_path: Path, output_directory: Path, **_: object) -> None:
         assert Path(csv_path).is_file()
-        plotted.append((Path(csv_path), Path(figure_path)))
-        Path(figure_path).write_bytes(b"%PDF-1.4\n%%EOF\n")
+        output_path = Path(output_directory)
+        plotted.append((Path(csv_path), output_path))
+        for figure_path in experiment._figure_paths(output_path):
+            figure_path.write_bytes(b"synthetic figure")
 
     monkeypatch.setattr(experiment, "plot_saved_results", fake_plot)
     output = tmp_path / "loss-recovery"
@@ -968,6 +1156,7 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
         num_loss_seeds=2,
         loss_seed=7,
         num_seeds=3,
+        selection_strategy="spearman",
         sample_batch_size=2,
         max_records=2,
         output_dir=output,
@@ -979,6 +1168,17 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
     assert tuple(frame.columns) == EXPECTED_COLUMNS
     assert len(frame) == 2
     assert requested_dataset_models == ["realisticvision"]
+    assert accessed_dataset_positions == [0, 2]
+    assert selection_requests == [
+        {
+            "model_name": "realvis",
+            "scheduler_name": "ddpm",
+            "guidance_scale": 3.25,
+            "num_inference_steps": 12,
+            "num_seeds": 3,
+            "selection_strategy": "spearman",
+        }
+    ]
     assert loaded_contract_arguments == [
         (experiment.ROOT, "realvis", "ddpm", 3.25, 12, 3)
     ]
@@ -997,6 +1197,8 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
         "realisticvision-0001",
     ]
     assert frame["model_name"].tolist() == ["realvis", "realvis"]
+    assert frame["selection_strategy"].tolist() == ["spearman", "spearman"]
+    assert frame["selection_hash"].tolist() == [SELECTION_HASH, SELECTION_HASH]
     assert frame["scheduler_name"].tolist() == ["ddpm", "ddpm"]
     assert frame["guidance_scale"].tolist() == [3.25, 3.25]
     assert frame["num_inference_steps"].tolist() == [12, 12]
@@ -1052,10 +1254,10 @@ def test_mocked_realvis_pair_run_keeps_alias_streams_seed_alignment_and_progress
         "recovery",
         "sscd",
     }
-    assert plotted == [(output / experiment.CSV_NAME, output / experiment.FIGURE_NAME)]
+    assert plotted == [(output / experiment.CSV_NAME, output)]
     assert {path.name for path in output.iterdir()} == {
         experiment.CSV_NAME,
-        experiment.FIGURE_NAME,
+        *experiment.FIGURE_FILENAMES,
     }
 
 
@@ -1064,8 +1266,8 @@ def test_worker_setup_failure_still_writes_all_pair_rows_and_figure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     records = (
-        {"record_id": "sdv1-0000"},
-        {"record_id": "sdv1-0001"},
+        {"record_id": "sdv1-0000", "original_index": "10"},
+        {"record_id": "sdv1-0001", "original_index": "11"},
     )
 
     class FakeDataset:
@@ -1087,6 +1289,11 @@ def test_worker_setup_failure_still_writes_all_pair_rows_and_figure(
     )
     monkeypatch.setattr(
         experiment,
+        "_load_frozen_selection",
+        lambda *_args, **_kwargs: _selection(included=("10", "11")),
+    )
+    monkeypatch.setattr(
+        experiment,
         "_load_generation_contract",
         lambda *_args, **_kwargs: contract,
     )
@@ -1097,9 +1304,11 @@ def test_worker_setup_failure_still_writes_all_pair_rows_and_figure(
     monkeypatch.setattr(experiment, "load_model_components", fail_model_load)
     plotted: list[tuple[Path, Path]] = []
 
-    def fake_plot(csv_path: Path, figure_path: Path, **_: object) -> None:
-        plotted.append((Path(csv_path), Path(figure_path)))
-        Path(figure_path).write_bytes(b"%PDF-1.4\n%%EOF\n")
+    def fake_plot(csv_path: Path, output_directory: Path, **_: object) -> None:
+        output_path = Path(output_directory)
+        plotted.append((Path(csv_path), output_path))
+        for figure_path in experiment._figure_paths(output_path):
+            figure_path.write_bytes(b"synthetic figure")
 
     monkeypatch.setattr(experiment, "plot_saved_results", fake_plot)
     _FakeProgress.instances.clear()
@@ -1113,6 +1322,7 @@ def test_worker_setup_failure_still_writes_all_pair_rows_and_figure(
         num_loss_seeds=3,
         loss_seed=17,
         num_seeds=2,
+        selection_strategy="gmm",
         sample_batch_size=2,
         max_records=None,
         output_dir=output,
@@ -1124,6 +1334,8 @@ def test_worker_setup_failure_still_writes_all_pair_rows_and_figure(
     frame = pd.read_csv(output / experiment.CSV_NAME)
     assert tuple(frame.columns) == EXPECTED_COLUMNS
     assert frame["record_id"].tolist() == ["sdv1-0000", "sdv1-0001"]
+    assert frame["selection_strategy"].tolist() == ["gmm", "gmm"]
+    assert frame["selection_hash"].tolist() == [SELECTION_HASH, SELECTION_HASH]
     assert frame["scheduler_name"].tolist() == ["ddim", "ddim"]
     assert frame["guidance_scale"].tolist() == [7.5, 7.5]
     assert frame["num_inference_steps"].tolist() == [50, 50]
@@ -1136,10 +1348,10 @@ def test_worker_setup_failure_still_writes_all_pair_rows_and_figure(
         "synthetic model initialization failure" in message
         for message in frame["error"].astype(str)
     )
-    assert plotted == [(output / experiment.CSV_NAME, output / experiment.FIGURE_NAME)]
+    assert plotted == [(output / experiment.CSV_NAME, output)]
     assert {path.name for path in output.iterdir()} == {
         experiment.CSV_NAME,
-        experiment.FIGURE_NAME,
+        *experiment.FIGURE_FILENAMES,
     }
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
@@ -1385,7 +1597,16 @@ def test_merge_rejects_missing_or_duplicate_pair_positions() -> None:
     first = experiment._PairShardResult(((0, {"status": "ok"}),), 0)
     duplicate = experiment._PairShardResult(((0, {"status": "ok"}),), 0)
     with pytest.raises(experiment.ExperimentError, match="duplicate or missing"):
-        experiment._merge_pair_shard_results((first, duplicate), 2)
+        experiment._merge_pair_shard_results((first, duplicate), (0, 2))
+
+    noncontiguous = experiment._merge_pair_shard_results(
+        (
+            experiment._PairShardResult(((4, {"record_id": "second"}),), 0),
+            experiment._PairShardResult(((1, {"record_id": "first"}),), 0),
+        ),
+        (1, 4),
+    )
+    assert [position for position, _row in noncontiguous.indexed_rows] == [1, 4]
 
 
 def _row(
@@ -1406,6 +1627,8 @@ def _row(
     recovery_mse = recovery_rmse**2
     return {
         "record_id": record_id,
+        "selection_strategy": "gmm",
+        "selection_hash": SELECTION_HASH,
         "model_name": "sdv1",
         "scheduler_name": "ddim",
         "guidance_scale": 7.5,
@@ -1473,7 +1696,6 @@ def test_plot_reloads_csv_and_draws_pair_scatter_and_binned_median(
         ),
     ]
     csv_path = tmp_path / experiment.CSV_NAME
-    figure_path = tmp_path / experiment.FIGURE_NAME
     pd.DataFrame(
         [*excluded_rows, *reversed(valid_rows)], columns=EXPECTED_COLUMNS
     ).to_csv(csv_path, index=False)
@@ -1488,6 +1710,7 @@ def test_plot_reloads_csv_and_draws_pair_scatter_and_binned_median(
     monkeypatch.setattr(experiment.pd, "read_csv", read_csv_spy)
     real_subplots = experiment.plt.subplots
     captured: dict[str, object] = {}
+    savefig_calls: list[dict[str, object]] = []
 
     def subplots_spy(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
         figure, axis = real_subplots(*args, **kwargs)
@@ -1495,7 +1718,7 @@ def test_plot_reloads_csv_and_draws_pair_scatter_and_binned_median(
         real_tight_layout = figure.tight_layout
 
         def savefig_spy(*save_args: object, **save_kwargs: object) -> object:
-            captured["savefig_kwargs"] = dict(save_kwargs)
+            savefig_calls.append(dict(save_kwargs))
             return real_savefig(*save_args, **save_kwargs)
 
         def tight_layout_spy(*layout_args: object, **layout_kwargs: object) -> object:
@@ -1516,10 +1739,12 @@ def test_plot_reloads_csv_and_draws_pair_scatter_and_binned_median(
         return figure, axis
 
     monkeypatch.setattr(experiment.plt, "subplots", subplots_spy)
-    experiment.plot_saved_results(csv_path, figure_path)
+    experiment.plot_saved_results(csv_path, tmp_path)
 
     assert reads == [csv_path]
-    assert figure_path.is_file()
+    png_path, pdf_path = experiment._figure_paths(tmp_path)
+    assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
     figure = captured["figure"]
     axis = captured["axis"]
     np.testing.assert_allclose(figure.get_size_inches(), [4.0, 4.0])
@@ -1611,11 +1836,19 @@ def test_plot_reloads_csv_and_draws_pair_scatter_and_binned_median(
     figure.canvas.draw()
     np.testing.assert_allclose(colorbar_mesh.get_facecolors()[:, 3], 1.0)
     assert captured["tight_layout_calls"] == 1
-    assert captured["savefig_kwargs"] == {
-        "format": "pdf",
-        "bbox_inches": "tight",
-        "pad_inches": 0.05,
-    }
+    assert savefig_calls == [
+        {
+            "format": "png",
+            "bbox_inches": "tight",
+            "pad_inches": 0.05,
+            "dpi": 300,
+        },
+        {
+            "format": "pdf",
+            "bbox_inches": "tight",
+            "pad_inches": 0.05,
+        },
+    ]
 
 
 def test_plot_reduces_bins_and_warns_when_two_bins_are_impossible(
@@ -1624,7 +1857,6 @@ def test_plot_reduces_bins_and_warns_when_two_bins_are_impossible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     csv_path = tmp_path / experiment.CSV_NAME
-    figure_path = tmp_path / experiment.FIGURE_NAME
     pd.DataFrame(
         [
             _row(
@@ -1646,12 +1878,74 @@ def test_plot_reduces_bins_and_warns_when_two_bins_are_impossible(
         return figure, axis
 
     monkeypatch.setattr(experiment.plt, "subplots", subplots_spy)
-    experiment.plot_saved_results(csv_path, figure_path)
+    experiment.plot_saved_results(csv_path, tmp_path)
 
     axis = captured["axis"]
     assert not [line for line in axis.lines if line.get_label() == "Binned median"]
     captured_output = capsys.readouterr()
     assert "warning" in (captured_output.out + captured_output.err).lower()
+
+
+def test_failed_figure_staging_preserves_both_outputs_and_removes_staged_files(
+    tmp_path: Path,
+) -> None:
+    destinations = experiment._figure_paths(tmp_path)
+    original_contents = (b"original PNG", b"original PDF")
+    for destination, contents in zip(destinations, original_contents, strict=True):
+        destination.write_bytes(contents)
+
+    def fail_on_pdf(destination: Path, **options: object) -> None:
+        Path(destination).write_bytes(b"staged figure")
+        if options["format"] == "pdf":
+            raise KeyboardInterrupt("synthetic PDF failure")
+
+    figure = SimpleNamespace(savefig=fail_on_pdf)
+    with pytest.raises(KeyboardInterrupt, match="synthetic PDF failure"):
+        experiment._atomic_save_figures(figure, destinations)
+
+    assert tuple(destination.read_bytes() for destination in destinations) == (
+        original_contents
+    )
+    assert set(tmp_path.iterdir()) == set(destinations)
+
+
+def test_partial_figure_install_rolls_back_both_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destinations = experiment._figure_paths(tmp_path)
+    original_contents = (b"original PNG", b"original PDF")
+    for destination, contents in zip(destinations, original_contents, strict=True):
+        destination.write_bytes(contents)
+
+    def save_figure(destination: Path, **options: object) -> None:
+        Path(destination).write_bytes(f"new {options['format']}".encode())
+
+    real_replace = experiment.os.replace
+    failed = False
+
+    def fail_second_install(source: Path, destination: Path) -> None:
+        nonlocal failed
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            not failed
+            and destination_path == destinations[1]
+            and source_path.name.startswith(f".{destinations[1].name}.")
+        ):
+            failed = True
+            raise OSError("synthetic second-install failure")
+        real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(experiment.os, "replace", fail_second_install)
+    figure = SimpleNamespace(savefig=save_figure)
+    with pytest.raises(OSError, match="synthetic second-install failure"):
+        experiment._atomic_save_figures(figure, destinations)
+
+    assert tuple(destination.read_bytes() for destination in destinations) == (
+        original_contents
+    )
+    assert set(tmp_path.iterdir()) == set(destinations)
 
 
 def test_plot_uses_saved_csv_without_loading_diffusion_model(
@@ -1688,6 +1982,17 @@ def test_plot_uses_saved_csv_without_loading_diffusion_model(
     monkeypatch.setattr(experiment, "WebsterDataset", forbidden)
     monkeypatch.setattr(experiment, "run_experiment", forbidden)
     monkeypatch.setattr(experiment, "resolve_devices", forbidden)
+    monkeypatch.setattr(
+        experiment,
+        "_load_frozen_selection",
+        lambda *_args, **kwargs: _selection(
+            included=("0", "1"),
+            strategy=str(kwargs["selection_strategy"]),
+            selection_hash=(
+                SELECTION_HASH if kwargs["selection_strategy"] == "gmm" else "d" * 64
+            ),
+        ),
+    )
     with pytest.raises(
         experiment.ExperimentError,
         match="saved CSV differs from requested configuration at: loss_seed",
@@ -1703,6 +2008,28 @@ def test_plot_uses_saved_csv_without_loading_diffusion_model(
                 "124",
                 "--device",
                 "cuda:999",
+                "--output-dir",
+                str(output),
+            ]
+        )
+    with pytest.raises(
+        experiment.ExperimentError,
+        match=(
+            "saved CSV differs from requested configuration at: "
+            "selection_strategy, selection_hash"
+        ),
+    ):
+        experiment.main(
+            [
+                "--plot",
+                "--selection-strategy",
+                "spearman",
+                "--N",
+                "2",
+                "--num-loss-seeds",
+                "2",
+                "--loss-seed",
+                "123",
                 "--output-dir",
                 str(output),
             ]
@@ -1728,7 +2055,7 @@ def test_plot_uses_saved_csv_without_loading_diffusion_model(
     assert csv_path.read_bytes() == original_csv
     assert {path.name for path in output.iterdir()} == {
         experiment.CSV_NAME,
-        experiment.FIGURE_NAME,
+        *experiment.FIGURE_FILENAMES,
     }
 
 
@@ -1773,7 +2100,6 @@ def test_source_has_no_previous_experiment_or_reverse_trajectory_logic() -> None
     assert not called_names.intersection(
         {"sample_trajectory", "run_batched_sampling", "sample_diffusion"}
     )
-    assert ".png" not in lowered
     assert ".svg" not in lowered
     assert "generation_seed" not in experiment.CSV_COLUMNS
     assert "seed_sscd" not in experiment.CSV_COLUMNS

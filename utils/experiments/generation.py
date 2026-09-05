@@ -33,6 +33,7 @@ from utils.common.io import (
     atomic_write_text,
     canonical_hash,
     file_sha256,
+    read_json,
     safe_torch_load,
 )
 from utils.models.devices import (
@@ -47,9 +48,11 @@ from .cache import (
     GENERATION_SCHEMA_VERSION,
     GENERATION_SELECTION_POLICY,
     SAMPLER_CONTRACT_VERSION,
+    GenerationCacheError,
     GenerationPaths,
     estimate_disk_space,
     generation_paths,
+    list_completed_records,
     publish_completion_marker,
     quarantine_record,
     require_generation_run,
@@ -102,6 +105,7 @@ class GenerationResult:
     summary_path: Path
     completed_rows: int
     failed_rows: int
+    complete_cache_hit: bool
 
     @property
     def exit_code(self) -> int:
@@ -137,6 +141,7 @@ def generate_webster_trajectories(
     seed_start: int,
     downscale: int,
     device: str | torch.device,
+    overwrite: bool,
 ) -> GenerationResult:
     """Generate every available pair, sharding whole pairs across devices."""
 
@@ -156,10 +161,8 @@ def generate_webster_trajectories(
         downscale,
         spec.resolution,
     )
-    try:
-        devices = resolve_devices(device)
-    except DeviceSelectionError as error:
-        raise GenerationError(str(error)) from error
+    if not isinstance(overwrite, bool):
+        raise GenerationError("overwrite must be a boolean")
     seed_values = tuple(range(first_seed, first_seed + seed_count))
     paths = generation_paths(
         root,
@@ -188,19 +191,41 @@ def generate_webster_trajectories(
             steps,
             seed_values,
         )
+        if not overwrite:
+            cached = _complete_cache_result(
+                paths,
+                dataset,
+                metadata_rows,
+                existing_config,
+                project_root=root,
+                resolution=spec.resolution,
+                downscale=divisor,
+                num_seeds=seed_count,
+            )
+            if cached is not None:
+                return cached
         existing_config = _update_preview_configuration(
             paths,
             existing_config,
             resolution=spec.resolution,
             downscale=divisor,
         )
+    try:
+        devices = resolve_devices(device)
+    except DeviceSelectionError as error:
+        raise GenerationError(str(error)) from error
     missing_markers = sum(
         not paths.record_path(row["original_index"]).is_file() for row in metadata_rows
     )
+    remaining_records = missing_markers
+    if overwrite:
+        remaining_records = min(
+            len(entries), worker_count_for_tasks(devices, len(entries))
+        )
     latent_side = spec.resolution // 8
     disk_estimate = estimate_disk_space(
         paths,
-        remaining_records=missing_markers,
+        remaining_records=remaining_records,
         num_seeds=seed_count,
         num_inference_steps=steps,
         latent_shape=(4, latent_side, latent_side),
@@ -288,6 +313,7 @@ def generate_webster_trajectories(
                     str(active_devices[worker_index]),
                     worker_index,
                     worker_count,
+                    overwrite,
                 )
                 for worker_index in range(1, worker_count)
             ]
@@ -307,6 +333,7 @@ def generate_webster_trajectories(
                 worker_index=0,
                 worker_count=worker_count,
                 runtime=parent_runtime,
+                overwrite=overwrite,
             )
             shard_results = [local, *(future.result() for future in futures)]
     else:
@@ -326,6 +353,7 @@ def generate_webster_trajectories(
             worker_index=0,
             worker_count=1,
             runtime=parent_runtime,
+            overwrite=overwrite,
         )
         shard_results = [local]
 
@@ -418,10 +446,320 @@ def generate_webster_trajectories(
             "execution_devices": [str(selected) for selected in active_devices],
             "worker_count": worker_count,
             "device_shards": device_shards,
+            "overwrite": overwrite,
         }
     )
     atomic_write_json(paths.summary_json, summary)
-    return GenerationResult(paths.summary_json, len(manifest), len(failed_rows))
+    return GenerationResult(paths.summary_json, len(manifest), len(failed_rows), False)
+
+
+def _complete_cache_result(
+    paths: GenerationPaths,
+    dataset: Any,
+    metadata_rows: Sequence[Mapping[str, object]],
+    configuration: Mapping[str, object],
+    *,
+    project_root: Path,
+    resolution: int,
+    downscale: int,
+    num_seeds: int,
+) -> GenerationResult | None:
+    """Return a cheap cache hit only for one fully published exact population."""
+
+    desired_preview = _preview_configuration(resolution, downscale)
+    desired_preview_hash = canonical_hash(desired_preview)
+    if (
+        configuration.get("preview_config") != desired_preview
+        or configuration.get("preview_config_hash") != desired_preview_hash
+    ):
+        return None
+    summary_path = paths.summary_json
+    aggregate_paths = (
+        paths.manifest_csv,
+        paths.manifest_parquet,
+        paths.skipped_csv,
+        paths.failed_csv,
+    )
+    try:
+        for path in (summary_path, paths.schedule, *aggregate_paths):
+            if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+                return None
+        summary_stat = summary_path.stat()
+        for path in (paths.schedule, *aggregate_paths):
+            artifact_stat = path.stat()
+            if (
+                artifact_stat.st_mtime_ns > summary_stat.st_mtime_ns
+                or artifact_stat.st_ctime_ns > summary_stat.st_ctime_ns
+            ):
+                return None
+    except OSError:
+        return None
+    try:
+        summary = read_json(summary_path)
+        records = list_completed_records(paths)
+        expected_by_index: dict[str, Mapping[str, object]] = {}
+        expected_rows: set[int] = set()
+        for metadata in metadata_rows:
+            index_value = metadata.get("original_index")
+            row_value = metadata.get("source_row_number")
+            if (
+                isinstance(index_value, bool)
+                or not isinstance(index_value, (str, int))
+                or not str(index_value)
+                or isinstance(row_value, bool)
+                or not isinstance(row_value, int)
+                or row_value < 0
+            ):
+                return None
+            index = str(index_value)
+            if index in expected_by_index or row_value in expected_rows:
+                return None
+            expected_by_index[index] = metadata
+            expected_rows.add(row_value)
+    except (CacheIOError, GenerationCacheError, OSError, TypeError, ValueError):
+        return None
+
+    available_rows = len(metadata_rows)
+    try:
+        dataset_rows = len(dataset)
+        model_manifest_rows = dataset.total_manifest_rows
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if dataset_rows != available_rows:
+        return None
+    expected_summary = {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "outcome": "completed",
+        "model_manifest_rows": model_manifest_rows,
+        "available_paired_image_rows": available_rows,
+        "selected_rows": available_rows,
+        "completed_rows": available_rows,
+        "skipped_rows": 0,
+        "failed_rows": 0,
+        "total_trajectories": available_rows * num_seeds,
+        "selection_policy": GENERATION_SELECTION_POLICY,
+        "scientific_config_hash": configuration.get("scientific_config_hash"),
+        "preview_config_hash": desired_preview_hash,
+    }
+    if any(summary.get(key) != value for key, value in expected_summary.items()):
+        return None
+    if len(records) != available_rows:
+        return None
+    observed_indices = {record.original_index for record in records}
+    if observed_indices != set(expected_by_index):
+        return None
+
+    science_hash = configuration.get("scientific_config_hash")
+    science = configuration.get("scientific_config")
+    if not isinstance(science_hash, str) or not isinstance(science, Mapping):
+        return None
+    for record in records:
+        metadata = expected_by_index[record.original_index]
+        if record.source_row_number != metadata.get("source_row_number"):
+            return None
+        try:
+            if not _complete_marker_matches_run(
+                record.original_index,
+                record.metadata,
+                metadata,
+                science,
+                science_hash,
+                downscale,
+                project_root,
+            ):
+                return None
+            validation = validate_generation_record(
+                paths,
+                record.original_index,
+                expected_scientific_hash=science_hash,
+                expected_record_identity=metadata,
+                load_tensors=False,
+                verify_file_hashes=False,
+            )
+            if not validation.valid or not _preview_matches_downscale(
+                validation.metadata, downscale
+            ):
+                return None
+            marker_stat = record.marker_path.stat()
+            if (
+                marker_stat.st_size <= 0
+                or marker_stat.st_mtime_ns > summary_stat.st_mtime_ns
+                or marker_stat.st_ctime_ns > summary_stat.st_ctime_ns
+            ):
+                return None
+            artifacts = (
+                paths.latent_path(record.original_index),
+                paths.noise_prediction_path(record.original_index),
+                paths.target_latent_path(record.original_index),
+                paths.image_path(record.original_index),
+            )
+            for path in artifacts:
+                if path.is_symlink() or not path.is_file():
+                    return None
+                artifact_stat = path.stat()
+                if (
+                    artifact_stat.st_size <= 0
+                    or artifact_stat.st_mtime_ns > marker_stat.st_mtime_ns
+                    or artifact_stat.st_ctime_ns > marker_stat.st_ctime_ns
+                ):
+                    return None
+            pending = paths.pending_record_path(record.original_index)
+            if pending.exists() or pending.is_symlink():
+                return None
+        except (GenerationCacheError, OSError, TypeError, ValueError):
+            return None
+    return GenerationResult(summary_path, available_rows, 0, True)
+
+
+def _complete_marker_matches_run(
+    index: str,
+    metadata: Mapping[str, object],
+    expected_record: Mapping[str, object],
+    science: Mapping[str, object],
+    science_hash: str,
+    downscale: int,
+    project_root: Path,
+) -> bool:
+    """Check the complete marker contract without opening large tensors."""
+
+    scheduler = science.get("scheduler")
+    seeds = science.get("seeds")
+    latent_shape = science.get("latent_shape")
+    steps = science.get("num_inference_steps")
+    seed_count = science.get("num_seeds")
+    inference_dtype = science.get("inference_dtype")
+    if (
+        not isinstance(scheduler, Mapping)
+        or not isinstance(seeds, list)
+        or not seeds
+        or any(
+            isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
+            for seed in seeds
+        )
+        or not isinstance(latent_shape, list)
+        or len(latent_shape) != 3
+        or any(
+            isinstance(dimension, bool)
+            or not isinstance(dimension, int)
+            or dimension <= 0
+            for dimension in latent_shape
+        )
+        or isinstance(steps, bool)
+        or not isinstance(steps, int)
+        or steps <= 0
+        or isinstance(seed_count, bool)
+        or not isinstance(seed_count, int)
+        or seed_count != len(seeds)
+        or not isinstance(inference_dtype, str)
+        or not inference_dtype
+    ):
+        return False
+    scientific_fields = {
+        "model_cli_name": science.get("model_cli_name"),
+        "dataset_model": science.get("dataset_model"),
+        "model_id": science.get("model_id"),
+        "model_revision": science.get("model_revision"),
+        "vae_id": science.get("vae_id"),
+        "vae_revision": science.get("vae_revision"),
+        "scheduler_name": scheduler.get("name"),
+        "scheduler_class": scheduler.get("class"),
+        "guidance_scale": science.get("guidance_scale"),
+        "num_inference_steps": steps,
+        "num_seeds": seed_count,
+        "seeds": seeds,
+        "latent_shape": latent_shape,
+        "inference_dtype": inference_dtype,
+        "native_prediction_type": science.get("native_prediction_type"),
+        "stored_prediction_type": science.get("stored_prediction_type"),
+        "trajectory_order": science.get("trajectory_order"),
+        "scientific_config_hash": science_hash,
+        "target_latent_definition": science.get("target_latent_definition"),
+        "target_preprocessing": science.get("target_preprocessing"),
+    }
+    required_strings = (
+        "model_cli_name",
+        "dataset_model",
+        "model_id",
+        "model_revision",
+        "vae_id",
+        "vae_revision",
+        "scheduler_name",
+        "scheduler_class",
+        "native_prediction_type",
+        "stored_prediction_type",
+        "trajectory_order",
+        "target_latent_definition",
+    )
+    if any(
+        not isinstance(scientific_fields[key], str) or not scientific_fields[key]
+        for key in required_strings
+    ) or not isinstance(scientific_fields["target_preprocessing"], Mapping):
+        return False
+    observed_scientific = {key: metadata.get(key) for key in scientific_fields}
+    if canonical_hash(observed_scientific) != canonical_hash(scientific_fields):
+        return False
+
+    expected_shapes = {
+        "latent": [seed_count, steps + 1, *latent_shape],
+        "unconditional_noise_predictions": [seed_count, steps, *latent_shape],
+        "conditional_noise_predictions": [seed_count, steps, *latent_shape],
+        "target_latent": latent_shape,
+    }
+    expected_dtypes = {
+        "latent": inference_dtype,
+        "unconditional_noise_predictions": inference_dtype,
+        "conditional_noise_predictions": inference_dtype,
+        "target_latent": "float32",
+    }
+    expected_paths = {
+        "latent_path": f"latent/{index}.pt",
+        "noise_prediction_path": f"noise_pred/{index}.pt",
+        "target_latent_path": f"target_latent/{index}.pt",
+        "preview_image_path": f"image/{index}.png",
+        "schedule_path": "schedule.pt",
+    }
+    image_relative = expected_record.get("image_path")
+    target_image_hash = metadata.get("target_image_sha256")
+    if not isinstance(image_relative, str) or not image_relative:
+        return False
+    expected_target_image_path = str(
+        (project_root / "data" / "webster" / image_relative).resolve()
+    )
+    if (
+        canonical_hash(metadata.get("tensor_shapes")) != canonical_hash(expected_shapes)
+        or canonical_hash(metadata.get("tensor_dtypes"))
+        != canonical_hash(expected_dtypes)
+        or any(metadata.get(key) != value for key, value in expected_paths.items())
+        or metadata.get("target_image_path") != expected_target_image_path
+        or not _is_sha256_text(target_image_hash)
+        or target_image_hash != expected_record.get("target_image_sha256")
+        or metadata.get("preview_downscale") != downscale
+        or metadata.get("preview_status") != "complete"
+    ):
+        return False
+    tensor_hashes = metadata.get("tensor_file_sha256")
+    expected_hash_names = {"latent", "noise_prediction", "target_latent"}
+    if (
+        not isinstance(tensor_hashes, Mapping)
+        or set(tensor_hashes) != expected_hash_names
+    ):
+        return False
+    if any(not _is_sha256_text(tensor_hashes[name]) for name in expected_hash_names):
+        return False
+    if not _is_sha256_text(metadata.get("preview_image_sha256")):
+        return False
+    return all(
+        isinstance(metadata.get(key), str) and bool(metadata.get(key))
+        for key in ("created_at", "completed_at")
+    )
+
+
+def _is_sha256_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _target_group_shards(
@@ -612,6 +950,7 @@ def _generation_subprocess(
     device: str,
     worker_index: int,
     worker_count: int,
+    overwrite: bool,
 ) -> _GenerationShardResult:
     """Load one model replica and process one disjoint device shard."""
 
@@ -641,6 +980,7 @@ def _generation_subprocess(
         device=torch.device(device),
         worker_index=worker_index,
         worker_count=worker_count,
+        overwrite=overwrite,
     )
     return result
 
@@ -661,6 +1001,7 @@ def _run_generation_shard(
     device: torch.device,
     worker_index: int,
     worker_count: int,
+    overwrite: bool,
     runtime: _Runtime | None = None,
 ) -> tuple[_GenerationShardResult, _Runtime | None]:
     """Process one stable pair shard; write no run-level aggregate files."""
@@ -727,16 +1068,18 @@ def _run_generation_shard(
                 expected_scientific_hash=science_hash,
                 expected_record_identity=metadata,
                 load_tensors=False,
+                verify_file_hashes=not overwrite,
             )
             preview_matches = _preview_matches_downscale(validation.metadata, downscale)
-            if validation.valid and preview_matches:
+            if not overwrite and validation.valid and preview_matches:
                 status_by_index[index] = "resumed"
                 manifest_rows.append(
                     _manifest_row(root, paths, validation.metadata or {}, "resumed")
                 )
                 continue
-            if validation.valid or _preview_only_invalid(
-                validation.errors, validation.metadata
+            if not overwrite and (
+                validation.valid
+                or _preview_only_invalid(validation.errors, validation.metadata)
             ):
                 if local_config is None:
                     raise GenerationError("preview recovery has no run configuration")
@@ -780,15 +1123,24 @@ def _run_generation_shard(
                     _manifest_row(root, paths, repaired.metadata or {}, "resumed")
                 )
                 continue
-            if validation.metadata is not None or any(
-                path.exists() or path.is_symlink()
-                for path in _record_paths(paths, index)
+            if not overwrite and (
+                validation.metadata is not None
+                or any(
+                    path.exists() or path.is_symlink()
+                    for path in _record_paths(paths, index)
+                )
             ):
                 quarantine_record(paths, index)
             item = dataset[position]
             image = item.get("image")
             prompt = item.get("prompt")
             if not isinstance(image, Image.Image) or not isinstance(prompt, str):
+                if overwrite:
+                    quarantine_record(paths, index)
+                    raise GenerationError(
+                        "prompt or target image unavailable during overwrite; "
+                        "the previous completion record was quarantined"
+                    )
                 skipped_rows.append(
                     _skip_row(metadata, "prompt or target image unavailable")
                 )
@@ -846,6 +1198,7 @@ def _run_generation_shard(
                 unconditional_predictions=batch.unconditional_noise_predictions,
                 conditional_predictions=batch.conditional_noise_predictions,
                 target_latent=target_latent,
+                overwrite=overwrite,
             )
             record_progress.set_postfix_str(f"id={index} phase=preview")
             with tqdm(
@@ -880,7 +1233,7 @@ def _run_generation_shard(
                 tensor_hashes,
                 preview_hash,
             )
-            publish_completion_marker(paths, index, record)
+            publish_completion_marker(paths, index, record, overwrite=overwrite)
             record_progress.set_postfix_str(f"id={index} phase=validating-output")
             completed = validate_generation_record(
                 paths,

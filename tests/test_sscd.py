@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ import pytest
 import torch
 from PIL import Image
 
+from scripts import sscd as sscd_script
 from utils.common.cli import MAX_SEED
 from utils.common.io import (
     atomic_torch_save,
@@ -20,6 +22,7 @@ from utils.common.io import (
     canonical_hash,
     file_sha256,
     read_json,
+    safe_torch_load,
 )
 from utils.experiments import sscd as sscd_module
 from utils.experiments.cache import (
@@ -53,6 +56,7 @@ from utils.metrics.sscd import (
     sscd_preprocessing_policy,
     validate_sscd_scores,
 )
+from utils.models import latent as latent_module
 
 
 def test_sscd_preprocessing_is_fixed_full_resolution_float32() -> None:
@@ -67,6 +71,36 @@ def test_sscd_preprocessing_is_fixed_full_resolution_float32() -> None:
     assert sscd_preprocessing_policy()["augmentation"] is False
     assert len(sscd_preprocessing_hash()) == 64
     assert SSCD_SELECTION_POLICY == "completed_generation_cache_records"
+
+
+def test_sscd_parser_defaults_to_cache_reuse_and_accepts_overwrite() -> None:
+    parser = sscd_script.build_parser()
+
+    assert parser.parse_args([]).overwrite is False
+    assert parser.parse_args(["--overwrite"]).overwrite is True
+
+
+def test_sscd_entrypoint_reports_complete_cache_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    summary_path = tmp_path / "sscd_summary.json"
+    monkeypatch.setattr(sscd_script, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        sscd_module,
+        "run_sscd",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            summary_path=summary_path,
+            complete_cache_hit=True,
+            exit_code=0,
+        ),
+    )
+
+    assert sscd_script.main([]) == 0
+    output = capsys.readouterr().out
+    assert f"Summary: {summary_path}" in output
+    assert "SSCD scoring was skipped" in output
 
 
 def test_checkpoint_download_reports_streamed_byte_progress(
@@ -150,15 +184,37 @@ def test_sscd_rejects_an_out_of_range_seed_block_before_cache_lookup(
             num_seeds=2,
             seed_start=MAX_SEED,
             device="cpu",
+            overwrite=False,
         )
 
     assert not (tmp_path / "logs").exists()
 
 
-def test_run_sscd_requires_seed_start_and_device() -> None:
+def test_run_sscd_requires_seed_start_device_and_overwrite() -> None:
     parameters = inspect.signature(sscd_module.run_sscd).parameters
     assert parameters["seed_start"].default is inspect.Parameter.empty
     assert parameters["device"].default is inspect.Parameter.empty
+    assert parameters["overwrite"].default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize("overwrite", (None, 0, 1, "false"))
+def test_run_sscd_rejects_non_boolean_overwrite_before_cache_lookup(
+    tmp_path: Path, overwrite: object
+) -> None:
+    with pytest.raises(SSCDEvaluationError, match="overwrite must be a boolean"):
+        sscd_module.run_sscd(
+            tmp_path,
+            model_name="sdv1",
+            scheduler_name="ddim",
+            guidance_scale=7.5,
+            num_inference_steps=50,
+            num_seeds=1,
+            seed_start=0,
+            device="cpu",
+            overwrite=overwrite,  # type: ignore[arg-type]
+        )
+
+    assert not (tmp_path / "logs").exists()
 
 
 @pytest.mark.parametrize(
@@ -236,6 +292,7 @@ def test_sscd_rejects_empty_generation_before_checkpoint_download(
             num_seeds=1,
             seed_start=0,
             device="cpu",
+            overwrite=False,
         )
 
     assert not checkpoint_calls
@@ -296,10 +353,12 @@ def test_missing_records_use_one_stable_spawned_shard_per_cuda_device(
         selected = arguments[7]
         worker_index = arguments[8]
         worker_count = arguments[9]
+        overwrite = arguments[10]
         assert isinstance(shard, tuple)
         assert isinstance(selected, torch.device)
         assert isinstance(worker_index, int)
         assert worker_count == 2
+        assert overwrite is True
         indices = tuple(record.original_index for record in shard)
         observed_shards.append((str(selected), indices, worker_index))
         rows = tuple(
@@ -328,6 +387,7 @@ def test_missing_records_use_one_stable_spawned_shard_per_cuda_device(
         {},
         (0, 1),
         (torch.device("cuda:0"), torch.device("cuda:1")),
+        True,
     )
 
     assert observed_shards == [
@@ -418,6 +478,7 @@ def test_sscd_shard_continues_after_one_record_failure(
         torch.device("cpu"),
         0,
         1,
+        False,
     )
 
     assert loaded_devices == [torch.device("cpu")]
@@ -476,6 +537,7 @@ def test_sscd_shard_does_not_retry_a_failed_runtime_load_for_every_record(
         torch.device("cpu"),
         0,
         1,
+        False,
     )
 
     assert runtime_calls == 1
@@ -509,6 +571,8 @@ def test_cached_scores_are_reused_only_with_matching_provenance(
         generation.record_path("9"),
         {
             "record_id": "sdv1-0004",
+            "scientific_config_hash": "a" * 64,
+            "target_image_sha256": "b" * 64,
             "tensor_file_sha256": {"latent": latent_hash},
         },
     )
@@ -527,6 +591,12 @@ def test_cached_scores_are_reused_only_with_matching_provenance(
         "sscd_configuration_hash": configuration_hash,
         "generation_record_sha256": file_sha256(generation.record_path("9")),
         "generation_latent_sha256": latent_hash,
+        "generation_scientific_config_hash": "a" * 64,
+        "target_image_sha256": "b" * 64,
+        "score_shape": [2],
+        "score_dtype": "float32",
+        "terminal_latent_index": -1,
+        "similarity": SCORE_DEFINITION,
         "score_sha256": score_hash,
     }
     atomic_write_json(paths.marker_path("9"), marker)
@@ -544,43 +614,348 @@ def test_cached_scores_are_reused_only_with_matching_provenance(
     monkeypatch.setattr(sscd_module, "file_sha256", tracked_file_sha256)
     reused = _load_cached_scores(paths, completed, configuration_hash, seed_values)
     torch.testing.assert_close(reused, scores)
-    assert generation.record_path("9") in hashed_paths
     assert paths.score_path("9") in hashed_paths
+    assert generation.record_path("9") not in hashed_paths
     assert generation.latent_path("9") not in hashed_paths
 
-    generation_marker_bytes = generation.record_path("9").read_bytes()
-    atomic_write_json(generation.record_path("9"), {"record": "changed"})
-    with pytest.raises(SSCDEvaluationError, match="generation_record_sha256 differs"):
-        _load_cached_scores(paths, completed, configuration_hash, seed_values)
-    generation.record_path("9").write_bytes(generation_marker_bytes)
+    assert not paths.stale_directory.exists()
+
+    atomic_write_json(
+        generation.record_path("9"),
+        {"record": "stable", "preview_downscale": 8},
+    )
+    reused_after_preview_change = _load_cached_scores(
+        paths, completed, configuration_hash, seed_values
+    )
+    torch.testing.assert_close(reused_after_preview_change, scores)
+    assert not paths.stale_directory.exists()
 
     score_bytes = paths.score_path("9").read_bytes()
-    paths.score_path("9").write_bytes(b"tampered score")
-    with pytest.raises(SSCDEvaluationError, match="cached SSCD hash differs"):
-        _load_cached_scores(paths, completed, configuration_hash, seed_values)
-    paths.score_path("9").write_bytes(score_bytes)
+    marker_bytes = paths.marker_path("9").read_bytes()
+    completed.metadata["target_image_sha256"] = "f" * 64
+    assert (
+        _load_cached_scores(paths, completed, configuration_hash, seed_values) is None
+    )
+    assert not paths.score_path("9").exists()
+    assert not paths.marker_path("9").exists()
+    bundles = tuple(paths.stale_directory.iterdir())
+    assert len(bundles) == 1
+    assert bundles[0].is_dir()
+    assert (bundles[0] / "9.pt").read_bytes() == score_bytes
+    assert (bundles[0] / "9.json").read_bytes() == marker_bytes
 
-    completed.metadata["tensor_file_sha256"]["latent"] = "f" * 64
-    with pytest.raises(SSCDEvaluationError, match="generation_latent_sha256 differs"):
-        _load_cached_scores(paths, completed, configuration_hash, seed_values)
-    completed.metadata["tensor_file_sha256"]["latent"] = latent_hash
 
-    marker["sscd_configuration_hash"] = "d" * 64
-    atomic_write_json(paths.marker_path("9"), marker)
-    with pytest.raises(SSCDEvaluationError, match="configuration_hash differs"):
-        _load_cached_scores(paths, completed, configuration_hash, seed_values)
+def test_score_first_marker_last_crash_is_quarantined_and_can_resume(
+    tmp_path: Path,
+) -> None:
+    generation = GenerationPaths(tmp_path / "logs" / "synthetic")
+    generation.create()
+    index = "9"
+    latent_hash = atomic_torch_save(
+        torch.zeros((2, 2, 1, 1, 1), dtype=torch.float32),
+        generation.latent_path(index),
+    )
+    atomic_write_json(generation.record_path(index), {"record": "stable"})
+    record = CompletedGenerationRecord(
+        index,
+        4,
+        generation.record_path(index),
+        {
+            "record_id": "sdv1-0004",
+            "scientific_config_hash": "a" * 64,
+            "target_image_sha256": "b" * 64,
+            "tensor_file_sha256": {"latent": latent_hash},
+        },
+    )
+    paths = SSCDPaths(generation.run_directory)
+    paths.create()
+    configuration_hash = "c" * 64
+    original_scores = torch.tensor([0.1, 0.2], dtype=torch.float32)
+    original_score_hash = atomic_torch_save(original_scores, paths.score_path(index))
+    marker = {
+        "schema_version": SSCD_SCHEMA_VERSION,
+        "original_index": index,
+        "record_id": "sdv1-0004",
+        "source_row_number": 4,
+        "num_seeds": 2,
+        "seeds": [0, 1],
+        "sscd_configuration_hash": configuration_hash,
+        "generation_record_sha256": file_sha256(generation.record_path(index)),
+        "generation_latent_sha256": latent_hash,
+        "generation_scientific_config_hash": "a" * 64,
+        "target_image_sha256": "b" * 64,
+        "score_shape": [2],
+        "score_dtype": "float32",
+        "terminal_latent_index": -1,
+        "similarity": SCORE_DEFINITION,
+        "score_sha256": original_score_hash,
+    }
+    atomic_write_json(paths.marker_path(index), marker)
+    old_marker_bytes = paths.marker_path(index).read_bytes()
+
+    interrupted_scores = torch.tensor([0.7, 0.9], dtype=torch.float32)
+    atomic_torch_save(interrupted_scores, paths.score_path(index))
+    interrupted_score_bytes = paths.score_path(index).read_bytes()
+
+    assert _load_cached_scores(paths, record, configuration_hash, (0, 1)) is None
+    assert not paths.score_path(index).exists()
+    assert not paths.marker_path(index).exists()
+    bundles = tuple(paths.stale_directory.iterdir())
+    assert len(bundles) == 1
+    assert (bundles[0] / f"{index}.pt").read_bytes() == interrupted_score_bytes
+    assert (bundles[0] / f"{index}.json").read_bytes() == old_marker_bytes
+
+    recomputed_scores = torch.tensor([0.3, 0.4], dtype=torch.float32)
+    recomputed_hash = atomic_torch_save(recomputed_scores, paths.score_path(index))
+    atomic_write_json(
+        paths.marker_path(index),
+        {**marker, "score_sha256": recomputed_hash},
+    )
+    resumed = _load_cached_scores(paths, record, configuration_hash, (0, 1))
+    torch.testing.assert_close(resumed, recomputed_scores)
+    assert tuple(paths.stale_directory.iterdir()) == bundles
+
+
+@pytest.mark.parametrize("entry_kind", ("symlink", "directory"))
+def test_sscd_cache_recovery_rejects_unsafe_entries(
+    tmp_path: Path, entry_kind: str
+) -> None:
+    generation = GenerationPaths(tmp_path / "logs" / "synthetic")
+    paths = SSCDPaths(generation.run_directory)
+    paths.create()
+    score_path = paths.score_path("9")
+    if entry_kind == "symlink":
+        score_path.symlink_to(tmp_path / "missing-score.pt")
+    else:
+        score_path.mkdir()
+    record = CompletedGenerationRecord(
+        "9",
+        4,
+        generation.record_path("9"),
+        {"record_id": "sdv1-0004", "tensor_file_sha256": {"latent": "a" * 64}},
+    )
+
+    with pytest.raises(SSCDEvaluationError, match="unsafe SSCD score"):
+        _load_cached_scores(paths, record, "c" * 64, (0, 1))
+
+    assert score_path.is_symlink() if entry_kind == "symlink" else score_path.is_dir()
+    assert not paths.stale_directory.exists()
+
+
+def test_sscd_overwrite_validates_generation_and_forces_cached_score_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = GenerationPaths(tmp_path / "generation")
+    paths = SSCDPaths(generation.run_directory)
+    record = CompletedGenerationRecord(
+        "9",
+        4,
+        generation.record_path("9"),
+        {
+            "record_id": "sdv1-0004",
+            "source_row_number": 4,
+            "prompt_raw": "prompt",
+            "target_image_sha256": "a" * 64,
+            "num_seeds": 2,
+            "seeds": [0, 1],
+        },
+    )
+    validation_requests: list[dict[str, object]] = []
+
+    def validate_generation(
+        *_arguments: object,
+        **keywords: object,
+    ) -> SimpleNamespace:
+        validation_requests.append(dict(keywords))
+        return SimpleNamespace(valid=True, errors=())
+
+    monkeypatch.setattr(
+        sscd_module,
+        "validate_generation_record",
+        validate_generation,
+    )
+    monkeypatch.setattr(
+        sscd_module,
+        "_load_cached_scores",
+        lambda *_arguments: pytest.fail("overwrite must not load the old SSCD cache"),
+    )
+
+    scores = sscd_module._validated_cached_scores(
+        tmp_path,
+        generation,
+        paths,
+        record,
+        {"scientific_config_hash": "b" * 64},
+        "c" * 64,
+        (0, 1),
+        True,
+    )
+
+    assert scores is None
+    assert len(validation_requests) == 1
+    assert validation_requests[0]["tensor_names"] == ("latent",)
+    assert validation_requests[0]["require_preview"] is False
+    assert validation_requests[0]["verify_file_hashes"] is False
+
+
+def test_sscd_overwrite_atomically_replaces_score_and_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path.resolve()
+    generation = GenerationPaths(project / "logs" / "synthetic")
+    generation.create()
+    index = "9"
+    trajectory = torch.zeros((2, 2, 1, 1, 1), dtype=torch.float32)
+    latent_hash = atomic_torch_save(trajectory, generation.latent_path(index))
+    atomic_write_json(generation.record_path(index), {"record": "stable"})
+    target_path = project / "data" / "webster" / "sdv1" / "images" / f"{index}.png"
+    target_path.parent.mkdir(parents=True)
+    Image.new("RGB", (2, 2), (32, 64, 96)).save(target_path)
+    record = CompletedGenerationRecord(
+        index,
+        4,
+        generation.record_path(index),
+        {
+            "record_id": "sdv1-0004",
+            "prompt_raw": "prompt",
+            "webster_overfit_type": "TV",
+            "target_image_path": str(target_path),
+            "target_image_sha256": file_sha256(target_path),
+            "dataset_model": "sdv1",
+            "tensor_file_sha256": {"latent": latent_hash},
+            "scientific_config_hash": "a" * 64,
+        },
+    )
+    paths = SSCDPaths(generation.run_directory)
+    paths.create()
+    old_scores = torch.tensor([0.1, 0.2], dtype=torch.float32)
+    atomic_torch_save(old_scores, paths.score_path(index))
+    atomic_write_json(paths.marker_path(index), {"old": True})
+    old_score_bytes = paths.score_path(index).read_bytes()
+    old_marker_bytes = paths.marker_path(index).read_bytes()
+    configuration = {
+        "configuration_hash": "c" * 64,
+        "generation_scientific_config_hash": "a" * 64,
+        "num_seeds": 2,
+        "sscd_checkpoint_path": "checkpoints/sscd/checkpoint.pt",
+        "sscd_checkpoint_url": SSCD_CHECKPOINT_URL,
+        "sscd_checkpoint_sha256": "d" * 64,
+        "sscd_preprocessing": sscd_preprocessing_policy(),
+    }
+    runtime = SimpleNamespace(
+        vae=object(),
+        descriptor=object(),
+        device=torch.device("cpu"),
+    )
+    new_scores = torch.tensor([0.7, 0.9], dtype=torch.float32)
+    monkeypatch.setattr(
+        latent_module,
+        "decode_generated_latents",
+        lambda *_arguments: object(),
+    )
+    monkeypatch.setattr(
+        sscd_module,
+        "compute_sscd_scores",
+        lambda *_arguments: new_scores,
+    )
+
+    with pytest.raises(SSCDEvaluationError, match="refusing to overwrite"):
+        sscd_module._compute_record_scores(
+            project,
+            generation,
+            paths,
+            record,
+            runtime,
+            configuration,
+            (0, 1),
+            False,
+        )
+    assert paths.score_path(index).read_bytes() == old_score_bytes
+    assert paths.marker_path(index).read_bytes() == old_marker_bytes
+
+    real_atomic_torch_save = sscd_module.atomic_torch_save
+    real_atomic_write_json = sscd_module.atomic_write_json
+    publication_events: list[tuple[str, bool, bool]] = []
+
+    def tracked_torch_save(value: object, destination: str | Path) -> str:
+        path = Path(destination)
+        publication_events.append(
+            (
+                "score",
+                path.read_bytes() == old_score_bytes,
+                paths.marker_path(index).read_bytes() == old_marker_bytes,
+            )
+        )
+        return real_atomic_torch_save(value, destination)
+
+    def tracked_write_json(destination: str | Path, value: object) -> None:
+        path = Path(destination)
+        publication_events.append(
+            (
+                "marker",
+                paths.score_path(index).read_bytes() != old_score_bytes,
+                path.read_bytes() == old_marker_bytes,
+            )
+        )
+        real_atomic_write_json(destination, value)
+
+    monkeypatch.setattr(sscd_module, "atomic_torch_save", tracked_torch_save)
+    monkeypatch.setattr(sscd_module, "atomic_write_json", tracked_write_json)
+    observed = sscd_module._compute_record_scores(
+        project,
+        generation,
+        paths,
+        record,
+        runtime,
+        configuration,
+        (0, 1),
+        True,
+    )
+
+    torch.testing.assert_close(observed, new_scores)
+    stored = safe_torch_load(paths.score_path(index))
+    assert isinstance(stored, torch.Tensor)
+    torch.testing.assert_close(stored, new_scores)
+    marker = read_json(paths.marker_path(index))
+    assert marker["score_sha256"] == file_sha256(paths.score_path(index))
+    assert marker["generation_record_sha256"] == file_sha256(record.marker_path)
+    assert publication_events == [
+        ("score", True, True),
+        ("marker", True, True),
+    ]
+    assert not (paths.run_directory / "sscd_stale").exists()
+
+    summary = sscd_module._summary(
+        project,
+        generation,
+        paths,
+        pd.DataFrame({"original_index": [index]}),
+        [],
+        configuration,
+        1,
+        1,
+        datetime.now(UTC),
+        True,
+    )
+    assert summary["overwrite"] is True
+    assert summary["newly_computed_prompt_count"] == 1
+    assert summary["resumed_prompt_count"] == 0
 
 
 @pytest.mark.parametrize("seed_start", [0, 20])
+@pytest.mark.parametrize("changed_scientific_input", ["latent", "target"])
 def test_sscd_resumes_every_completed_prompt_without_loading_models(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     seed_start: int,
+    changed_scientific_input: str,
 ) -> None:
     rows = (
-        ("201", "sdv1-0000", 0, "TV prompt", "TV", "1" * 64),
-        ("202", "sdv1-0001", 1, "non-TV prompt", "N", "2" * 64),
+        ("201", "sdv1-0000", 0, "TV prompt", "TV"),
+        ("202", "sdv1-0001", 1, "non-TV prompt", "N"),
     )
     seed_values = [seed_start, seed_start + 1]
     generation = generation_paths(
@@ -613,7 +988,8 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
             "scientific_config_hash": science_hash,
         },
     )
-    for index, record_id, source_row, prompt, label, target_hash in rows:
+    target_hashes: dict[str, str] = {}
+    for index, record_id, source_row, prompt, label in rows:
         latent = torch.zeros((2, 2, 1, 1, 1), dtype=torch.float32)
         unconditional = torch.zeros((2, 1, 1, 1, 1), dtype=torch.float32)
         conditional = torch.ones_like(unconditional)
@@ -627,6 +1003,11 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
             target_latent=target,
         )
         generation.image_path(index).write_bytes(b"cached preview")
+        target_path = tmp_path / "data" / "webster" / "sdv1" / "images" / f"{index}.png"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (2, 2), (source_row, 32, 64)).save(target_path)
+        target_hash = file_sha256(target_path)
+        target_hashes[index] = target_hash
         publish_completion_marker(
             generation,
             index,
@@ -635,6 +1016,8 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
                 "source_row_number": source_row,
                 "prompt_raw": prompt,
                 "webster_overfit_type": label,
+                "dataset_model": "sdv1",
+                "target_image_path": str(target_path.resolve()),
                 "target_image_sha256": target_hash,
                 "scientific_config_hash": science_hash,
                 "num_seeds": 2,
@@ -655,6 +1038,17 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
                 },
             },
         )
+    atomic_write_json(
+        generation.summary_json,
+        {
+            "schema_version": 1,
+            "outcome": "completed",
+            "selected_rows": len(rows),
+            "completed_rows": len(rows),
+            "failed_rows": 0,
+            "scientific_config_hash": science_hash,
+        },
+    )
 
     paths = SSCDPaths(generation.run_directory)
     paths.create()
@@ -709,6 +1103,8 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
             paths.marker_path(index),
             {
                 "schema_version": SSCD_SCHEMA_VERSION,
+                "created_at": datetime.now(UTC).isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
                 "original_index": index,
                 "record_id": record_id,
                 "source_row_number": source_row,
@@ -717,6 +1113,25 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
                 "sscd_configuration_hash": configuration["configuration_hash"],
                 "generation_record_sha256": file_sha256(generation.record_path(index)),
                 "generation_latent_sha256": file_sha256(generation.latent_path(index)),
+                "generation_scientific_config_hash": science_hash,
+                "target_image_sha256": target_hashes[index],
+                "score_shape": [2],
+                "score_dtype": "float32",
+                "terminal_latent_index": -1,
+                "similarity": SCORE_DEFINITION,
+                "model_id": configuration["model_id"],
+                "model_revision": configuration["model_revision"],
+                "vae_id": configuration["vae_id"],
+                "vae_revision": configuration["vae_revision"],
+                "decode_dtype": configuration["decode_dtype"],
+                "sscd_model_name": configuration["sscd_model_name"],
+                "sscd_checkpoint_path": configuration["sscd_checkpoint_path"],
+                "sscd_checkpoint_url": configuration["sscd_checkpoint_url"],
+                "sscd_checkpoint_sha256": configuration["sscd_checkpoint_sha256"],
+                "sscd_feature_dimension": configuration["sscd_feature_dimension"],
+                "sscd_input_size": configuration["sscd_input_size"],
+                "sscd_preprocessing": configuration["sscd_preprocessing"],
+                "sscd_preprocessing_hash": configuration["sscd_preprocessing_hash"],
                 "score_sha256": score_hash,
             },
         )
@@ -760,9 +1175,11 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
         num_seeds=2,
         seed_start=seed_start,
         device="cpu",
+        overwrite=False,
     )
 
     assert result.exit_code == 0
+    assert result.complete_cache_hit is False
     assert result.completed_prompt_count == 2
     assert not runtime_calls
     assert requested_devices == ["cpu"]
@@ -773,6 +1190,7 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
     assert summary["generation_record_count"] == 2
     assert summary["selected_prompt_count"] == 2
     assert summary["resumed_prompt_count"] == 2
+    assert summary["overwrite"] is False
     assert summary["total_sscd_scores"] == 4
     assert summary["selection_policy"] == SSCD_SELECTION_POLICY
     assert read_json(paths.config_json)["seeds"] == seed_values
@@ -785,6 +1203,87 @@ def test_sscd_resumes_every_completed_prompt_without_loading_models(
     progress_output = capsys.readouterr().err
     assert "[SSCD] Validating cache" in progress_output
     assert "2/2" in progress_output
+
+    first_generation_marker = generation.record_path(rows[0][0])
+    preview_only_update = read_json(first_generation_marker)
+    preview_only_update["preview_downscale"] = 8
+    atomic_write_json(first_generation_marker, preview_only_update)
+
+    with monkeypatch.context() as cache_hit_patch:
+        cache_hit_patch.setattr(
+            sscd_module,
+            "resolve_devices",
+            lambda *_: pytest.fail("complete cache must return before device setup"),
+        )
+        cache_hit_patch.setattr(
+            sscd_module,
+            "file_sha256",
+            lambda *_: pytest.fail("complete cache must not hash tensor files"),
+        )
+        cache_hit_patch.setattr(
+            sscd_module,
+            "safe_torch_load",
+            lambda *_: pytest.fail("complete cache must not load tensor files"),
+        )
+        cached = sscd_module.run_sscd(
+            tmp_path,
+            model_name="sdv1",
+            scheduler_name="ddim",
+            guidance_scale=7.5,
+            num_inference_steps=1,
+            num_seeds=2,
+            seed_start=seed_start,
+            device="cuda:999",
+            overwrite=False,
+        )
+
+    assert cached.complete_cache_hit is True
+    assert cached.completed_prompt_count == len(rows)
+
+    first_index = rows[0][0]
+    if changed_scientific_input == "latent":
+        atomic_torch_save(
+            torch.ones((2, 2, 1, 1, 1), dtype=torch.float32),
+            generation.latent_path(first_index),
+        )
+        expected_error = "generation latent SHA-256 differs"
+    else:
+        target_path = (
+            tmp_path / "data" / "webster" / "sdv1" / "images" / f"{first_index}.png"
+        )
+        Image.new("RGB", (2, 2), (255, 255, 255)).save(target_path)
+        expected_error = "target image SHA-256 differs"
+    later_preview_update = read_json(first_generation_marker)
+    later_preview_update["preview_downscale"] = 16
+    atomic_write_json(first_generation_marker, later_preview_update)
+
+    completed_records = sscd_module.list_completed_records(generation)
+    assert (
+        sscd_module._complete_cache_result(
+            tmp_path,
+            generation,
+            paths,
+            completed_records,
+            read_json(generation.run_config),
+            configuration,
+            seed_values,
+        )
+        is None
+    )
+    first_record = next(
+        record for record in completed_records if record.original_index == first_index
+    )
+    with pytest.raises(SSCDEvaluationError, match=expected_error):
+        sscd_module._validated_cached_scores(
+            tmp_path,
+            generation,
+            paths,
+            first_record,
+            read_json(generation.run_config),
+            str(configuration["configuration_hash"]),
+            seed_values,
+            False,
+        )
 
 
 def test_sscd_experiment_has_no_unet_tokenizer_or_sampler_dependency() -> None:

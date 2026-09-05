@@ -49,8 +49,16 @@ from utils.common.io import (  # noqa: E402
     read_json,
     safe_torch_load,
 )
+from utils.data.selection import (  # noqa: E402
+    DEFAULT_SELECTION_STRATEGY,
+    SELECTION_STRATEGIES,
+    TargetPairSelection,
+    TargetPairSelectionError,
+    load_target_pair_selection,
+)
 from utils.data.webster import WebsterDataset  # noqa: E402
 from utils.experiments.cache import (  # noqa: E402
+    GenerationCacheError,
     GenerationPaths,
     generation_paths,
     safe_index,
@@ -94,9 +102,14 @@ from utils.models.schedulers import build_scheduler  # noqa: E402
 
 
 CSV_NAME = "theorem1_loss_recovery.csv"
-FIGURE_NAME = "theorem1_loss_recovery.pdf"
+FIGURE_FILENAMES = (
+    "theorem1_loss_recovery.png",
+    "theorem1_loss_recovery.pdf",
+)
 CSV_COLUMNS = (
     "record_id",
+    "selection_strategy",
+    "selection_hash",
     "model_name",
     "scheduler_name",
     "guidance_scale",
@@ -214,6 +227,15 @@ def build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     parser.add_argument("--model", choices=model_names(), default="sdv1")
+    parser.add_argument(
+        "--selection-strategy",
+        choices=SELECTION_STRATEGIES,
+        default=DEFAULT_SELECTION_STRATEGY,
+        help=(
+            "frozen prompt-selection strategy: GMM posterior, GMM evidence, or "
+            "Spearman (default: gmm)"
+        ),
+    )
     parser.add_argument("--scheduler", choices=SCHEDULER_CHOICES, default="ddim")
     parser.add_argument("--g", type=finite_float, default=7.5, metavar="SCALE")
     parser.add_argument(
@@ -276,9 +298,89 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="regenerate the PDF from the saved CSV without computation",
+        help="regenerate the PNG and PDF from the saved CSV without computation",
     )
     return parser
+
+
+def _load_frozen_selection(
+    root: str | Path,
+    *,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+    selection_strategy: str,
+) -> TargetPairSelection:
+    """Load the exact frozen selection requested by the experiment."""
+
+    try:
+        return load_target_pair_selection(
+            root,
+            model_name=model_name,
+            scheduler_name=scheduler_name,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            num_seeds=num_seeds,
+            selection_strategy=selection_strategy,
+        )
+    except TargetPairSelectionError as error:
+        raise ExperimentError(str(error)) from error
+
+
+def _selected_dataset_entries(
+    metadata_rows: Sequence[Mapping[str, object]],
+    selection: TargetPairSelection,
+    max_records: int | None,
+) -> tuple[tuple[int, dict[str, object]], ...]:
+    """Keep selected pairs while retaining their Webster dataset positions."""
+
+    included = set(selection.included_indices)
+    known = included | set(selection.excluded_indices)
+    indexed: list[tuple[int, str, dict[str, object]]] = []
+    observed: set[str] = set()
+    for dataset_position, metadata in enumerate(metadata_rows):
+        if not isinstance(metadata, Mapping):
+            raise ExperimentError("Webster metadata row is not a mapping")
+        try:
+            original_index = safe_index(metadata.get("original_index"))
+        except GenerationCacheError as error:
+            raise ExperimentError(
+                f"Webster metadata at position {dataset_position} has an invalid "
+                "original_index"
+            ) from error
+        if original_index in observed:
+            raise ExperimentError(
+                f"Webster metadata repeats original_index {original_index}"
+            )
+        observed.add(original_index)
+        indexed.append((dataset_position, original_index, dict(metadata)))
+
+    unknown = sorted(observed - known)
+    if unknown:
+        raise ExperimentError(
+            "Webster prompts are absent from the frozen selection: "
+            + ", ".join(unknown[:5])
+        )
+    missing = sorted(included - observed)
+    if missing:
+        raise ExperimentError(
+            "Selected prompts are absent from the recovered Webster dataset: "
+            + ", ".join(missing[:5])
+        )
+    selected = tuple(
+        (dataset_position, metadata)
+        for dataset_position, original_index, metadata in indexed
+        if original_index in included
+    )
+    if max_records is not None:
+        selected = selected[:max_records]
+    if not selected:
+        raise ExperimentError(
+            "frozen selection contains no recovered prompt-target pairs"
+        )
+    return selected
 
 
 def _dtype_from_name(value: object) -> torch.dtype:
@@ -1030,7 +1132,7 @@ def _load_mean_target_sscd(
         "seeds": list(configured),
         "similarity": SCORE_DEFINITION,
         "sscd_configuration_hash": configuration_hash,
-        "generation_record_sha256": file_sha256(contract.paths.record_path(index)),
+        "generation_scientific_config_hash": contract.scientific_hash,
         "generation_latent_sha256": generation_marker.get("tensor_file_sha256", {}).get(
             "latent"
         )
@@ -1137,9 +1239,11 @@ def _base_row(
 def _prepare_output_directory(output_dir: str | Path) -> Path:
     path = Path(output_dir).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
-    allowed = {CSV_NAME, FIGURE_NAME}
+    allowed = {CSV_NAME, *FIGURE_FILENAMES}
     unexpected = sorted(
-        item.name for item in path.iterdir() if item.name not in allowed
+        item.name
+        for item in path.iterdir()
+        if item.name not in allowed or item.is_symlink() or not item.is_file()
     )
     if unexpected:
         raise ExperimentError(
@@ -1154,7 +1258,17 @@ def _default_output_directory(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
+    selection_strategy: str,
+    selection_hash: str,
 ) -> Path:
+    if selection_strategy not in SELECTION_STRATEGIES:
+        raise ExperimentError(f"unsupported selection strategy: {selection_strategy!r}")
+    if not (
+        isinstance(selection_hash, str)
+        and len(selection_hash) == 64
+        and all(character in "0123456789abcdef" for character in selection_hash)
+    ):
+        raise ExperimentError("selection hash must be a lowercase SHA-256 digest")
     run_name = generation_run_name(
         model_name,
         scheduler_name,
@@ -1163,7 +1277,14 @@ def _default_output_directory(
         num_seeds,
         0,
     )
-    return ROOT / "outputs" / run_name / EXPERIMENT_DIRECTORY
+    return (
+        ROOT
+        / "outputs"
+        / run_name
+        / EXPERIMENT_DIRECTORY
+        / selection_strategy
+        / selection_hash
+    )
 
 
 def _binned_medians(
@@ -1183,21 +1304,83 @@ def _binned_medians(
     return median_x, median_y
 
 
-def _atomic_save_figure(figure: Any, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+def _figure_paths(output_directory: str | Path) -> tuple[Path, ...]:
+    output = Path(output_directory)
+    return tuple(output / filename for filename in FIGURE_FILENAMES)
+
+
+def _remove_figure_outputs(output_directory: str | Path) -> None:
+    for destination in _figure_paths(output_directory):
+        if destination.is_file() or destination.is_symlink():
+            destination.unlink()
+        elif destination.exists():
+            raise ExperimentError(
+                f"figure destination is not a regular file: {destination}"
+            )
+
+
+def _atomic_save_figures(figure: Any, destinations: Sequence[Path]) -> None:
+    staged: list[tuple[Path, Path]] = []
+    backups: list[tuple[Path | None, Path]] = []
+    committed = False
     try:
-        figure.savefig(
-            temporary,
-            format="pdf",
-            bbox_inches="tight",
-            pad_inches=FIGURE_PAD_INCHES,
-        )
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        for destination in destinations:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            figure_format = destination.suffix.removeprefix(".").lower()
+            if figure_format not in {"png", "pdf"}:
+                raise ExperimentError(
+                    f"unsupported Theorem 1 figure format: {destination.suffix!r}"
+                )
+            temporary = destination.with_name(
+                f".{destination.name}.{uuid.uuid4().hex}.tmp"
+            )
+            staged.append((temporary, destination))
+            save_options: dict[str, object] = {
+                "format": figure_format,
+                "bbox_inches": "tight",
+                "pad_inches": FIGURE_PAD_INCHES,
+            }
+            if figure_format == "png":
+                save_options["dpi"] = 300
+            figure.savefig(temporary, **save_options)
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+        for _temporary, destination in staged:
+            if destination.exists() and not (
+                destination.is_file() or destination.is_symlink()
+            ):
+                raise ExperimentError(
+                    f"Theorem 1 figure destination is not a regular file: {destination}"
+                )
+        for temporary, destination in staged:
+            backup = None
+            if destination.is_file() or destination.is_symlink():
+                backup = destination.with_name(
+                    f".{destination.name}.{uuid.uuid4().hex}.tmp"
+                )
+                os.replace(destination, backup)
+            backups.append((backup, destination))
+            os.replace(temporary, destination)
+        committed = True
+    except BaseException:
+        for backup, destination in reversed(backups):
+            if destination.is_file() or destination.is_symlink():
+                destination.unlink()
+            elif destination.exists():
+                raise ExperimentError(
+                    "cannot restore Theorem 1 figure because its destination "
+                    f"became unsafe: {destination}"
+                )
+            if backup is not None:
+                os.replace(backup, destination)
+        raise
     finally:
-        temporary.unlink(missing_ok=True)
+        for temporary, _destination in staged:
+            temporary.unlink(missing_ok=True)
+        if committed:
+            for backup, _destination in backups:
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
 
 
 def _render_pair_figure(
@@ -1206,7 +1389,7 @@ def _render_pair_figure(
     x_values: np.ndarray,
     y_values: np.ndarray,
     colors: np.ndarray,
-    destination: Path,
+    destinations: Sequence[Path],
 ) -> None:
     figure, axis = plt.subplots(figsize=FIGURE_SIZE)
     try:
@@ -1284,7 +1467,7 @@ def _render_pair_figure(
             )
 
         figure.tight_layout()
-        _atomic_save_figure(figure, destination)
+        _atomic_save_figures(figure, destinations)
     finally:
         plt.close(figure)
 
@@ -1298,8 +1481,12 @@ def _expected_csv_configuration(
     num_loss_seeds: int,
     loss_seed: int,
     num_seeds: int,
+    selection_strategy: str,
+    selection_hash: str,
 ) -> dict[str, object]:
     return {
+        "selection_strategy": selection_strategy,
+        "selection_hash": selection_hash,
         "model_name": model_name,
         "scheduler_name": scheduler_name,
         "guidance_scale": guidance_scale,
@@ -1336,14 +1523,14 @@ def _validate_csv_configuration(
 
 def plot_saved_results(
     csv_path: str | Path,
-    figure_path: str | Path,
+    output_directory: str | Path,
     *,
     expected_configuration: Mapping[str, object] | None = None,
 ) -> None:
-    """Reload the sole CSV and render the sole pair-level figure."""
+    """Reload the sole CSV and render the pair-level PNG and PDF figures."""
 
     source = Path(csv_path)
-    destination = Path(figure_path)
+    destinations = _figure_paths(output_directory)
     frame = pd.read_csv(source)
     if tuple(frame.columns) != CSV_COLUMNS:
         raise ExperimentError("saved CSV columns do not match the experiment schema")
@@ -1373,7 +1560,7 @@ def plot_saved_results(
             x_values=x_values,
             y_values=y_values,
             colors=colors,
-            destination=destination,
+            destinations=destinations,
         )
 
 
@@ -1743,14 +1930,14 @@ def _run_pair_shard(
 
 def _merge_pair_shard_results(
     results: Sequence[_PairShardResult],
-    expected_count: int,
+    expected_positions: Sequence[int],
 ) -> _PairShardResult:
     indexed_rows = tuple(
         indexed_row for result in results for indexed_row in result.indexed_rows
     )
     observed_positions = tuple(sorted(position for position, _ in indexed_rows))
-    expected_positions = tuple(range(expected_count))
-    if observed_positions != expected_positions:
+    expected = tuple(sorted(int(position) for position in expected_positions))
+    if len(expected) != len(set(expected)) or observed_positions != expected:
         raise ExperimentError(
             "Theorem 1 workers returned duplicate or missing prompt-target pairs"
         )
@@ -1879,7 +2066,10 @@ def _run_pair_shards(
                         progress_factory=progress_factory,
                     )
                 )
-    return _merge_pair_shard_results(results, len(entries))
+    return _merge_pair_shard_results(
+        results,
+        tuple(position for position, _metadata in entries),
+    )
 
 
 def run_experiment(
@@ -1891,15 +2081,24 @@ def run_experiment(
     num_loss_seeds: int,
     loss_seed: int,
     num_seeds: int,
+    selection_strategy: str,
     sample_batch_size: int,
     max_records: int | None,
-    output_dir: str | Path,
+    output_dir: str | Path | None,
     device: str | torch.device,
     progress_factory: Callable[..., Any] = tqdm,
 ) -> int:
-    """Run one conditional prediction under Q and P for every Webster pair."""
+    """Run the pair-level experiment for every selected Webster pair."""
 
-    output = _prepare_output_directory(output_dir)
+    selection = _load_frozen_selection(
+        ROOT,
+        model_name=model_name,
+        scheduler_name=scheduler_name,
+        guidance_scale=guidance_scale,
+        num_inference_steps=num_inference_steps,
+        num_seeds=num_seeds,
+        selection_strategy=selection_strategy,
+    )
     spec = get_model_spec(model_name)
     dataset = WebsterDataset(
         ROOT,
@@ -1908,8 +2107,21 @@ def run_experiment(
         defer_image_validation=True,
     )
     metadata_rows = list(dataset.iter_metadata())
-    if max_records is not None:
-        metadata_rows = metadata_rows[:max_records]
+    entries = _selected_dataset_entries(metadata_rows, selection, max_records)
+    requested_output = (
+        _default_output_directory(
+            model_name,
+            scheduler_name,
+            guidance_scale,
+            num_inference_steps,
+            num_seeds,
+            selection.selection_strategy,
+            selection.sha256,
+        )
+        if output_dir is None
+        else output_dir
+    )
+    output = _prepare_output_directory(requested_output)
     contract = _load_generation_contract(
         ROOT,
         model_name,
@@ -1923,9 +2135,6 @@ def run_experiment(
         devices = resolve_devices(device)
     except DeviceSelectionError as error:
         raise ExperimentError(str(error)) from error
-    entries = tuple(
-        (position, dict(metadata)) for position, metadata in enumerate(metadata_rows)
-    )
     result = _run_pair_shards(
         project_root=ROOT,
         model_name=model_name,
@@ -1942,49 +2151,69 @@ def run_experiment(
         contract=contract,
         progress_factory=progress_factory,
     )
-    rows = [row for _, row in result.indexed_rows]
+    rows = []
+    for _, saved_row in result.indexed_rows:
+        row = dict(saved_row)
+        row["selection_strategy"] = selection.selection_strategy
+        row["selection_hash"] = selection.sha256
+        rows.append(row)
 
     csv_path = output / CSV_NAME
-    figure_path = output / FIGURE_NAME
     atomic_write_csv(csv_path, rows, CSV_COLUMNS)
-    plot_saved_results(
-        csv_path,
-        figure_path,
-        expected_configuration=_expected_csv_configuration(
-            model_name=model_name,
-            scheduler_name=scheduler_name,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            num_loss_seeds=num_loss_seeds,
-            loss_seed=loss_seed,
-            num_seeds=num_seeds,
-        ),
-    )
+    try:
+        plot_saved_results(
+            csv_path,
+            output,
+            expected_configuration=_expected_csv_configuration(
+                model_name=model_name,
+                scheduler_name=scheduler_name,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                num_loss_seeds=num_loss_seeds,
+                loss_seed=loss_seed,
+                num_seeds=num_seeds,
+                selection_strategy=selection.selection_strategy,
+                selection_hash=selection.sha256,
+            ),
+        )
+    except BaseException:
+        _remove_figure_outputs(output)
+        raise
     return int(result.failed_count > 0)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
-    requested_output = (
-        _default_output_directory(
-            arguments.model,
-            arguments.scheduler,
-            arguments.g,
-            arguments.num_inference_steps,
-            arguments.num_seeds,
-        )
-        if arguments.output_dir is None
-        else arguments.output_dir
-    )
-    output = _prepare_output_directory(requested_output)
-    csv_path = output / CSV_NAME
-    figure_path = output / FIGURE_NAME
     if arguments.plot:
+        selection = _load_frozen_selection(
+            ROOT,
+            model_name=arguments.model,
+            scheduler_name=arguments.scheduler,
+            guidance_scale=arguments.g,
+            num_inference_steps=arguments.num_inference_steps,
+            num_seeds=arguments.num_seeds,
+            selection_strategy=arguments.selection_strategy,
+        )
+        requested_output = (
+            _default_output_directory(
+                arguments.model,
+                arguments.scheduler,
+                arguments.g,
+                arguments.num_inference_steps,
+                arguments.num_seeds,
+                selection.selection_strategy,
+                selection.sha256,
+            )
+            if arguments.output_dir is None
+            else arguments.output_dir
+        )
+        output = _prepare_output_directory(requested_output)
+        csv_path = output / CSV_NAME
         if not csv_path.is_file():
             raise ExperimentError(f"saved CSV is missing: {csv_path}")
         plot_saved_results(
             csv_path,
-            figure_path,
+            output,
             expected_configuration=_expected_csv_configuration(
                 model_name=arguments.model,
                 scheduler_name=arguments.scheduler,
@@ -1993,6 +2222,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 num_loss_seeds=arguments.num_loss_seeds,
                 loss_seed=arguments.loss_seed,
                 num_seeds=arguments.num_seeds,
+                selection_strategy=selection.selection_strategy,
+                selection_hash=selection.sha256,
             ),
         )
         return 0
@@ -2004,9 +2235,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         num_loss_seeds=arguments.num_loss_seeds,
         loss_seed=arguments.loss_seed,
         num_seeds=arguments.num_seeds,
+        selection_strategy=arguments.selection_strategy,
         sample_batch_size=arguments.sample_batch_size,
         max_records=arguments.max_records,
-        output_dir=output,
+        output_dir=arguments.output_dir,
         device=arguments.device,
     )
 

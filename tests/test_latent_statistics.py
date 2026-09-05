@@ -17,11 +17,17 @@ from utils.common.io import (
     read_json,
     safe_torch_load,
 )
-from utils.experiments.cache import GenerationPaths, publish_completion_marker
+from utils.experiments.cache import (
+    GenerationPaths,
+    list_completed_records,
+    publish_completion_marker,
+)
 from utils.experiments.latent_statistics import (
+    TARGET_LATENT_MARKER_FINGERPRINT_FIELD,
     TargetLatentStatisticsError,
     compute_target_latent_statistics,
     format_target_latent_statistics,
+    target_latent_marker_fingerprint,
 )
 from utils.models.latent import TARGET_LATENT_DEFINITION
 
@@ -34,9 +40,7 @@ def _create_generation_run(
     *,
     latent_shape: tuple[int, int, int] = LATENT_SHAPE,
 ) -> tuple[GenerationPaths, str]:
-    paths = GenerationPaths(
-        root / "logs" / "synthetic_N2" / "experiment_S0_N2"
-    )
+    paths = GenerationPaths(root / "logs" / "synthetic_N2" / "experiment_S0_N2")
     paths.create()
     science = {
         "latent_shape": list(latent_shape),
@@ -137,12 +141,12 @@ def test_exact_population_formulas_and_coordinate_artifacts(tmp_path: Path) -> N
 
     report = result.report
     assert report["schema_version"] == 1
-    assert report["run_directory"] == (
-        "logs/synthetic_N2/experiment_S0_N2"
-    )
+    assert report["run_directory"] == ("logs/synthetic_N2/experiment_S0_N2")
     assert report["latent_shape"] == [4, 2, 2]
     assert report["dimensions_per_latent"] == 16
     assert report["accumulation_dtype"] == "float64"
+    marker_fingerprint = target_latent_marker_fingerprint(list_completed_records(paths))
+    assert report[TARGET_LATENT_MARKER_FINGERPRINT_FIELD] == marker_fingerprint
     paired = _statistic(report, "paired_record_weighted")
     assert paired["record_count"] == 2
     assert paired["element_mean"] == pytest.approx(2.5)

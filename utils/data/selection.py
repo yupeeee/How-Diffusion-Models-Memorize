@@ -1,9 +1,12 @@
-"""Freeze prompt selection from terminal-L2/SSCD proximity evidence.
+"""Freeze whole-prompt selection from terminal-L2/SSCD reference evidence.
 
 Selection uses all reference seeds N--2N-1, where N is the experiment seed
-count. A prompt is included exactly when
-its within-prompt Spearman correlation between L2 distance and SSCD is finite
-and negative. Webster kind is audit metadata and never affects the decision.
+count. The default strategy uses a global two-component Gaussian mixture and
+keeps a prompt when its mean low-SSCD-mode posterior is below one half. The
+GMM-evidence strategy additionally uses a marginal SSCD boundary, below-median
+L2 evidence, and negative within-prompt rank correlation. The Spearman strategy
+uses only that correlation. Webster kind is audit metadata and never affects a
+decision.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from utils.common.cli import (
@@ -32,12 +36,32 @@ from utils.common.io import (
     atomic_write_frame_csv,
     atomic_write_json,
     canonical_hash,
+    file_sha256,
     read_json,
+)
+from utils.data.proximity_gmm import (
+    COMPONENT_NAMES,
+    DEFAULT_REG_COVAR,
+    INITIALIZATION_NAME,
+    LIKELIHOOD_DECREASE_TOLERANCE,
+    MAX_ITERATIONS,
+    TOLERANCE,
+    expectation,
+    fit_gaussian_mixture,
+    marginal_component_boundary,
+    standardize_features,
 )
 from utils.data.webster import normalize_webster_type
 from utils.experiments.cache import generation_log_relative_path
 
-SELECTION_POLICY = "prompt_spearman_l2_sscd_lt_zero"
+DEFAULT_SELECTION_STRATEGY = "gmm"
+SELECTION_STRATEGIES = ("gmm", "gmm-evidence", "spearman")
+SELECTION_POLICIES = {
+    "gmm": "prompt_gmm_mean_low_mode_probability_lt_half",
+    "gmm-evidence": "prompt_gmm_high_proximity_evidence_and_negative_spearman",
+    "spearman": "prompt_spearman_l2_sscd_lt_zero",
+}
+_GMM_SELECTION_STRATEGIES = frozenset({"gmm", "gmm-evidence"})
 INCLUDED_PROXIMITY_RULE = "included_proximity_rule"
 DISCARDED_PROXIMITY_RULE = "discarded_proximity_rule"
 UNUSABLE_REFERENCE_OBSERVATIONS = "unusable_reference_observations"
@@ -45,7 +69,9 @@ UNUSABLE_REFERENCE_OBSERVATIONS = "unusable_reference_observations"
 SELECTION_COLUMNS = tuple(
     "model_name original_index record_id source_row_number seed prompt kind "
     "target_image_sha256 generated_image_path generated_image_tile_index "
-    "l2_norm sscd observation_status observation_error prompt_spearman include_prompt "
+    "l2_norm sscd observation_status observation_error selection_strategy "
+    "prompt_spearman gmm_component gmm_low_mode_probability "
+    "prompt_gmm_evidence_seed_count include_prompt "
     "selection_status selection_reason reference_run_name "
     "reference_generation_hash reference_sscd_hash selection_policy selection_hash".split()
 )
@@ -55,6 +81,10 @@ _IDENTITY_COLUMNS = tuple(
 _MODELS = {"sdv1": "sdv1", "sdv2": "sdv2", "realvis": "realisticvision"}
 _HASH = re.compile(r"[0-9a-f]{64}")
 _FILES = ("selection.csv", "config.json", "summary.json")
+_REFERENCE_MARKER_DIRECTORIES = (
+    ("generation", "record"),
+    ("sscd", "sscd_record"),
+)
 
 
 class TargetPairSelectionError(RuntimeError):
@@ -79,6 +109,7 @@ class TargetPairSelection:
     guidance_scale: float
     num_inference_steps: int
     num_seeds: int
+    selection_strategy: str
     frame: pd.DataFrame
     configuration: Mapping[str, object]
     sha256: str
@@ -104,6 +135,22 @@ class TargetPairSelection:
 
 FrameInput = pd.DataFrame | str | Path
 ConfigurationInput = Mapping[str, object] | str | Path
+
+
+def normalize_selection_strategy(value: object) -> str:
+    """Return one supported prompt-selection strategy."""
+
+    if not isinstance(value, str) or value not in SELECTION_STRATEGIES:
+        raise TargetPairSelectionError(
+            "selection_strategy must be one of: " + ", ".join(SELECTION_STRATEGIES)
+        )
+    return value
+
+
+def selection_policy(selection_strategy: object) -> str:
+    """Return the immutable policy identifier for a strategy."""
+
+    return SELECTION_POLICIES[normalize_selection_strategy(selection_strategy)]
 
 
 def is_reference_configuration(
@@ -185,6 +232,7 @@ def reference_selection_command(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
+    selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
 ) -> str:
     model, scheduler, guidance, steps, count = _reference_values(
         model_name,
@@ -198,8 +246,10 @@ def reference_selection_command(
         f"--T {steps} "
         f"--N {count} --seed-start {count}"
     )
+    strategy = normalize_selection_strategy(selection_strategy)
     return (
-        f"./generate.sh {common}\n./sscd.sh {common}\n./compute_proximity.sh {common}"
+        f"./generate.sh {common}\n./sscd.sh {common}\n"
+        f"./compute_proximity.sh {common} --selection-strategy {strategy}"
     )
 
 
@@ -211,6 +261,7 @@ def target_pair_selection_directory(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
+    selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
 ) -> Path:
     model, scheduler, guidance, steps, count = _reference_values(
         model_name,
@@ -223,13 +274,27 @@ def target_pair_selection_directory(
     namespace = generation_cache_namespace(
         model, scheduler, guidance, steps, count, seed_start=count
     )
+    strategy = normalize_selection_strategy(selection_strategy)
     return (
         Path(root).expanduser().resolve()
         / "data/webster/selection"
         / _MODELS[model]
         / parent
+        / strategy
         / namespace
     )
+
+
+def reference_completion_fingerprint(
+    reference_run: str | Path,
+) -> dict[str, object]:
+    """Fingerprint the exact generation and SSCD completion-marker JSON files."""
+
+    run = Path(reference_run).expanduser().resolve()
+    return {
+        label: _completion_marker_directory_fingerprint(run / relative, label)
+        for label, relative in _REFERENCE_MARKER_DIRECTORIES
+    }
 
 
 def build_target_pair_selection(
@@ -240,6 +305,8 @@ def build_target_pair_selection(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
+    overwrite: bool,
+    selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
     paired_frame: FrameInput,
     reference_run_config: ConfigurationInput | None = None,
     sscd_config: ConfigurationInput | None = None,
@@ -248,6 +315,8 @@ def build_target_pair_selection(
     """Build and atomically freeze the seed-level audit."""
 
     project_root = Path(root).expanduser().resolve()
+    if not isinstance(overwrite, bool):
+        raise TargetPairSelectionError("overwrite must be a boolean")
     model, scheduler, guidance, steps, count = _reference_values(
         model_name,
         scheduler_name,
@@ -255,6 +324,7 @@ def build_target_pair_selection(
         num_inference_steps,
         num_seeds,
     )
+    strategy = normalize_selection_strategy(selection_strategy)
     run = project_root / reference_run_path(model, scheduler, guidance, steps, count)
     generation = _read_config(
         reference_run_config, run / "run_config.json", "generation config"
@@ -264,6 +334,7 @@ def build_target_pair_selection(
         generation, model, scheduler, guidance, steps, count
     )
     sscd_hash = _validate_sscd(sscd, generation_hash, count)
+    completion_fingerprint = reference_completion_fingerprint(run)
 
     paired = _read_frame(paired_frame, "paired reference observations")
     source = paired if records_frame is None else _read_frame(records_frame, "records")
@@ -271,7 +342,7 @@ def build_target_pair_selection(
     observations = _observations(
         paired, set(records["original_index"]), num_seeds=count
     )
-    manifest = _manifest(
+    manifest, gmm_fit = _manifest(
         records,
         observations,
         model,
@@ -281,6 +352,7 @@ def build_target_pair_selection(
         generation_hash,
         sscd_hash,
         count,
+        strategy,
     )
     digest = compute_target_pair_selection_hash(
         manifest,
@@ -291,6 +363,9 @@ def build_target_pair_selection(
         num_seeds=count,
         reference_generation_hash=generation_hash,
         reference_sscd_hash=sscd_hash,
+        reference_completion_fingerprint=completion_fingerprint,
+        selection_strategy=strategy,
+        gmm_fit=gmm_fit,
     )
     manifest["selection_hash"] = digest
     config = _selection_config(
@@ -303,7 +378,10 @@ def build_target_pair_selection(
         sscd_hash,
         sscd["sscd_checkpoint_sha256"],
         sscd["sscd_preprocessing_hash"],
+        completion_fingerprint,
         digest,
+        strategy,
+        gmm_fit,
     )
     selection = TargetPairSelection(
         root=project_root,
@@ -312,6 +390,7 @@ def build_target_pair_selection(
         guidance_scale=guidance,
         num_inference_steps=steps,
         num_seeds=count,
+        selection_strategy=strategy,
         frame=manifest,
         configuration=config,
         sha256=digest,
@@ -325,8 +404,9 @@ def build_target_pair_selection(
         guidance_scale=guidance,
         num_inference_steps=steps,
         num_seeds=count,
+        selection_strategy=strategy,
     )
-    if destination.exists() or destination.is_symlink():
+    if (destination.exists() or destination.is_symlink()) and not overwrite:
         frozen = load_target_pair_selection(
             project_root,
             model_name=model,
@@ -334,6 +414,7 @@ def build_target_pair_selection(
             guidance_scale=guidance,
             num_inference_steps=steps,
             num_seeds=count,
+            selection_strategy=strategy,
         )
         if frozen.sha256 != digest:
             raise FrozenTargetPairSelectionError(
@@ -341,7 +422,7 @@ def build_target_pair_selection(
                 f"{frozen.sha256} != {digest}"
             )
         return frozen
-    _write_selection(selection, destination)
+    _write_selection(selection, destination, overwrite=overwrite)
     return load_target_pair_selection(
         project_root,
         model_name=model,
@@ -349,6 +430,7 @@ def build_target_pair_selection(
         guidance_scale=guidance,
         num_inference_steps=steps,
         num_seeds=count,
+        selection_strategy=strategy,
     )
 
 
@@ -360,6 +442,7 @@ def load_target_pair_selection(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
+    selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
 ) -> TargetPairSelection:
     """Load and fully validate the three frozen artifacts."""
 
@@ -371,6 +454,7 @@ def load_target_pair_selection(
         num_inference_steps,
         num_seeds,
     )
+    strategy = normalize_selection_strategy(selection_strategy)
     directory = target_pair_selection_directory(
         project_root,
         model_name=model,
@@ -378,9 +462,10 @@ def load_target_pair_selection(
         guidance_scale=guidance,
         num_inference_steps=steps,
         num_seeds=count,
+        selection_strategy=strategy,
     )
     if not directory.exists():
-        _raise_missing(project_root, model, scheduler, guidance, steps, count)
+        _raise_missing(project_root, model, scheduler, guidance, steps, count, strategy)
     if not directory.is_dir() or directory.is_symlink():
         raise TargetPairSelectionError(f"Invalid selection directory: {directory}")
     missing = [name for name in _FILES if not (directory / name).is_file()]
@@ -423,6 +508,7 @@ def load_target_pair_selection(
         guidance_scale=guidance,
         num_inference_steps=steps,
         num_seeds=count,
+        selection_strategy=strategy,
         frame=frame,
         configuration=config,
         sha256=str(digest),
@@ -443,11 +529,16 @@ def validate_target_pair_selection(selection: TargetPairSelection) -> None:
         selection.num_inference_steps,
         selection.num_seeds,
     )
+    strategy = normalize_selection_strategy(selection.selection_strategy)
     frame, config = selection.frame, selection.configuration
     if tuple(frame.columns) != SELECTION_COLUMNS or frame.empty:
         raise TargetPairSelectionError("selection.csv has an invalid schema")
     if not pd.api.types.is_bool_dtype(frame["include_prompt"]):
         raise TargetPairSelectionError("include_prompt must contain booleans")
+    gmm_fit = config.get("gmm_fit") if strategy in _GMM_SELECTION_STRATEGIES else None
+    completion_fingerprint = _normalize_completion_fingerprint(
+        config.get("reference_completion_fingerprint")
+    )
     expected = _selection_config(
         model,
         scheduler,
@@ -458,7 +549,10 @@ def validate_target_pair_selection(selection: TargetPairSelection) -> None:
         str(config.get("reference_sscd_hash")),
         config.get("sscd_checkpoint_sha256"),
         config.get("sscd_preprocessing_hash"),
+        completion_fingerprint,
         selection.sha256,
+        strategy,
+        gmm_fit if isinstance(gmm_fit, Mapping) else None,
     )
     if dict(config) != expected:
         raise TargetPairSelectionError(
@@ -482,7 +576,8 @@ def validate_target_pair_selection(selection: TargetPairSelection) -> None:
         ),
         "reference_generation_hash": config["reference_generation_hash"],
         "reference_sscd_hash": config["reference_sscd_hash"],
-        "selection_policy": SELECTION_POLICY,
+        "selection_strategy": strategy,
+        "selection_policy": selection_policy(strategy),
         "selection_hash": selection.sha256,
     }
     if any(not frame[column].eq(value).all() for column, value in fixed.items()):
@@ -494,8 +589,11 @@ def validate_target_pair_selection(selection: TargetPairSelection) -> None:
         raise TargetPairSelectionError("selection.csv rows are not canonically ordered")
     for index, group in frame.groupby("original_index", sort=False):
         _validate_prompt_group(
-            str(index), group, model, scheduler, guidance, steps, count
+            str(index), group, model, scheduler, guidance, steps, count, strategy
         )
+    if strategy in _GMM_SELECTION_STRATEGIES:
+        assert isinstance(gmm_fit, Mapping)
+        _validate_gmm_decisions(frame, gmm_fit, strategy)
     digest = compute_target_pair_selection_hash(
         frame,
         model_name=model,
@@ -505,6 +603,9 @@ def validate_target_pair_selection(selection: TargetPairSelection) -> None:
         num_seeds=count,
         reference_generation_hash=str(config["reference_generation_hash"]),
         reference_sscd_hash=str(config["reference_sscd_hash"]),
+        reference_completion_fingerprint=completion_fingerprint,
+        selection_strategy=strategy,
+        gmm_fit=gmm_fit if isinstance(gmm_fit, Mapping) else None,
     )
     if digest != selection.sha256:
         raise TargetPairSelectionError(
@@ -540,6 +641,9 @@ def compute_target_pair_selection_hash(
     num_seeds: int,
     reference_generation_hash: str,
     reference_sscd_hash: str,
+    reference_completion_fingerprint: Mapping[str, object],
+    selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
+    gmm_fit: Mapping[str, object] | None = None,
 ) -> str:
     """Hash every seed observation and deterministic prompt decision."""
 
@@ -551,6 +655,15 @@ def compute_target_pair_selection_hash(
         num_seeds,
     )
     reference_seeds = _reference_seeds(count)
+    strategy = normalize_selection_strategy(selection_strategy)
+    contract = _strategy_contract(strategy)
+    completion_fingerprint = _normalize_completion_fingerprint(
+        reference_completion_fingerprint
+    )
+    if strategy in _GMM_SELECTION_STRATEGIES and not isinstance(gmm_fit, Mapping):
+        raise TargetPairSelectionError("GMM selection fit is missing")
+    if strategy == "spearman" and gmm_fit is not None:
+        raise TargetPairSelectionError("Spearman selection must not contain a GMM fit")
     if not _is_hash(reference_generation_hash) or not _is_hash(reference_sscd_hash):
         raise TargetPairSelectionError("Selection provenance hash is invalid")
     columns = tuple(
@@ -569,7 +682,8 @@ def compute_target_pair_selection_hash(
     ]
     return canonical_hash(
         {
-            "selection_policy": SELECTION_POLICY,
+            "selection_strategy": strategy,
+            "selection_policy": selection_policy(strategy),
             "model_name": model,
             "dataset_model_name": _MODELS[model],
             "reference_scheduler": scheduler,
@@ -580,12 +694,41 @@ def compute_target_pair_selection_hash(
             ),
             "reference_generation_hash": reference_generation_hash,
             "reference_sscd_hash": reference_sscd_hash,
+            "reference_completion_fingerprint": completion_fingerprint,
             "reference_seeds": list(reference_seeds),
-            "selection_metric": "spearman(l2_norm,sscd)",
-            "include_when": "prompt_spearman < 0",
+            **contract,
+            "gmm_fit": _json(gmm_fit),
             "rows": rows,
         }
     )
+
+
+def _strategy_contract(selection_strategy: str) -> dict[str, object]:
+    strategy = normalize_selection_strategy(selection_strategy)
+    if strategy == "gmm":
+        return {
+            "selection_metric": "two_component_full_covariance_gmm(l2_norm,sscd)",
+            "prompt_reduction": "mean(gmm_low_mode_probability)",
+            "include_when": "mean(gmm_low_mode_probability) < 0.5",
+        }
+    if strategy == "gmm-evidence":
+        return {
+            "selection_metric": "two_component_full_covariance_gmm(l2_norm,sscd)",
+            "gmm_sscd_boundary": (
+                "equal_weighted_marginal_density_between_component_means"
+            ),
+            "prompt_reduction": (
+                "count(sscd > sscd_marginal_boundary and l2_norm < median(l2_norm))"
+            ),
+            "include_when": (
+                "prompt_spearman < 0 and prompt_gmm_evidence_seed_count >= 1"
+            ),
+        }
+    return {
+        "selection_metric": "spearman(l2_norm,sscd)",
+        "prompt_reduction": "within_prompt_spearman",
+        "include_when": "prompt_spearman < 0",
+    }
 
 
 def spearman_correlation(left: Sequence[float], right: Sequence[float]) -> float:
@@ -624,8 +767,10 @@ def _manifest(
     generation_hash: str,
     sscd_hash: str,
     num_seeds: int,
-) -> pd.DataFrame:
+    selection_strategy: str,
+) -> tuple[pd.DataFrame, dict[str, object] | None]:
     count = _num_seeds(num_seeds)
+    strategy = normalize_selection_strategy(selection_strategy)
     reference_seeds = _reference_seeds(count)
     rows: list[dict[str, object]] = []
     for record in records.to_dict(orient="records"):
@@ -644,7 +789,18 @@ def _manifest(
             per_seed.append(
                 {"seed": seed, "generated_image_tile_index": tile, **observed}
             )
-        rho, include, status, reason = _decision(per_seed)
+        rho = _prompt_spearman(per_seed)
+        issues = _observation_issues(per_seed)
+        if issues:
+            include, status, reason = (
+                False,
+                UNUSABLE_REFERENCE_OBSERVATIONS,
+                "invalid_reference_observations:" + ",".join(issues),
+            )
+        elif strategy == "spearman":
+            rho, include, status, reason = _spearman_decision(per_seed)
+        else:
+            include, status, reason = False, "", ""
         common = {
             "model_name": model,
             **{column: record[column] for column in _IDENTITY_COLUMNS},
@@ -653,7 +809,11 @@ def _manifest(
                 / "image"
                 / f"{index}.png"
             ).as_posix(),
+            "selection_strategy": strategy,
             "prompt_spearman": rho,
+            "gmm_component": "",
+            "gmm_low_mode_probability": math.nan,
+            "prompt_gmm_evidence_seed_count": math.nan,
             "include_prompt": include,
             "selection_status": status,
             "selection_reason": reason,
@@ -662,27 +822,50 @@ def _manifest(
             ),
             "reference_generation_hash": generation_hash,
             "reference_sscd_hash": sscd_hash,
-            "selection_policy": SELECTION_POLICY,
+            "selection_policy": selection_policy(strategy),
             "selection_hash": "",
         }
         rows.extend({**common, **observed} for observed in per_seed)
-    return pd.DataFrame(rows, columns=SELECTION_COLUMNS).sort_values(
+    frame = pd.DataFrame(rows, columns=SELECTION_COLUMNS).sort_values(
         ["source_row_number", "original_index", "seed"],
         kind="stable",
         ignore_index=True,
     )
+    gmm_fit = (
+        _apply_gmm_decisions(frame, strategy)
+        if strategy in _GMM_SELECTION_STRATEGIES
+        else None
+    )
+    return frame, gmm_fit
 
 
-def _decision(
+def _observation_issues(
+    observations: Sequence[Mapping[str, object]],
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                str(row["observation_status"])
+                for row in observations
+                if row["observation_status"] != "complete"
+            }
+        )
+    )
+
+
+def _prompt_spearman(observations: Sequence[Mapping[str, object]]) -> float:
+    if _observation_issues(observations):
+        return math.nan
+    return spearman_correlation(
+        [float(row["l2_norm"]) for row in observations],
+        [float(row["sscd"]) for row in observations],
+    )
+
+
+def _spearman_decision(
     observations: Sequence[Mapping[str, object]],
 ) -> tuple[float, bool, str, str]:
-    issues = sorted(
-        {
-            str(row["observation_status"])
-            for row in observations
-            if row["observation_status"] != "complete"
-        }
-    )
+    issues = _observation_issues(observations)
     if issues:
         return (
             math.nan,
@@ -707,6 +890,169 @@ def _decision(
     if rho < 0.0:
         return rho, True, INCLUDED_PROXIMITY_RULE, "prompt_spearman_lt_0"
     return rho, False, DISCARDED_PROXIMITY_RULE, "prompt_spearman_ge_0"
+
+
+def _gmm_evidence_decision(
+    observations: Sequence[Mapping[str, object]],
+    *,
+    sscd_boundary: float,
+) -> tuple[float, int, bool, str, str]:
+    if not math.isfinite(sscd_boundary):
+        raise TargetPairSelectionError("GMM SSCD boundary must be finite")
+    if _observation_issues(observations):
+        rho, _include, status, reason = _spearman_decision(observations)
+        return rho, 0, False, status, reason
+    l2 = [float(row["l2_norm"]) for row in observations]
+    sscd = [float(row["sscd"]) for row in observations]
+    median_l2 = float(np.median(np.asarray(l2, dtype=np.float64)))
+    evidence_count = sum(
+        score > sscd_boundary and distance < median_l2
+        for distance, score in zip(l2, sscd, strict=True)
+    )
+    rho, _include, status, reason = _spearman_decision(observations)
+    if status == UNUSABLE_REFERENCE_OBSERVATIONS:
+        return rho, evidence_count, False, status, reason
+    if rho >= 0.0:
+        return (
+            rho,
+            evidence_count,
+            False,
+            DISCARDED_PROXIMITY_RULE,
+            "prompt_spearman_ge_0",
+        )
+    if evidence_count == 0:
+        return (
+            rho,
+            evidence_count,
+            False,
+            DISCARDED_PROXIMITY_RULE,
+            "no_gmm_high_proximity_evidence",
+        )
+    return (
+        rho,
+        evidence_count,
+        True,
+        INCLUDED_PROXIMITY_RULE,
+        "gmm_high_proximity_evidence_and_prompt_spearman_lt_0",
+    )
+
+
+def _gmm_decision(
+    low_mode_probabilities: Sequence[float],
+) -> tuple[bool, str, str]:
+    probabilities = [float(value) for value in low_mode_probabilities]
+    if not probabilities or any(
+        not math.isfinite(value) or not 0.0 <= value <= 1.0
+        for value in probabilities
+    ):
+        raise TargetPairSelectionError("GMM low-mode probabilities are invalid")
+    mean_low_probability = math.fsum(probabilities) / len(probabilities)
+    if mean_low_probability < 0.5:
+        return (
+            True,
+            INCLUDED_PROXIMITY_RULE,
+            "mean_gmm_low_mode_probability_lt_0_5",
+        )
+    return (
+        False,
+        DISCARDED_PROXIMITY_RULE,
+        "mean_gmm_low_mode_probability_ge_0_5",
+    )
+
+
+def _apply_gmm_decisions(
+    frame: pd.DataFrame, selection_strategy: str
+) -> dict[str, object]:
+    strategy = normalize_selection_strategy(selection_strategy)
+    if strategy not in _GMM_SELECTION_STRATEGIES:
+        raise TargetPairSelectionError(
+            f"Cannot apply GMM decisions for selection strategy {strategy!r}"
+        )
+    usable_positions: list[int] = []
+    usable_prompts: list[str] = []
+    for index, group in frame.groupby("original_index", sort=False):
+        if group["observation_status"].eq("complete").all():
+            usable_positions.extend(int(position) for position in group.index)
+            usable_prompts.append(str(index))
+    if not usable_positions:
+        raise TargetPairSelectionError(
+            "GMM selection has no prompt with complete reference observations"
+        )
+    raw = frame.loc[usable_positions, ["l2_norm", "sscd"]].to_numpy(dtype=np.float64)
+    try:
+        standardized, feature_mean, feature_scale = standardize_features(raw)
+        fit = fit_gaussian_mixture(standardized, reg_covar=DEFAULT_REG_COVAR)
+    except ValueError as error:
+        raise TargetPairSelectionError(f"Cannot fit selection GMM: {error}") from error
+
+    low_probability = pd.Series(
+        fit.responsibilities[:, 0], index=usable_positions, dtype="float64"
+    )
+    hard_component = np.asarray(COMPONENT_NAMES)[fit.responsibilities.argmax(axis=1)]
+    frame.loc[usable_positions, "gmm_low_mode_probability"] = low_probability
+    frame.loc[usable_positions, "gmm_component"] = hard_component
+    try:
+        boundary_standardized = marginal_component_boundary(
+            fit.weights,
+            fit.means,
+            fit.covariances,
+            feature_index=1,
+        )
+    except ValueError as error:
+        raise TargetPairSelectionError(
+            f"Cannot derive selection GMM SSCD boundary: {error}"
+        ) from error
+    sscd_boundary = float(feature_mean[1] + boundary_standardized * feature_scale[1])
+    for index in usable_prompts:
+        positions = frame.index[frame["original_index"].eq(index)].tolist()
+        if strategy == "gmm":
+            include, status, reason = _gmm_decision(
+                [float(low_probability.loc[position]) for position in positions]
+            )
+        else:
+            observations = frame.loc[
+                positions, ["l2_norm", "sscd", "observation_status"]
+            ]
+            rho, evidence_count, include, status, reason = _gmm_evidence_decision(
+                observations.to_dict(orient="records"),
+                sscd_boundary=sscd_boundary,
+            )
+            stored_rho = _optional_float(
+                frame.at[positions[0], "prompt_spearman"], "prompt_spearman"
+            )
+            if not _same_float(rho, stored_rho):
+                raise TargetPairSelectionError(
+                    f"Prompt {index} Spearman value changed during GMM selection"
+                )
+            frame.loc[positions, "prompt_gmm_evidence_seed_count"] = evidence_count
+        frame.loc[positions, "include_prompt"] = include
+        frame.loc[positions, "selection_status"] = status
+        frame.loc[positions, "selection_reason"] = reason
+
+    return {
+        "feature_names": ["l2_norm", "sscd"],
+        "standardization": "population_zscore",
+        "standardization_ddof": 0,
+        "feature_mean": [float(value) for value in feature_mean],
+        "feature_scale": [float(value) for value in feature_scale],
+        "component_names": list(COMPONENT_NAMES),
+        "num_components": 2,
+        "covariance_type": "full",
+        "initialization": INITIALIZATION_NAME,
+        "reg_covar": DEFAULT_REG_COVAR,
+        "max_iterations": MAX_ITERATIONS,
+        "tolerance": TOLERANCE,
+        "likelihood_decrease_tolerance": LIKELIHOOD_DECREASE_TOLERANCE,
+        "weights": [float(value) for value in fit.weights],
+        "means_standardized": fit.means.astype(float).tolist(),
+        "covariances_standardized": fit.covariances.astype(float).tolist(),
+        "sscd_marginal_boundary_standardized": float(boundary_standardized),
+        "sscd_marginal_boundary": sscd_boundary,
+        "log_likelihood": float(fit.log_likelihood),
+        "iterations": fit.iterations,
+        "usable_prompt_count": len(usable_prompts),
+        "usable_observation_count": len(usable_positions),
+    }
 
 
 def _prompt_records(source: pd.DataFrame, *, derived: bool, model: str) -> pd.DataFrame:
@@ -848,8 +1194,10 @@ def _validate_prompt_group(
     guidance: float,
     steps: int,
     num_seeds: int,
+    selection_strategy: str,
 ) -> None:
     count = _num_seeds(num_seeds)
+    strategy = normalize_selection_strategy(selection_strategy)
     if len(group) != count:
         raise TargetPairSelectionError(
             f"Prompt {index} must contain exactly {count} rows"
@@ -875,7 +1223,9 @@ def _validate_prompt_group(
         "prompt",
         "kind",
         "target_image_sha256",
+        "selection_strategy",
         "prompt_spearman",
+        "prompt_gmm_evidence_seed_count",
         "include_prompt",
         "selection_status",
         "selection_reason",
@@ -901,17 +1251,384 @@ def _validate_prompt_group(
                 f"Prompt {index} has an unexplained failed row"
             )
         observations.append({"l2_norm": l2, "sscd": sscd, "observation_status": status})
-    rho, include, status, reason = _decision(observations)
+    rho = _prompt_spearman(observations)
     stored_rho = _optional_float(group.iloc[0]["prompt_spearman"], "prompt_spearman")
     first = group.iloc[0]
     if not _same_float(rho, stored_rho):
         raise TargetPairSelectionError(f"Prompt {index} Spearman value is inconsistent")
+    low_probability = [
+        _optional_float(value, "gmm_low_mode_probability")
+        for value in group["gmm_low_mode_probability"]
+    ]
+    evidence_count = _optional_float(
+        first["prompt_gmm_evidence_seed_count"],
+        "prompt_gmm_evidence_seed_count",
+    )
+    components = [str(value) for value in group["gmm_component"]]
+    if strategy == "spearman":
+        expected = _spearman_decision(observations)
+        _require_prompt_decision(index, first, *expected[1:])
+        if any(components) or any(not math.isnan(value) for value in low_probability):
+            raise TargetPairSelectionError(
+                f"Prompt {index} has GMM fields under Spearman selection"
+            )
+        if not math.isnan(evidence_count):
+            raise TargetPairSelectionError(
+                f"Prompt {index} has a GMM evidence count under Spearman selection"
+            )
+        return
+
+    issues = _observation_issues(observations)
+    if issues:
+        _require_prompt_decision(
+            index,
+            first,
+            False,
+            UNUSABLE_REFERENCE_OBSERVATIONS,
+            "invalid_reference_observations:" + ",".join(issues),
+        )
+        if any(components) or any(not math.isnan(value) for value in low_probability):
+            raise TargetPairSelectionError(
+                f"Unusable prompt {index} has seed-level GMM fields"
+            )
+        if not math.isnan(evidence_count):
+            raise TargetPairSelectionError(
+                f"Unusable prompt {index} has a GMM evidence count"
+            )
+        return
+    if any(component not in COMPONENT_NAMES for component in components):
+        raise TargetPairSelectionError(f"Prompt {index} has an invalid GMM component")
+    if any(
+        math.isnan(value) or value < 0.0 or value > 1.0 for value in low_probability
+    ):
+        raise TargetPairSelectionError(f"Prompt {index} has an invalid GMM posterior")
+    if strategy == "gmm":
+        if not math.isnan(evidence_count):
+            raise TargetPairSelectionError(
+                f"Prompt {index} has a GMM evidence count under GMM selection"
+            )
+        _require_prompt_decision(index, first, *_gmm_decision(low_probability))
+        return
+    if (
+        math.isnan(evidence_count)
+        or not evidence_count.is_integer()
+        or not 0 <= evidence_count <= count
+    ):
+        raise TargetPairSelectionError(
+            f"Prompt {index} has an invalid GMM evidence count"
+        )
+
+
+def _require_prompt_decision(
+    index: str,
+    first: pd.Series,
+    include: bool,
+    status: str,
+    reason: str,
+) -> None:
     if (
         bool(first["include_prompt"]) != include
         or first["selection_status"] != status
         or first["selection_reason"] != reason
     ):
         raise TargetPairSelectionError(f"Prompt {index} decision is inconsistent")
+
+
+_GMM_FIT_KEYS = {
+    "feature_names",
+    "standardization",
+    "standardization_ddof",
+    "feature_mean",
+    "feature_scale",
+    "component_names",
+    "num_components",
+    "covariance_type",
+    "initialization",
+    "reg_covar",
+    "max_iterations",
+    "tolerance",
+    "likelihood_decrease_tolerance",
+    "weights",
+    "means_standardized",
+    "covariances_standardized",
+    "sscd_marginal_boundary_standardized",
+    "sscd_marginal_boundary",
+    "log_likelihood",
+    "iterations",
+    "usable_prompt_count",
+    "usable_observation_count",
+}
+
+
+def _validate_gmm_decisions(
+    frame: pd.DataFrame,
+    gmm_fit: Mapping[str, object],
+    selection_strategy: str,
+) -> None:
+    strategy = normalize_selection_strategy(selection_strategy)
+    if strategy not in _GMM_SELECTION_STRATEGIES:
+        raise TargetPairSelectionError(
+            f"Cannot validate GMM decisions for selection strategy {strategy!r}"
+        )
+    if set(gmm_fit) != _GMM_FIT_KEYS:
+        raise TargetPairSelectionError("GMM fit has an invalid schema")
+    fixed = {
+        "feature_names": ["l2_norm", "sscd"],
+        "standardization": "population_zscore",
+        "standardization_ddof": 0,
+        "component_names": list(COMPONENT_NAMES),
+        "num_components": 2,
+        "covariance_type": "full",
+        "initialization": INITIALIZATION_NAME,
+        "reg_covar": DEFAULT_REG_COVAR,
+        "max_iterations": MAX_ITERATIONS,
+        "tolerance": TOLERANCE,
+        "likelihood_decrease_tolerance": LIKELIHOOD_DECREASE_TOLERANCE,
+    }
+    if any(
+        canonical_hash(gmm_fit.get(key)) != canonical_hash(value)
+        for key, value in fixed.items()
+    ):
+        raise TargetPairSelectionError("GMM fit settings are inconsistent")
+
+    usable_positions = [
+        int(position)
+        for _index_value, group in frame.groupby("original_index", sort=False)
+        if group["observation_status"].eq("complete").all()
+        for position in group.index
+    ]
+    usable_prompt_count = sum(
+        group["observation_status"].eq("complete").all()
+        for _index_value, group in frame.groupby("original_index", sort=False)
+    )
+    if _integer(
+        gmm_fit.get("usable_prompt_count"), "usable_prompt_count"
+    ) != usable_prompt_count or _integer(
+        gmm_fit.get("usable_observation_count"), "usable_observation_count"
+    ) != len(usable_positions):
+        raise TargetPairSelectionError("GMM fit counts are inconsistent")
+    if not usable_positions:
+        raise TargetPairSelectionError("GMM fit has no usable observations")
+
+    try:
+        feature_mean = np.asarray(gmm_fit["feature_mean"], dtype=np.float64)
+        feature_scale = np.asarray(gmm_fit["feature_scale"], dtype=np.float64)
+        weights = np.asarray(gmm_fit["weights"], dtype=np.float64)
+        means = np.asarray(gmm_fit["means_standardized"], dtype=np.float64)
+        covariances = np.asarray(gmm_fit["covariances_standardized"], dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise TargetPairSelectionError("GMM fit arrays are invalid") from error
+    if (
+        feature_mean.shape != (2,)
+        or feature_scale.shape != (2,)
+        or weights.shape != (2,)
+        or means.shape != (2, 2)
+        or covariances.shape != (2, 2, 2)
+        or not all(
+            np.all(np.isfinite(values))
+            for values in (feature_mean, feature_scale, weights, means, covariances)
+        )
+        or np.any(feature_scale <= 0.0)
+        or np.any(weights <= 0.0)
+        or not np.isclose(weights.sum(), 1.0, rtol=0.0, atol=1e-12)
+        or not means[0, 1] < means[1, 1]
+    ):
+        raise TargetPairSelectionError("GMM fit parameters are invalid")
+    for covariance in covariances:
+        if not np.allclose(covariance, covariance.T, rtol=0.0, atol=1e-12):
+            raise TargetPairSelectionError("GMM covariance is not symmetric")
+        try:
+            eigenvalues = np.linalg.eigvalsh(covariance)
+            np.linalg.cholesky(covariance)
+        except np.linalg.LinAlgError as error:
+            raise TargetPairSelectionError(
+                "GMM covariance is not positive definite"
+            ) from error
+        if np.any(eigenvalues < DEFAULT_REG_COVAR * (1.0 - 1e-10)):
+            raise TargetPairSelectionError(
+                "GMM covariance is below its eigenvalue floor"
+            )
+
+    try:
+        expected_boundary_standardized = marginal_component_boundary(
+            weights,
+            means,
+            covariances,
+            feature_index=1,
+        )
+    except ValueError as error:
+        raise TargetPairSelectionError(
+            f"GMM SSCD boundary is invalid: {error}"
+        ) from error
+    observed_boundary_standardized = _optional_float(
+        gmm_fit.get("sscd_marginal_boundary_standardized"),
+        "sscd_marginal_boundary_standardized",
+    )
+    expected_boundary = float(
+        feature_mean[1] + expected_boundary_standardized * feature_scale[1]
+    )
+    observed_boundary = _optional_float(
+        gmm_fit.get("sscd_marginal_boundary"), "sscd_marginal_boundary"
+    )
+    if not math.isclose(
+        observed_boundary_standardized,
+        expected_boundary_standardized,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ) or not math.isclose(
+        observed_boundary,
+        expected_boundary,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise TargetPairSelectionError("GMM SSCD boundary is inconsistent")
+
+    raw = frame.loc[usable_positions, ["l2_norm", "sscd"]].to_numpy(dtype=np.float64)
+    try:
+        standardized, observed_mean, observed_scale = standardize_features(raw)
+    except ValueError as error:
+        raise TargetPairSelectionError(
+            f"GMM observations cannot be standardized: {error}"
+        ) from error
+    if not np.allclose(feature_mean, observed_mean, rtol=1e-12, atol=1e-12):
+        raise TargetPairSelectionError("GMM feature mean differs from observations")
+    if not np.allclose(feature_scale, observed_scale, rtol=1e-12, atol=1e-12):
+        raise TargetPairSelectionError("GMM feature scale differs from observations")
+    try:
+        responsibilities, log_likelihood = expectation(
+            standardized, weights, means, covariances
+        )
+    except (ValueError, np.linalg.LinAlgError) as error:
+        raise TargetPairSelectionError("GMM posterior computation failed") from error
+    stored_log_likelihood = _optional_float(
+        gmm_fit.get("log_likelihood"), "log_likelihood"
+    )
+    if math.isnan(stored_log_likelihood) or not math.isclose(
+        log_likelihood,
+        stored_log_likelihood,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise TargetPairSelectionError("GMM log likelihood is inconsistent")
+    iterations = _integer(gmm_fit.get("iterations"), "iterations")
+    if not 1 <= iterations <= MAX_ITERATIONS:
+        raise TargetPairSelectionError("GMM iteration count is invalid")
+
+    expected_low = pd.Series(
+        responsibilities[:, 0], index=usable_positions, dtype="float64"
+    )
+    expected_component = pd.Series(
+        np.asarray(COMPONENT_NAMES)[responsibilities.argmax(axis=1)],
+        index=usable_positions,
+        dtype="object",
+    )
+    for position in usable_positions:
+        observed_probability = _optional_float(
+            frame.at[position, "gmm_low_mode_probability"],
+            "gmm_low_mode_probability",
+        )
+        if (
+            not math.isclose(
+                observed_probability,
+                float(expected_low.loc[position]),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            or frame.at[position, "gmm_component"] != expected_component.loc[position]
+        ):
+            raise TargetPairSelectionError("GMM seed assignment is inconsistent")
+
+    for index, group in frame.groupby("original_index", sort=False):
+        if not group["observation_status"].eq("complete").all():
+            continue
+        if strategy == "gmm":
+            positions = [int(position) for position in group.index]
+            include, status, reason = _gmm_decision(
+                [float(expected_low.loc[position]) for position in positions]
+            )
+            _require_prompt_decision(
+                str(index), group.iloc[0], include, status, reason
+            )
+            continue
+        observations = group.loc[:, ["l2_norm", "sscd", "observation_status"]].to_dict(
+            orient="records"
+        )
+        _rho, evidence_count, include, status, reason = _gmm_evidence_decision(
+            observations,
+            sscd_boundary=expected_boundary,
+        )
+        observed_count = _optional_float(
+            group.iloc[0]["prompt_gmm_evidence_seed_count"],
+            "prompt_gmm_evidence_seed_count",
+        )
+        if observed_count != evidence_count:
+            raise TargetPairSelectionError(
+                f"Prompt {index} GMM evidence count is inconsistent"
+            )
+        _require_prompt_decision(
+            str(index),
+            group.iloc[0],
+            include,
+            status,
+            reason,
+        )
+
+
+def _completion_marker_directory_fingerprint(
+    directory: Path, label: str
+) -> dict[str, object]:
+    if directory.is_symlink() or not directory.is_dir():
+        raise TargetPairSelectionError(
+            f"Reference {label} completion marker directory is missing or unsafe: "
+            f"{directory}"
+        )
+    try:
+        markers = sorted(
+            (path for path in directory.iterdir() if path.suffix == ".json"),
+            key=lambda path: path.name,
+        )
+    except OSError as error:
+        raise TargetPairSelectionError(
+            f"Cannot list reference {label} completion markers: {directory}"
+        ) from error
+
+    entries: list[dict[str, str]] = []
+    for marker in markers:
+        if marker.is_symlink() or not marker.is_file():
+            raise TargetPairSelectionError(
+                f"Reference {label} completion marker is unsafe: {marker}"
+            )
+        try:
+            digest = file_sha256(marker)
+        except OSError as error:
+            raise TargetPairSelectionError(
+                f"Cannot hash reference {label} completion marker: {marker}"
+            ) from error
+        entries.append({"name": marker.name, "sha256": digest})
+    return {"count": len(entries), "sha256": canonical_hash(entries)}
+
+
+def _normalize_completion_fingerprint(value: object) -> dict[str, object]:
+    labels = tuple(label for label, _ in _REFERENCE_MARKER_DIRECTORIES)
+    if not isinstance(value, Mapping) or set(value) != set(labels):
+        raise TargetPairSelectionError(
+            "Reference completion fingerprint has an invalid schema"
+        )
+    result: dict[str, object] = {}
+    for label in labels:
+        item = value.get(label)
+        if not isinstance(item, Mapping) or set(item) != {"count", "sha256"}:
+            raise TargetPairSelectionError(
+                "Reference completion fingerprint has an invalid schema"
+            )
+        count = _integer(item.get("count"), f"{label} marker count")
+        digest = item.get("sha256")
+        if count < 0 or not _is_hash(digest):
+            raise TargetPairSelectionError(
+                "Reference completion fingerprint is invalid"
+            )
+        result[label] = {"count": count, "sha256": str(digest)}
+    return result
 
 
 def _selection_config(
@@ -924,12 +1641,22 @@ def _selection_config(
     sscd_hash: str,
     checkpoint_hash: object,
     preprocessing_hash: object,
+    completion_fingerprint: Mapping[str, object],
     selection_hash: str,
+    selection_strategy: str,
+    gmm_fit: Mapping[str, object] | None,
 ) -> dict[str, object]:
     count = _num_seeds(num_seeds)
     reference_seeds = _reference_seeds(count)
-    return {
-        "selection_policy": SELECTION_POLICY,
+    strategy = normalize_selection_strategy(selection_strategy)
+    fingerprint = _normalize_completion_fingerprint(completion_fingerprint)
+    if strategy in _GMM_SELECTION_STRATEGIES and not isinstance(gmm_fit, Mapping):
+        raise TargetPairSelectionError("GMM selection fit is missing")
+    if strategy == "spearman" and gmm_fit is not None:
+        raise TargetPairSelectionError("Spearman selection must not contain a GMM fit")
+    result: dict[str, object] = {
+        "selection_strategy": strategy,
+        "selection_policy": selection_policy(strategy),
         "model_name": model,
         "dataset_model_name": _MODELS[model],
         "reference_run_name": reference_run_name(
@@ -944,8 +1671,7 @@ def _selection_config(
         "reference_seed_start": count,
         "reference_num_seeds": count,
         "reference_seeds": list(reference_seeds),
-        "selection_metric": "spearman(l2_norm,sscd)",
-        "include_when": "prompt_spearman < 0",
+        **_strategy_contract(strategy),
         "decision_scope": "whole_prompt",
         "kind_affects_selection": False,
         "unusable_evidence_is_included": False,
@@ -953,10 +1679,14 @@ def _selection_config(
         "generated_image_tile_order": "zero_based_row_major_reference_seed_order",
         "reference_generation_hash": generation_hash,
         "reference_sscd_hash": sscd_hash,
+        "reference_completion_fingerprint": fingerprint,
         "sscd_checkpoint_sha256": checkpoint_hash,
         "sscd_preprocessing_hash": preprocessing_hash,
         "selection_hash": selection_hash,
     }
+    if strategy in _GMM_SELECTION_STRATEGIES:
+        result["gmm_fit"] = dict(gmm_fit)
+    return result
 
 
 def _validate_generation(
@@ -1030,8 +1760,19 @@ def _validate_sscd(
     return str(digest)
 
 
-def _write_selection(selection: TargetPairSelection, directory: Path) -> None:
+def _write_selection(
+    selection: TargetPairSelection, directory: Path, *, overwrite: bool
+) -> None:
     directory.parent.mkdir(parents=True, exist_ok=True)
+    destination_exists = directory.exists() or directory.is_symlink()
+    if destination_exists and (directory.is_symlink() or not directory.is_dir()):
+        raise TargetPairSelectionError(
+            f"Cannot overwrite unsafe selection directory: {directory}"
+        )
+    if destination_exists and not overwrite:
+        raise FrozenTargetPairSelectionError(
+            f"Frozen selection already exists: {directory}"
+        )
     temporary = Path(
         tempfile.mkdtemp(
             prefix=f".{directory.name}.", suffix=".tmp", dir=directory.parent
@@ -1041,20 +1782,58 @@ def _write_selection(selection: TargetPairSelection, directory: Path) -> None:
         atomic_write_frame_csv(selection.frame, temporary / "selection.csv")
         atomic_write_json(temporary / "config.json", selection.configuration)
         atomic_write_json(temporary / "summary.json", _summary(selection))
-        descriptor = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, directory)
-        descriptor = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        _fsync_directory(temporary)
+        if destination_exists:
+            _replace_selection_directory(temporary, directory)
+        else:
+            os.replace(temporary, directory)
+            _fsync_directory(directory.parent)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def _replace_selection_directory(temporary: Path, directory: Path) -> None:
+    """Install a complete replacement while retaining rollback state."""
+
+    rollback_root = Path(
+        tempfile.mkdtemp(
+            prefix=f".{directory.name}.", suffix=".rollback", dir=directory.parent
+        )
+    )
+    previous = rollback_root / "previous"
+    installed = rollback_root / "replacement"
+    try:
+        os.replace(directory, previous)
+    except BaseException:
+        shutil.rmtree(rollback_root, ignore_errors=True)
+        raise
+    try:
+        os.replace(temporary, directory)
+        _fsync_directory(directory.parent)
+    except BaseException:
+        try:
+            if directory.exists() or directory.is_symlink():
+                os.replace(directory, installed)
+            os.replace(previous, directory)
+            _fsync_directory(directory.parent)
+        except BaseException as rollback_error:
+            raise TargetPairSelectionError(
+                "Frozen selection replacement failed and rollback state was "
+                f"preserved at {rollback_root}"
+            ) from rollback_error
+        shutil.rmtree(rollback_root, ignore_errors=True)
+        raise
+    shutil.rmtree(rollback_root)
+    _fsync_directory(directory.parent)
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _summary(selection: TargetPairSelection) -> dict[str, object]:
@@ -1063,7 +1842,8 @@ def _summary(selection: TargetPairSelection) -> dict[str, object]:
     unusable = prompts["selection_status"].eq(UNUSABLE_REFERENCE_OBSERVATIONS)
     return {
         "complete": True,
-        "selection_policy": SELECTION_POLICY,
+        "selection_strategy": selection.selection_strategy,
+        "selection_policy": selection_policy(selection.selection_strategy),
         "model_name": selection.model_name,
         "selection_hash": selection.sha256,
         "reference_generation_hash": selection.configuration[
@@ -1117,7 +1897,13 @@ def _normalize_csv(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     for column in ("source_row_number", "seed", "generated_image_tile_index"):
         result[column] = pd.to_numeric(result[column], errors="raise").astype("int64")
-    for column in ("l2_norm", "sscd", "prompt_spearman"):
+    for column in (
+        "l2_norm",
+        "sscd",
+        "prompt_spearman",
+        "gmm_low_mode_probability",
+        "prompt_gmm_evidence_seed_count",
+    ):
         result[column] = result[column].map(
             lambda value, name=column: _optional_float(value, name)
         )
@@ -1267,6 +2053,7 @@ def _raise_missing(
     guidance_scale: float,
     num_inference_steps: int,
     num_seeds: int,
+    selection_strategy: str,
 ) -> None:
     model, scheduler, guidance, steps, count = _reference_values(
         model_name,
@@ -1275,6 +2062,7 @@ def _raise_missing(
         num_inference_steps,
         num_seeds,
     )
+    strategy = normalize_selection_strategy(selection_strategy)
     directory = target_pair_selection_directory(
         root,
         model_name=model,
@@ -1282,11 +2070,16 @@ def _raise_missing(
         guidance_scale=guidance,
         num_inference_steps=steps,
         num_seeds=count,
+        selection_strategy=strategy,
     )
     raise TargetPairSelectionMissingError(
         f"Frozen target-pair selection is missing: {directory}\n"
         f"Required reference run: "
         f"{reference_run_path(model, scheduler, guidance, steps, count).as_posix()}\n"
         f"Create it with:\n"
-        f"{reference_selection_command(model, scheduler, guidance, steps, count)}"
+        f"{
+            reference_selection_command(
+                model, scheduler, guidance, steps, count, strategy
+            )
+        }"
     )

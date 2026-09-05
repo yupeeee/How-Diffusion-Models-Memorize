@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 import torch
 from PIL import Image
+from scripts import generate as generate_script
 
 from utils.common.cli import (
     MAX_SEED,
@@ -44,6 +45,7 @@ from utils.experiments.cache import (
     GenerationPaths,
     generation_log_relative_path,
     generation_paths,
+    list_completed_records,
     publish_completion_marker,
     require_generation_run,
     save_generation_tensors,
@@ -89,7 +91,9 @@ def test_shared_cli_owns_generation_downscale_parsing() -> None:
         "seed_start": 0,
         "downscale": 4,
         "device": "auto",
+        "overwrite": False,
     }
+    assert generation_parser.parse_args(["--overwrite"]).overwrite is True
     assert generation_parser.parse_args(["--downscale", "8"]).downscale == 8
     assert generation_parser.parse_args(["--seed-start", "20"]).seed_start == 20
     assert generation_parser.parse_args(["--device", "cuda:1"]).device == "cuda:1"
@@ -139,10 +143,12 @@ def test_generation_shards_keep_duplicate_target_images_on_one_device() -> None:
     assert max(map(len, shards)) - min(map(len, shards)) <= 1
 
 
+@pytest.mark.parametrize("overwrite", (False, True))
 def test_generation_uses_one_disjoint_shard_per_auto_cuda_device(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    overwrite: bool,
 ) -> None:
     rows = tuple(
         {
@@ -220,9 +226,11 @@ def test_generation_uses_one_disjoint_shard_per_auto_cuda_device(
         entries = arguments[7]
         selected = arguments[9]
         worker_index = arguments[10]
+        overwrite = arguments[12]
         assert isinstance(entries, tuple)
         assert isinstance(selected, str)
         assert isinstance(worker_index, int)
+        assert overwrite is expected_overwrite
         events.append(("child", selected))
         return shard_result(entries, selected, worker_index)
 
@@ -258,6 +266,7 @@ def test_generation_uses_one_disjoint_shard_per_auto_cuda_device(
             assert function is subprocess_shard
             return ImmediateFuture(subprocess_shard(*arguments))
 
+    expected_overwrite = overwrite
     monkeypatch.setattr(generation_module, "_load_dataset", lambda *_: Dataset())
     monkeypatch.setattr(
         generation_module,
@@ -293,6 +302,7 @@ def test_generation_uses_one_disjoint_shard_per_auto_cuda_device(
         seed_start=0,
         downscale=4,
         device="auto",
+        overwrite=overwrite,
     )
 
     assert result.exit_code == 0
@@ -323,6 +333,7 @@ def test_generation_uses_one_disjoint_shard_per_auto_cuda_device(
     summary = read_json(paths.summary_json)
     assert summary["execution_devices"] == ["cuda:0", "cuda:1", "cuda:2"]
     assert summary["worker_count"] == 3
+    assert summary["overwrite"] is overwrite
     assert summary["device_shards"] == [
         {
             "device": "cuda:0",
@@ -503,6 +514,7 @@ def test_generation_rejects_an_out_of_range_seed_block_before_writing(
             seed_start=MAX_SEED,
             downscale=4,
             device="cpu",
+            overwrite=False,
         )
 
     assert not (tmp_path / "logs").exists()
@@ -514,6 +526,149 @@ def _small_tensors() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Te
     conditional = torch.ones((2, 2, 1, 2, 2), dtype=torch.float32)
     target = torch.full((1, 2, 2), 0.5, dtype=torch.float32)
     return latent, unconditional, conditional, target
+
+
+def _write_cached_statistics_artifacts(
+    project: Path,
+    run_directory: Path,
+    *,
+    science_hash: str,
+    rows: int,
+    marker_fingerprint: str,
+) -> tuple[Path, Path, Path]:
+    directory = run_directory / "target_latent_statistics"
+    mean_path = directory / "mean.pt"
+    std_path = directory / "population_std.pt"
+    mean_hash = atomic_torch_save(
+        torch.zeros((1, 1, 1), dtype=torch.float64), mean_path
+    )
+    std_hash = atomic_torch_save(torch.ones((1, 1, 1), dtype=torch.float64), std_path)
+    report_path = directory / "report.json"
+    atomic_write_json(
+        report_path,
+        {
+            "schema_version": 1,
+            "artifact": "target_latent_statistics",
+            "completed_target_latent_rows": rows,
+            "scientific_config_hash": science_hash,
+            "generation_target_latent_marker_fingerprint_sha256": (marker_fingerprint),
+            "latent_shape": [1, 1, 1],
+            "coordinate_artifacts": {
+                "mean": {
+                    "path": mean_path.relative_to(project).as_posix(),
+                    "sha256": mean_hash,
+                },
+                "population_std": {
+                    "path": std_path.relative_to(project).as_posix(),
+                    "sha256": std_hash,
+                },
+            },
+        },
+    )
+    return report_path, mean_path, std_path
+
+
+def test_generation_entrypoint_skips_only_complete_cached_statistics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_directory = tmp_path / "logs" / "synthetic"
+    run_directory.mkdir(parents=True)
+    science_hash = "a" * 64
+    atomic_write_json(
+        run_directory / "run_config.json",
+        {"scientific_config_hash": science_hash},
+    )
+    paths = GenerationPaths(run_directory)
+    paths.create()
+    target_hash = atomic_torch_save(
+        torch.zeros((1, 1, 1), dtype=torch.float32),
+        paths.target_latent_path("1"),
+    )
+    publish_completion_marker(
+        paths,
+        "1",
+        {
+            "source_row_number": 0,
+            "target_image_sha256": "b" * 64,
+            "tensor_file_sha256": {"target_latent": target_hash},
+        },
+    )
+    from utils.experiments.latent_statistics import target_latent_marker_fingerprint
+
+    marker_fingerprint = target_latent_marker_fingerprint(list_completed_records(paths))
+    _, _, std_path = _write_cached_statistics_artifacts(
+        tmp_path,
+        run_directory,
+        science_hash=science_hash,
+        rows=1,
+        marker_fingerprint=marker_fingerprint,
+    )
+    result = generation_module.GenerationResult(
+        run_directory / "summary.json", 1, 0, True
+    )
+    calls: list[bool] = []
+
+    def generate(*_args: object, **kwargs: object) -> object:
+        calls.append(bool(kwargs["overwrite"]))
+        return result
+
+    monkeypatch.setattr(generate_script, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(generation_module, "generate_webster_trajectories", generate)
+    from utils.experiments import latent_statistics
+
+    monkeypatch.setattr(
+        latent_statistics,
+        "compute_target_latent_statistics",
+        lambda *_: pytest.fail("complete cached statistics must not be recomputed"),
+    )
+    assert generate_script.main([]) == 0
+    assert calls == [False]
+    assert "Target latent statistics skipped" in capsys.readouterr().out
+
+    marker_path = paths.record_path("1")
+    marker = read_json(marker_path)
+    marker["preview_downscale"] = 8
+    atomic_write_json(marker_path, marker)
+    assert generate_script.main([]) == 0
+    assert calls == [False, False]
+    assert "Target latent statistics skipped" in capsys.readouterr().out
+
+    target_path = paths.target_latent_path("1")
+    original_target_bytes = target_path.read_bytes()
+    target_path.write_bytes(b"corrupt target latent")
+    assert generate_script._cached_statistics_report(run_directory, 1) is None
+    target_path.write_bytes(original_target_bytes)
+    assert (
+        generate_script._cached_statistics_report(run_directory, 1)
+        == run_directory / "target_latent_statistics" / "report.json"
+    )
+
+    replacement_hash = atomic_torch_save(
+        torch.ones((1, 1, 1), dtype=torch.float32),
+        target_path,
+    )
+    marker_hashes = marker["tensor_file_sha256"]
+    assert isinstance(marker_hashes, dict)
+    marker_hashes["target_latent"] = replacement_hash
+    atomic_write_json(marker_path, marker)
+    computed: list[bool] = []
+    rebuilt = SimpleNamespace(report={}, report_path=std_path.parent / "report.json")
+    monkeypatch.setattr(
+        latent_statistics,
+        "compute_target_latent_statistics",
+        lambda *_: computed.append(True) or rebuilt,
+    )
+    monkeypatch.setattr(
+        latent_statistics,
+        "format_target_latent_statistics",
+        lambda _: "rebuilt statistics",
+    )
+    assert generate_script.main([]) == 0
+    assert computed == [True]
+    assert calls == [False, False, False]
+    assert "report is absent; computing it now" in capsys.readouterr().out
 
 
 def _science(
@@ -528,7 +683,9 @@ def _science(
         "model_cli_name": "sdv1",
         "dataset_model": "sdv1",
         "model_id": spec.model_id,
+        "model_revision": "a" * 40,
         "vae_id": spec.vae_id or spec.model_id,
+        "vae_revision": "b" * 40,
         "resolution": spec.resolution,
         "scheduler": {
             "name": "ddim",
@@ -542,8 +699,10 @@ def _science(
         "num_seeds": seeds,
         "seeds": list(range(seed_start, seed_start + seeds)),
         "latent_shape": [1, 1, 1],
+        "inference_dtype": "float32",
         "trajectory_order": "noise_to_image",
         "target_latent_definition": TARGET_LATENT_DEFINITION,
+        "target_preprocessing": {"policy": "synthetic"},
     }
 
 
@@ -594,23 +753,39 @@ def _publish_cached_record(
         index,
         {
             **identity,
+            "created_at": "2026-01-01T00:00:00+00:00",
             "webster_overfit_type": identity["overfit_type"],
             "recovery_status": "recovered_exact_url",
             "recovery_method": "direct",
+            "model_cli_name": "sdv1",
+            "dataset_model": "sdv1",
+            "model_id": get_model_spec("sdv1").model_id,
+            "model_revision": "a" * 40,
+            "vae_id": get_model_spec("sdv1").vae_id or get_model_spec("sdv1").model_id,
+            "vae_revision": "b" * 40,
             "scientific_config_hash": science_hash,
             "scheduler_name": "ddim",
+            "scheduler_class": "SyntheticScheduler",
             "guidance_scale": 7.5,
             "num_inference_steps": steps,
             "num_seeds": seeds,
             "seeds": list(range(seed_start, seed_start + seeds)),
             "latent_shape": [1, 1, 1],
+            "inference_dtype": "float32",
+            "native_prediction_type": "epsilon",
+            "stored_prediction_type": "epsilon",
+            "trajectory_order": "noise_to_image",
+            "target_latent_definition": TARGET_LATENT_DEFINITION,
+            "target_preprocessing": {"policy": "synthetic"},
             "latent_path": f"latent/{index}.pt",
             "noise_prediction_path": f"noise_pred/{index}.pt",
             "target_latent_path": f"target_latent/{index}.pt",
             "preview_image_path": f"image/{index}.png",
+            "schedule_path": "schedule.pt",
             "tensor_file_sha256": hashes,
             "preview_image_sha256": file_sha256(paths.image_path(index)),
             "preview_downscale": downscale,
+            "preview_status": "complete",
             "tensor_shapes": {
                 "latent": list(latent.shape),
                 "unconditional_noise_predictions": list(unconditional.shape),
@@ -672,6 +847,50 @@ def test_scientific_tensors_are_write_once_and_branch_order_is_explicit(
             "target_latent": paths.target_latent_path("7"),
         }.items()
     }
+
+
+def test_explicit_overwrite_atomically_replaces_tensors_and_marker(
+    tmp_path: Path,
+) -> None:
+    paths = GenerationPaths(tmp_path / "logs" / "synthetic")
+    paths.create()
+    latent, unconditional, conditional, target = _small_tensors()
+    save_generation_tensors(
+        paths,
+        "7",
+        latents=latent,
+        unconditional_predictions=unconditional,
+        conditional_predictions=conditional,
+        target_latent=target,
+    )
+    publish_completion_marker(paths, "7", {"revision": "original"})
+
+    replacements = save_generation_tensors(
+        paths,
+        "7",
+        latents=latent + 1,
+        unconditional_predictions=unconditional + 2,
+        conditional_predictions=conditional + 3,
+        target_latent=target + 4,
+        overwrite=True,
+    )
+    publish_completion_marker(
+        paths,
+        "7",
+        {"revision": "replacement", "tensor_file_sha256": replacements},
+        overwrite=True,
+    )
+
+    torch.testing.assert_close(safe_torch_load(paths.latent_path("7")), latent + 1)
+    stored_predictions = safe_torch_load(paths.noise_prediction_path("7"))
+    assert isinstance(stored_predictions, tuple)
+    torch.testing.assert_close(stored_predictions[0], unconditional + 2)
+    torch.testing.assert_close(stored_predictions[1], conditional + 3)
+    torch.testing.assert_close(
+        safe_torch_load(paths.target_latent_path("7")), target + 4
+    )
+    assert read_json(paths.record_path("7"))["revision"] == "replacement"
+    assert not paths.stale_directory.exists()
 
 
 def test_completion_marker_validates_full_tensor_contract(tmp_path: Path) -> None:
@@ -890,6 +1109,7 @@ def test_generation_rejects_orphaned_science_without_a_run_contract(
             seed_start=0,
             downscale=4,
             device="cpu",
+            overwrite=False,
         )
 
 
@@ -1050,6 +1270,10 @@ def test_generation_resumes_every_cached_prompt_without_loading_a_model(
             "record_id": "sdv1-0000",
             "source_row_number": 0,
             "prompt_raw": "TV prompt",
+            "image_path": "sdv1/images/101.png",
+            "target_image_path": str(
+                (tmp_path / "data/webster/sdv1/images/101.png").resolve()
+            ),
             "target_image_sha256": "1" * 64,
             "overfit_type": "TV",
         },
@@ -1058,6 +1282,10 @@ def test_generation_resumes_every_cached_prompt_without_loading_a_model(
             "record_id": "sdv1-0001",
             "source_row_number": 1,
             "prompt_raw": "non-TV prompt",
+            "image_path": "sdv1/images/102.png",
+            "target_image_path": str(
+                (tmp_path / "data/webster/sdv1/images/102.png").resolve()
+            ),
             "target_image_sha256": "2" * 64,
             "overfit_type": "N",
         },
@@ -1132,6 +1360,7 @@ def test_generation_resumes_every_cached_prompt_without_loading_a_model(
         seed_start=seed_start,
         downscale=4,
         device="cpu",
+        overwrite=False,
     )
 
     assert result.exit_code == 0
@@ -1149,6 +1378,155 @@ def test_generation_resumes_every_cached_prompt_without_loading_a_model(
     progress_output = capsys.readouterr().err
     assert "[Generation] Records" in progress_output
     assert "2/2" in progress_output
+
+    with monkeypatch.context() as cache_hit_patch:
+        cache_hit_patch.setattr(
+            generation_module,
+            "resolve_devices",
+            lambda *_: pytest.fail("complete cache must return before device setup"),
+        )
+        cache_hit_patch.setattr(
+            cache_module,
+            "file_sha256",
+            lambda *_: pytest.fail("complete cache must not physically hash tensors"),
+        )
+        cached = generation_module.generate_webster_trajectories(
+            tmp_path,
+            model_name="sdv1",
+            scheduler_name="ddim",
+            guidance_scale=7.5,
+            num_inference_steps=50,
+            num_seeds=20,
+            seed_start=seed_start,
+            downscale=4,
+            device="cuda:999",
+            overwrite=False,
+        )
+
+    assert cached.complete_cache_hit is True
+    assert cached.completed_rows == len(rows)
+
+    configuration = read_json(paths.run_config)
+    marker_path = paths.record_path(rows[0]["original_index"])
+    complete_marker = read_json(marker_path)
+    for required_field in (
+        "num_inference_steps",
+        "num_seeds",
+        "seeds",
+        "latent_shape",
+        "inference_dtype",
+        "scheduler_class",
+        "target_image_path",
+        "target_image_sha256",
+        "schedule_path",
+        "tensor_file_sha256",
+        "tensor_shapes",
+        "tensor_dtypes",
+        "preview_image_sha256",
+        "preview_downscale",
+        "preview_status",
+    ):
+        incomplete_marker = dict(complete_marker)
+        incomplete_marker.pop(required_field)
+        atomic_write_json(marker_path, incomplete_marker)
+        atomic_write_json(paths.summary_json, summary)
+        assert (
+            generation_module._complete_cache_result(
+                paths,
+                CachedDataset(),
+                rows,
+                configuration,
+                project_root=tmp_path,
+                resolution=512,
+                downscale=4,
+                num_seeds=20,
+            )
+            is None
+        )
+        atomic_write_json(marker_path, complete_marker)
+        atomic_write_json(paths.summary_json, summary)
+
+    atomic_write_json(marker_path, complete_marker)
+    assert (
+        generation_module._complete_cache_result(
+            paths,
+            CachedDataset(),
+            rows,
+            configuration,
+            project_root=tmp_path,
+            resolution=512,
+            downscale=4,
+            num_seeds=20,
+        )
+        is None
+    )
+    atomic_write_json(paths.summary_json, summary)
+
+    failed_contents = paths.failed_csv.read_bytes()
+    paths.failed_csv.write_bytes(b"")
+    atomic_write_json(paths.summary_json, summary)
+    assert (
+        generation_module._complete_cache_result(
+            paths,
+            CachedDataset(),
+            rows,
+            configuration,
+            project_root=tmp_path,
+            resolution=512,
+            downscale=4,
+            num_seeds=20,
+        )
+        is None
+    )
+    paths.failed_csv.write_bytes(failed_contents)
+    atomic_write_json(paths.summary_json, summary)
+
+    schedule_contents = paths.schedule.read_bytes()
+    paths.schedule.write_bytes(b"")
+    atomic_write_json(paths.summary_json, summary)
+    assert (
+        generation_module._complete_cache_result(
+            paths,
+            CachedDataset(),
+            rows,
+            configuration,
+            project_root=tmp_path,
+            resolution=512,
+            downscale=4,
+            num_seeds=20,
+        )
+        is None
+    )
+    paths.schedule.write_bytes(schedule_contents)
+    atomic_write_json(paths.summary_json, summary)
+
+    marker_stat = marker_path.stat()
+    changed_path = paths.latent_path(rows[0]["original_index"])
+    original_stat = changed_path.stat()
+    replacement = changed_path.with_name(f".{changed_path.name}.replacement")
+    replacement.write_bytes(changed_path.read_bytes())
+    os.utime(
+        replacement,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+    os.replace(replacement, changed_path)
+    replaced_stat = changed_path.stat()
+    assert replaced_stat.st_mtime_ns == original_stat.st_mtime_ns
+    assert replaced_stat.st_ctime_ns > marker_stat.st_ctime_ns
+    checked = generation_module.generate_webster_trajectories(
+        tmp_path,
+        model_name="sdv1",
+        scheduler_name="ddim",
+        guidance_scale=7.5,
+        num_inference_steps=50,
+        num_seeds=20,
+        seed_start=seed_start,
+        downscale=4,
+        device="cpu",
+        overwrite=False,
+    )
+    assert checked.complete_cache_hit is False
+    assert checked.completed_rows == len(rows)
 
 
 def test_generation_changed_downscale_regenerates_only_cached_preview(
@@ -1203,6 +1581,30 @@ def test_generation_changed_downscale_regenerates_only_cached_preview(
     )
     atomic_torch_save(_schedule(), paths.schedule)
     _publish_cached_record(paths, row, science_hash, downscale=4)
+    atomic_write_json(
+        paths.summary_json,
+        {
+            "schema_version": GENERATION_SCHEMA_VERSION,
+            "outcome": "completed",
+            "model_manifest_rows": 1,
+            "available_paired_image_rows": 1,
+            "selected_rows": 1,
+            "completed_rows": 1,
+            "skipped_rows": 0,
+            "failed_rows": 0,
+            "total_trajectories": 20,
+            "selection_policy": GENERATION_SELECTION_POLICY,
+            "scientific_config_hash": science_hash,
+            "preview_config_hash": canonical_hash(original_preview_config),
+        },
+    )
+    for aggregate in (
+        paths.manifest_csv,
+        paths.manifest_parquet,
+        paths.skipped_csv,
+        paths.failed_csv,
+    ):
+        aggregate.write_bytes(b"published aggregate")
 
     scientific_paths = (
         paths.latent_path("101"),
@@ -1272,6 +1674,7 @@ def test_generation_changed_downscale_regenerates_only_cached_preview(
         seed_start=0,
         downscale=8,
         device="cpu",
+        overwrite=False,
     )
 
     assert result.exit_code == 0
@@ -1367,6 +1770,7 @@ def test_generation_loads_a_failed_worker_runtime_only_once(
         device=torch.device("cpu"),
         worker_index=0,
         worker_count=1,
+        overwrite=False,
     )
 
     assert runtime is None
@@ -1421,6 +1825,7 @@ def test_generation_reports_record_failure_immediately(
         seed_start=0,
         downscale=4,
         device="cpu",
+        overwrite=False,
     )
 
     assert result.exit_code == 1
@@ -1433,10 +1838,110 @@ def test_generation_reports_record_failure_immediately(
     assert "1/1" in progress_output
 
 
-def test_new_generation_record_skips_only_the_immediate_physical_hash_reread(
+def test_overwrite_unavailable_item_quarantines_old_record_and_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = {
+        "original_index": "77",
+        "record_id": "sdv1-0077",
+        "source_row_number": 0,
+        "prompt_raw": "temporarily unavailable prompt",
+        "target_image_sha256": "7" * 64,
+        "overfit_type": "N",
+    }
+
+    class UnavailableDataset:
+        total_manifest_rows = 1
+
+        def __len__(self) -> int:
+            return 1
+
+        def iter_metadata(self):
+            yield dict(row)
+
+        def __getitem__(self, position: int) -> dict[str, object]:
+            assert position == 0
+            return {"image": None, "prompt": row["prompt_raw"]}
+
+    paths = generation_paths(
+        tmp_path,
+        model_name="sdv1",
+        scheduler_name="ddim",
+        guidance_scale=7.5,
+        num_inference_steps=50,
+        num_seeds=20,
+        seed_start=0,
+    )
+    paths.create()
+    science = _science()
+    science_hash = canonical_hash(science)
+    atomic_write_json(
+        paths.run_config,
+        {
+            "scientific_config": science,
+            "scientific_config_hash": science_hash,
+        },
+    )
+    atomic_torch_save(_schedule(), paths.schedule)
+    _publish_cached_record(paths, row, science_hash)
+
+    monkeypatch.setattr(
+        generation_module, "_load_dataset", lambda *_: UnavailableDataset()
+    )
+    monkeypatch.setattr(
+        generation_module,
+        "_load_runtime",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unavailable input must not load a model"
+        ),
+    )
+    monkeypatch.setattr(
+        generation_module,
+        "estimate_disk_space",
+        lambda *_, **__: DiskEstimate(1, 1, 1, 0, 10**12),
+    )
+
+    result = generation_module.generate_webster_trajectories(
+        tmp_path,
+        model_name="sdv1",
+        scheduler_name="ddim",
+        guidance_scale=7.5,
+        num_inference_steps=50,
+        num_seeds=20,
+        seed_start=0,
+        downscale=4,
+        device="cpu",
+        overwrite=True,
+    )
+
+    assert result.exit_code == 1
+    assert result.completed_rows == 0
+    assert result.failed_rows == 1
+    assert not paths.record_path("77").exists()
+    assert list_completed_records(paths) == []
+    stale_bundles = list(paths.stale_directory.iterdir())
+    assert len(stale_bundles) == 1
+    assert (stale_bundles[0] / "record" / "77.json").is_file()
+    for path in (
+        paths.latent_path("77"),
+        paths.noise_prediction_path("77"),
+        paths.target_latent_path("77"),
+        paths.image_path("77"),
+    ):
+        assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("initial_validation", "overwrite"),
+    ((False, False), (True, True)),
+)
+def test_generation_writes_new_or_explicitly_overwritten_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    initial_validation: bool,
+    overwrite: bool,
 ) -> None:
     row = {
         "original_index": "7",
@@ -1470,6 +1975,8 @@ def test_new_generation_record_skips_only_the_immediate_physical_hash_reread(
     def validate(*_arguments: object, **keywords: object) -> CacheValidation:
         validation_keywords.append(dict(keywords))
         if len(validation_keywords) == 1:
+            if initial_validation:
+                return CacheValidation(True, (), dict(row))
             return CacheValidation(False, ("completion marker is missing",))
         return CacheValidation(True, (), read_json(paths.record_path(7)))
 
@@ -1505,15 +2012,17 @@ def test_new_generation_record_skips_only_the_immediate_physical_hash_reread(
         lambda *_args, **_kwargs: torch.zeros((1, 1, 1)),
     )
     monkeypatch.setattr(generation_module, "_sample", sample)
-    monkeypatch.setattr(
-        generation_module,
-        "save_generation_tensors",
-        lambda *_args, **_kwargs: {
+    save_overwrite: list[bool] = []
+
+    def save(*_args: object, **kwargs: object) -> dict[str, str]:
+        save_overwrite.append(bool(kwargs.get("overwrite")))
+        return {
             "latent": "a" * 64,
             "noise_prediction": "b" * 64,
             "target_latent": "c" * 64,
-        },
-    )
+        }
+
+    monkeypatch.setattr(generation_module, "save_generation_tensors", save)
     monkeypatch.setattr(generation_module, "_write_preview", write_preview)
     monkeypatch.setattr(
         generation_module,
@@ -1528,6 +2037,8 @@ def test_new_generation_record_skips_only_the_immediate_physical_hash_reread(
             "source_row_number": 7,
         },
     )
+    if overwrite:
+        atomic_write_json(paths.record_path("7"), {"old": True})
 
     result, observed_runtime = generation_module._run_generation_shard(
         root=tmp_path,
@@ -1544,13 +2055,15 @@ def test_new_generation_record_skips_only_the_immediate_physical_hash_reread(
         device=torch.device("cpu"),
         worker_index=0,
         worker_count=1,
+        overwrite=overwrite,
         runtime=runtime,
     )
 
     assert observed_runtime is runtime
     assert len(result.manifest_rows) == 1
+    assert save_overwrite == [overwrite]
     assert len(validation_keywords) == 2
-    assert "verify_file_hashes" not in validation_keywords[0]
+    assert validation_keywords[0]["verify_file_hashes"] is (not overwrite)
     assert validation_keywords[1]["verify_file_hashes"] is False
     assert "current-record local ETA" in capsys.readouterr().err
 
@@ -1678,6 +2191,7 @@ fi
             "12",
             "--N=4",
             "--num-loss-seeds=7",
+            "--selection-strategy=spearman",
             "--loss-seed",
             "11",
             "--downscale",
@@ -1704,6 +2218,9 @@ fi
         "\t--model\tsdv2\t--scheduler\tddpm\t--g\t3.25"
         "\t--T\t12\t--N\t4\t--seed-start\t0"
     )
+    gmm_selection = "\t--selection-strategy\tgmm"
+    spearman_selection = "\t--selection-strategy\tspearman"
+    proximity_overwrite = "\t--overwrite"
     assert result.returncode == 0, result.stderr
     assert log.read_text(encoding="utf-8").splitlines() == [
         (
@@ -1712,13 +2229,20 @@ fi
         ),
         f"generate.sh{reference}\t--device\tcuda:2\t--downscale\t8",
         f"sscd.sh{reference}\t--device\tcuda:2",
-        f"compute_proximity.sh{reference}",
+        (
+            f"compute_proximity.sh{reference}{spearman_selection}"
+            f"{proximity_overwrite}"
+        ),
         f"generate.sh{experiment}\t--device\tcuda:2\t--downscale\t8",
         f"sscd.sh{experiment}\t--device\tcuda:2",
-        f"compute_proximity.sh{experiment}",
+        (
+            f"compute_proximity.sh{experiment}{spearman_selection}"
+            f"{proximity_overwrite}"
+        ),
         (
             "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddpm"
-            "\t--g\t3.25\t--T\t12\t--N\t4\t--num-loss-seeds\t7"
+            "\t--g\t3.25\t--T\t12\t--N\t4"
+            "\t--selection-strategy\tspearman\t--num-loss-seeds\t7"
             "\t--loss-seed\t11\t--device\tcuda:2"
         ),
     ]
@@ -1795,14 +2319,21 @@ fi
             [
                 f"generate.sh{model_reference}\t--device\tauto\t--downscale\t8",
                 f"sscd.sh{model_reference}\t--device\tauto",
-                f"compute_proximity.sh{model_reference}",
+                (
+                    f"compute_proximity.sh{model_reference}{gmm_selection}"
+                    f"{proximity_overwrite}"
+                ),
                 f"generate.sh{model_experiment}\t--device\tauto\t--downscale\t8",
                 f"sscd.sh{model_experiment}\t--device\tauto",
-                f"compute_proximity.sh{model_experiment}",
+                (
+                    f"compute_proximity.sh{model_experiment}{gmm_selection}"
+                    f"{proximity_overwrite}"
+                ),
                 (
                     f"theorem1_loss_recovery.sh\t--model\t{model}"
                     "\t--scheduler\tddpm\t--g\t3.25\t--T\t12\t--N\t1"
-                    "\t--num-loss-seeds\t20\t--loss-seed\t0"
+                    "\t--selection-strategy\tgmm\t--num-loss-seeds\t20"
+                    "\t--loss-seed\t0"
                     "\t--device\tauto"
                 ),
             ]
@@ -1836,9 +2367,15 @@ fi
         "compute_proximity.sh",
         "theorem1_loss_recovery.sh",
     ]
+    assert [
+        line.split("\t", 1)[0]
+        for line in default_lines
+        if line.endswith(proximity_overwrite)
+    ] == ["compute_proximity.sh", "compute_proximity.sh"]
     assert default_lines[-1] == (
         "theorem1_loss_recovery.sh\t--model\trealvis\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t50\t--N\t20\t--num-loss-seeds\t20"
+        "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tgmm"
+        "\t--num-loss-seeds\t20"
         "\t--loss-seed\t0\t--device\tauto"
     )
     stage_offsets = [default_run.stdout.index(f"[{stage}/7]") for stage in range(1, 8)]
@@ -1846,7 +2383,7 @@ fi
 
     frozen = project / (
         "data/webster/selection/realisticvision/"
-        "realvis_ddpm_g3.25_T12_N4/reference_S4_N4"
+        "realvis_ddpm_g3.25_T12_N4/gmm/reference_S4_N4"
     )
     frozen.mkdir(parents=True)
     log.unlink()
@@ -1884,21 +2421,29 @@ fi
     )
     assert reused_lines == [
         f"generate.sh{normalized_reference}\t--device\tauto\t--downscale\t4",
-        f"compute_proximity.sh{normalized_reference}",
+        f"sscd.sh{normalized_reference}\t--device\tauto",
+        (
+            f"compute_proximity.sh{normalized_reference}{gmm_selection}"
+            f"{proximity_overwrite}"
+        ),
         f"generate.sh{normalized_experiment}\t--device\tauto\t--downscale\t4",
         f"sscd.sh{normalized_experiment}\t--device\tauto",
-        f"compute_proximity.sh{normalized_experiment}",
+        (
+            f"compute_proximity.sh{normalized_experiment}{gmm_selection}"
+            f"{proximity_overwrite}"
+        ),
         (
             "theorem1_loss_recovery.sh\t--model\trealvis"
             "\t--scheduler\tddpm\t--g\t3.25\t--T\t12\t--N\t4"
-            "\t--num-loss-seeds\t20\t--loss-seed\t0"
+            "\t--selection-strategy\tgmm\t--num-loss-seeds\t20"
+            "\t--loss-seed\t0"
             "\t--device\tauto"
         ),
     ]
-    stage_offsets = [reused.stdout.index(f"[{stage}/6]") for stage in range(1, 7)]
+    stage_offsets = [reused.stdout.index(f"[{stage}/7]") for stage in range(1, 8)]
     assert stage_offsets == sorted(stage_offsets)
-    assert "Resuming cached proximity-selection reference previews" in reused.stdout
-    assert "Validating and reusing frozen prompt selection" in reused.stdout
+    assert "Checking/resuming proximity-selection reference" in reused.stdout
+    assert "Checking/resuming proximity-selection SSCD" in reused.stdout
     frozen.rmdir()
 
     log.unlink()
@@ -1917,6 +2462,8 @@ fi
             "12",
             "--N",
             "4",
+            "--selection-strategy",
+            "gmm-evidence",
             "--num-loss-seeds",
             "6",
             "--loss-seed=13",
@@ -1933,7 +2480,8 @@ fi
     assert plot_only.returncode == 0, plot_only.stderr
     assert log.read_text(encoding="utf-8").splitlines() == [
         "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddpm"
-        "\t--g\t3.25\t--T\t12\t--N\t4\t--num-loss-seeds\t6"
+        "\t--g\t3.25\t--T\t12\t--N\t4\t--selection-strategy\tgmm-evidence"
+        "\t--num-loss-seeds\t6"
         "\t--loss-seed\t13\t--device\tcuda:2\t--plot"
     ]
     assert "[1/1]" in plot_only.stdout
@@ -1952,17 +2500,20 @@ fi
     assert log.read_text(encoding="utf-8").splitlines() == [
         (
             "theorem1_loss_recovery.sh\t--model\tsdv1\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--num-loss-seeds\t20"
+            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tgmm"
+            "\t--num-loss-seeds\t20"
             "\t--loss-seed\t0\t--device\tauto\t--plot"
         ),
         (
             "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--num-loss-seeds\t20"
+            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tgmm"
+            "\t--num-loss-seeds\t20"
             "\t--loss-seed\t0\t--device\tauto\t--plot"
         ),
         (
             "theorem1_loss_recovery.sh\t--model\trealvis\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--num-loss-seeds\t20"
+            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tgmm"
+            "\t--num-loss-seeds\t20"
             "\t--loss-seed\t0\t--device\tauto\t--plot"
         ),
     ]
@@ -2062,11 +2613,74 @@ fi
     assert "\t--N\t21\t--seed-start\t0" in large_seed_count_lines[3]
     assert large_seed_count_lines[-1] == (
         "theorem1_loss_recovery.sh\t--model\tsdv1\t--scheduler\tddpm"
-        "\t--g\t7.5\t--T\t50\t--N\t21\t--num-loss-seeds\t20"
+        "\t--g\t7.5\t--T\t50\t--N\t21\t--selection-strategy\tgmm"
+        "\t--num-loss-seeds\t20"
         "\t--loss-seed\t0\t--device\tauto"
     )
 
     log.unlink()
+    overwritten = subprocess.run(
+        [
+            "bash",
+            str(run_all),
+            "--overwrite",
+            "--model",
+            "sdv1",
+            "--N",
+            "1",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    overwritten_lines = log.read_text(encoding="utf-8").splitlines()
+    assert overwritten.returncode == 0, overwritten.stderr
+    assert [line.split("\t", 1)[0] for line in overwritten_lines] == (
+        expected_stage_wrappers
+    )
+    for line in overwritten_lines[:-1]:
+        assert line.endswith("\t--overwrite")
+    assert "--overwrite" not in overwritten_lines[-1]
+    assert "Regenerating proximity-selection reference" in overwritten.stdout
+    assert "Regenerating experiment trajectories" in overwritten.stdout
+
+    log.unlink()
+    all_overwritten = subprocess.run(
+        ["bash", str(run_all), "--overwrite", "--N", "1"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    all_overwritten_lines = log.read_text(encoding="utf-8").splitlines()
+    assert all_overwritten.returncode == 0, all_overwritten.stderr
+    assert len(all_overwritten_lines) == 21
+    assert sum(line.endswith("\t--overwrite") for line in all_overwritten_lines) == 18
+    assert all(
+        "--overwrite" not in line
+        for line in all_overwritten_lines
+        if line.startswith("theorem1_loss_recovery.sh")
+    )
+
+    log.unlink()
+    incompatible_plot = subprocess.run(
+        ["bash", str(run_all), "--plot", "--overwrite", "--model", "sdv1"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert incompatible_plot.returncode == 2
+    assert not log.exists()
+    assert "cannot be combined with --overwrite" in incompatible_plot.stderr
+
     invalid_device = subprocess.run(
         ["bash", str(run_all), "--device", "cuda:all"],
         cwd=tmp_path,
@@ -2130,6 +2744,114 @@ fi
         assert f"invalid {option}" in invalid.stderr
 
 
+def test_plain_run_all_rebuilds_stale_cache_only_proximity(tmp_path: Path) -> None:
+    project = tmp_path / "pipeline"
+    project.mkdir()
+    run_all = project / "run_all.sh"
+    run_all.write_bytes((ROOT / "run_all.sh").read_bytes())
+    run_all.chmod(0o755)
+
+    fake_wrapper = """#!/usr/bin/env bash
+set -Eeuo pipefail
+wrapper_name="$(basename -- "$0")"
+{
+    printf '%s' "$wrapper_name"
+    if (($# > 0)); then
+        printf '\t%s' "$@"
+    fi
+    printf '\n'
+} >> "$RUN_ALL_LOG"
+if [[ "$wrapper_name" == "compute_proximity.sh" ]]; then
+    has_overwrite=0
+    for argument in "$@"; do
+        if [[ "$argument" == "--overwrite" ]]; then
+            has_overwrite=1
+        fi
+    done
+    if ((!has_overwrite)); then
+        printf '%s\n' \
+            'frozen selection cannot be reused: changed marker groups: generation, sscd' \
+            >&2
+        exit 23
+    fi
+fi
+"""
+    wrappers = (
+        "generate.sh",
+        "sscd.sh",
+        "compute_proximity.sh",
+        "theorem1_loss_recovery.sh",
+    )
+    for wrapper in wrappers:
+        path = project / wrapper
+        path.write_text(fake_wrapper, encoding="utf-8")
+        path.chmod(0o755)
+
+    log = tmp_path / "run-all.log"
+    result = subprocess.run(
+        ["bash", str(run_all), "--model", "sdv1", "--N", "1"],
+        cwd=tmp_path,
+        env=dict(os.environ, RUN_ALL_LOG=str(log)),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert [line.split("\t", 1)[0] for line in lines] == [
+        "generate.sh",
+        "sscd.sh",
+        "compute_proximity.sh",
+        "generate.sh",
+        "sscd.sh",
+        "compute_proximity.sh",
+        "theorem1_loss_recovery.sh",
+    ]
+    proximity = [
+        line for line in lines if line.startswith("compute_proximity.sh\t")
+    ]
+    assert len(proximity) == 2
+    assert all(line.endswith("\t--overwrite") for line in proximity)
+    assert all(
+        "\t--overwrite" not in line
+        for line in lines
+        if not line.startswith("compute_proximity.sh\t")
+    )
+
+
+def test_run_all_documents_default_selection_strategy(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["bash", str(ROOT / "run_all.sh"), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--selection-strategy NAME" in result.stdout
+    assert "gmm, gmm-evidence, or spearman (default: gmm)" in result.stdout
+    assert "--overwrite" in result.stdout
+    assert "only option that forces their regeneration" in result.stdout
+
+
+def test_run_all_rejects_unknown_selection_strategy(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["bash", str(ROOT / "run_all.sh"), "--selection-strategy", "kmeans"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "invalid --selection-strategy" in result.stderr
+
+
 def _imports(tree: ast.AST) -> set[str]:
     values: set[str] = set()
     for node in ast.walk(tree):
@@ -2170,6 +2892,7 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
             "images.py",
             "mirror.py",
             "official.py",
+            "proximity_gmm.py",
             "recovery.py",
             "selection.py",
             "state.py",
@@ -2208,6 +2931,8 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
         for path in (ROOT / "scripts").rglob("*.py")
     }
     assert script_files == {
+        "check_proximity_clusters.py",
+        "check_proximity_gmm.py",
         "compute_proximity.py",
         "download_webster.py",
         "generate.py",

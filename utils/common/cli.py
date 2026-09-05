@@ -124,6 +124,11 @@ def add_generation_arguments(
         default=4,
         metavar="FACTOR",
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="regenerate and atomically replace every existing trajectory record",
+    )
     return parser
 
 

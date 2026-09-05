@@ -1,10 +1,11 @@
-"""Write the proximity audit table and selected-prompt scatter plot."""
+"""Write proximity audit tables and comparable all/selected scatter plots."""
 
 from __future__ import annotations
 
 import math
 import os
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from utils.common.io import atomic_write_frame_csv
 __all__ = [
     "AnalysisStatistics",
     "PlottingError",
+    "PROXIMITY_FIGURE_FILENAMES",
+    "PROXIMITY_FIGURES",
     "write_analysis_outputs",
     "write_selection_figure",
 ]
@@ -44,6 +47,22 @@ FIGURE_PAD_INCHES = 0.05
 X_AXIS_LABEL = r"$\|\mathbf{x}_0-\mathbf{x}^{\star}\|_2$"
 Y_AXIS_LABEL = "SSCD"
 EXPERIMENT_SPEARMAN_COLUMN = "experiment_prompt_spearman"
+_FIGURE_FORMATS = ("png", "pdf")
+PROXIMITY_FIGURES = {
+    "selected": {
+        "png": "proximity_vs_sscd.png",
+        "pdf": "proximity_vs_sscd.pdf",
+    },
+    "all_prompts": {
+        "png": "proximity_vs_sscd_all_prompts.png",
+        "pdf": "proximity_vs_sscd_all_prompts.pdf",
+    },
+}
+PROXIMITY_FIGURE_FILENAMES = tuple(
+    PROXIMITY_FIGURES[view][file_format]
+    for view in ("selected", "all_prompts")
+    for file_format in _FIGURE_FORMATS
+)
 
 PLOT_STYLE = {
     "figure.figsize": FIGURE_SIZE,
@@ -56,7 +75,6 @@ PLOT_STYLE = {
     "xtick.labelsize": AXIS_NUMBER_FONT_SIZE,
     "ytick.labelsize": AXIS_NUMBER_FONT_SIZE,
     "legend.fontsize": LEGEND_FONT_SIZE,
-    "legend.title_fontsize": LEGEND_FONT_SIZE,
 }
 
 
@@ -89,11 +107,11 @@ def write_analysis_outputs(
     *,
     analysis: pd.DataFrame,
 ) -> AnalysisStatistics:
-    """Publish one complete seed-level CSV and one selected-prompt PNG.
+    """Publish one seed-level CSV and comparable all/selected PNG/PDF plots.
 
     Each seed row receives its prompt's experiment-seed Spearman value before
-    publication. The saved CSV is then reloaded and validated; both the figure
-    annotation and returned statistics are computed only from that saved log.
+    publication. The saved CSV is then reloaded and validated; both figure
+    annotations and returned statistics are computed only from that saved log.
     """
 
     _validate_analysis(analysis)
@@ -105,21 +123,26 @@ def write_analysis_outputs(
     saved_analysis = pd.read_csv(csv_path)
     _validate_analysis(saved_analysis)
     _validate_prompt_spearman(saved_analysis, column=EXPERIMENT_SPEARMAN_COLUMN)
-    selected = saved_analysis.loc[saved_analysis["include_prompt"].astype(bool)]
-    statistics = _prompt_statistics(selected, column=EXPERIMENT_SPEARMAN_COLUMN)
+    all_prompts = saved_analysis.copy()
+    selected = saved_analysis.loc[saved_analysis["include_prompt"].astype(bool)].copy()
     with matplotlib.rc_context(PLOT_STYLE):
-        figure = _scatter_figure(selected, statistics)
-        _save_png(figure, output / "proximity_vs_sscd.png")
-    return statistics
+        return _write_scatter_views(
+            output,
+            all_prompts=all_prompts,
+            selected=selected,
+            spearman_column=EXPERIMENT_SPEARMAN_COLUMN,
+        )
 
 
 def write_selection_figure(
     selection_directory: str | Path,
 ) -> AnalysisStatistics:
-    """Rebuild the selected-prompt scatter from frozen ``selection.csv``.
+    """Rebuild comparable all/selected scatters from frozen ``selection.csv``.
 
-    The frozen table remains the sole numerical log. Excluded or unusable
-    prompt rows stay in that audit table but are not plotted.
+    The frozen table remains the sole numerical log. The pre-discard view
+    includes complete prompt groups regardless of their selection decision;
+    prompt groups containing any failed observation or unplottable measurement
+    are omitted.
     """
 
     output = Path(selection_directory)
@@ -138,16 +161,82 @@ def write_selection_figure(
     if "prompt_spearman" not in saved_selection.columns:
         raise PlottingError("selection table is missing columns: prompt_spearman")
     _validate_inclusion(saved_selection)
+    all_prompts = _fully_plottable_prompt_rows(saved_selection)
+    _validate_measurements(all_prompts)
+    _validate_prompt_spearman(all_prompts, column="prompt_spearman")
     selected = saved_selection.loc[
         saved_selection["include_prompt"].astype(bool)
     ].copy()
     _validate_measurements(selected)
     _validate_prompt_spearman(selected, column="prompt_spearman")
-    statistics = _prompt_statistics(selected, column="prompt_spearman")
     with matplotlib.rc_context(PLOT_STYLE):
-        figure = _scatter_figure(selected, statistics)
-        _save_png(figure, output / "proximity_vs_sscd.png")
-    return statistics
+        return _write_scatter_views(
+            output,
+            all_prompts=all_prompts,
+            selected=selected,
+            spearman_column="prompt_spearman",
+        )
+
+
+def _fully_plottable_prompt_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return prompt groups whose observations completed with finite measurements."""
+
+    required = {"original_index", "l2_norm", "sscd", "observation_status"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise PlottingError("proximity table is missing columns: " + ", ".join(missing))
+    if frame.empty:
+        return frame.copy()
+    row_is_plottable = frame["observation_status"].eq("complete")
+    for column in ("l2_norm", "sscd"):
+        row_is_plottable &= frame[column].map(
+            lambda value: _finite_or_none(value) is not None
+        )
+    group_is_plottable = row_is_plottable.groupby(
+        frame["original_index"], sort=False, dropna=False
+    ).transform("all")
+    return frame.loc[group_is_plottable].copy()
+
+
+def _write_scatter_views(
+    output: Path,
+    *,
+    all_prompts: pd.DataFrame,
+    selected: pd.DataFrame,
+    spearman_column: str,
+) -> AnalysisStatistics:
+    """Render both views with all-prompt limits, then publish four artifacts."""
+
+    all_statistics = _prompt_statistics(all_prompts, column=spearman_column)
+    selected_statistics = _prompt_statistics(selected, column=spearman_column)
+    figures: list[Figure] = []
+    try:
+        all_figure = _scatter_figure(
+            all_prompts,
+            all_statistics,
+            population_label="Prompts before discard",
+        )
+        figures.append(all_figure)
+        selected_figure = _scatter_figure(
+            selected,
+            selected_statistics,
+            population_label="Selected prompts",
+        )
+        figures.append(selected_figure)
+        all_axes, selected_axes = all_figure.axes[0], selected_figure.axes[0]
+        selected_axes.set_xlim(all_axes.get_xlim())
+        selected_axes.set_ylim(all_axes.get_ylim())
+        _publish_figures(
+            output,
+            (
+                (selected_figure, PROXIMITY_FIGURES["selected"]),
+                (all_figure, PROXIMITY_FIGURES["all_prompts"]),
+            ),
+        )
+    finally:
+        for figure in figures:
+            plt.close(figure)
+    return selected_statistics
 
 
 def _annotate_experiment_spearman(frame: pd.DataFrame) -> pd.DataFrame:
@@ -180,7 +269,7 @@ def _prompt_statistics(
     column: str,
 ) -> AnalysisStatistics:
     prompt_rows = selected.drop_duplicates("original_index", keep="first")
-    spearman = pd.to_numeric(prompt_rows[column], errors="raise").astype("float64")
+    spearman = pd.to_numeric(prompt_rows[column], errors="coerce").astype("float64")
     evaluable = spearman.dropna()
     evaluable_count = int(len(evaluable))
     negative_count = int((evaluable < 0).sum())
@@ -251,7 +340,10 @@ def _validate_prompt_spearman(frame: pd.DataFrame, *, column: str) -> None:
         raise PlottingError(f"proximity table is missing columns: {column}")
     values = frame[column]
     numeric = pd.to_numeric(values, errors="coerce").astype("float64")
-    if (values.notna() & numeric.isna()).any() or not _finite_series(numeric.dropna()):
+    blank = values.isna() | values.map(
+        lambda value: isinstance(value, str) and not value.strip()
+    )
+    if ((~blank) & numeric.isna()).any() or not _finite_series(numeric.dropna()):
         raise PlottingError(f"{column} must be finite or blank")
     for original_index, group in frame.groupby(
         "original_index", sort=False, dropna=False
@@ -277,6 +369,8 @@ def _validate_prompt_spearman(frame: pd.DataFrame, *, column: str) -> None:
 def _scatter_figure(
     frame: pd.DataFrame,
     statistics: AnalysisStatistics,
+    *,
+    population_label: str,
 ) -> Figure:
     figure, axes = plt.subplots(figsize=FIGURE_SIZE)
     if frame.empty or "kind" not in frame.columns:
@@ -306,7 +400,7 @@ def _scatter_figure(
     axes.text(
         0.02,
         0.02,
-        _summary_text(statistics),
+        _summary_text(statistics, population_label=population_label),
         transform=axes.transAxes,
         ha="left",
         va="bottom",
@@ -320,12 +414,10 @@ def _scatter_figure(
     )
     if axes.collections:
         legend = axes.legend(
-            title="Kind",
             loc="best",
             frameon=False,
             markerscale=1.5,
             fontsize=LEGEND_FONT_SIZE,
-            title_fontsize=LEGEND_FONT_SIZE,
         )
         for handle in legend.legend_handles:
             handle.set_alpha(LEGEND_MARKER_ALPHA)
@@ -334,7 +426,11 @@ def _scatter_figure(
     return figure
 
 
-def _summary_text(statistics: AnalysisStatistics) -> str:
+def _summary_text(
+    statistics: AnalysisStatistics,
+    *,
+    population_label: str,
+) -> str:
     denominator = statistics.evaluable_selected_prompts
     fraction = (
         "undefined"
@@ -347,7 +443,7 @@ def _summary_text(statistics: AnalysisStatistics) -> str:
         else f"{statistics.median_spearman:.3f}"
     )
     return (
-        f"Selected prompts: {statistics.total_selected_prompts}\n"
+        f"{population_label}: {statistics.total_selected_prompts}\n"
         f"Evaluable prompts: {denominator}\n"
         f"rho < 0: {statistics.negative_spearman_prompts}/{denominator} "
         f"({fraction})\n"
@@ -355,23 +451,65 @@ def _summary_text(statistics: AnalysisStatistics) -> str:
     )
 
 
-def _save_png(figure: Figure, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = _temporary_sibling(destination)
+def _publish_figures(
+    output: Path,
+    figures: Sequence[tuple[Figure, Mapping[str, str]]],
+) -> None:
+    """Render every artifact, then install the four files as one recoverable set."""
+
+    output.mkdir(parents=True, exist_ok=True)
+    staged: list[tuple[Path, Path]] = []
+    backups: list[tuple[Path | None, Path]] = []
+    committed = False
     try:
-        figure.savefig(
-            temporary,
-            format="png",
-            dpi=300,
-            bbox_inches="tight",
-            pad_inches=FIGURE_PAD_INCHES,
-        )
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        for figure, filenames in figures:
+            for file_format in _FIGURE_FORMATS:
+                destination = output / filenames[file_format]
+                temporary = _temporary_sibling(destination)
+                staged.append((temporary, destination))
+                figure.savefig(
+                    temporary,
+                    format=file_format,
+                    dpi=300,
+                    bbox_inches="tight",
+                    pad_inches=FIGURE_PAD_INCHES,
+                )
+                with temporary.open("rb") as handle:
+                    os.fsync(handle.fileno())
+        for _temporary, destination in staged:
+            if destination.exists() and not (
+                destination.is_file() or destination.is_symlink()
+            ):
+                raise PlottingError(
+                    f"derived figure destination is not a regular file: {destination}"
+                )
+        for temporary, destination in staged:
+            backup = None
+            if destination.is_file() or destination.is_symlink():
+                backup = _temporary_sibling(destination)
+                os.replace(destination, backup)
+            backups.append((backup, destination))
+            os.replace(temporary, destination)
+        committed = True
+    except BaseException:
+        for backup, destination in reversed(backups):
+            if destination.is_file() or destination.is_symlink():
+                destination.unlink()
+            elif destination.exists():
+                raise PlottingError(
+                    "cannot restore derived figure because its destination became "
+                    f"unsafe: {destination}"
+                )
+            if backup is not None:
+                os.replace(backup, destination)
+        raise
     finally:
-        plt.close(figure)
-        temporary.unlink(missing_ok=True)
+        for temporary, _destination in staged:
+            temporary.unlink(missing_ok=True)
+        if committed:
+            for backup, _destination in backups:
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
 
 
 def _plot_kind(value: object) -> str:

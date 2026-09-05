@@ -10,6 +10,7 @@ SCHEDULER="ddim"
 GUIDANCE_SCALE="7.5"
 NUM_INFERENCE_STEPS="50"
 NUM_SEEDS="20"
+SELECTION_STRATEGY="gmm"
 NUM_LOSS_SEEDS="20"
 LOSS_SEED="0"
 DOWNSCALE_FACTOR="4"
@@ -19,6 +20,7 @@ DIRECT_ATTEMPTS="${WEBSTER_DIRECT_ATTEMPTS:-2}"
 PER_HOST_CONCURRENCY="${WEBSTER_PER_HOST_CONCURRENCY:-4}"
 DOWNLOAD_WEBSTER=0
 PLOT_ONLY=0
+OVERWRITE=0
 
 usage() {
     cat <<'EOF'
@@ -31,12 +33,15 @@ opt-in.
 Options:
   --download            Run/resume Webster data preparation first
   --plot                Plot Theorem 1 from its saved CSV; run no computation
+  --overwrite           Regenerate trajectories and SSCD caches
   --model MODEL         Run only sdv1, sdv2, or realvis (default: all three)
   --scheduler NAME      ddim or ddpm (default: ddim)
   --g FLOAT             Classifier-free guidance scale (default: 7.5)
   --T INTEGER           Number of inference steps (default: 50)
   --N INTEGER           Seeds per pool: experiment 0..N-1, reference N..2N-1
                         (default: 20)
+  --selection-strategy NAME
+                        gmm, gmm-evidence, or spearman (default: gmm)
   --num-loss-seeds K    Conditional-loss draws per pair (default: 20)
   --loss-seed SEED      Root seed for independent loss draws (default: 0)
   --downscale INTEGER   Preview downscale factor (default: 4)
@@ -51,14 +56,19 @@ Without --model, the pipeline runs sequentially for sdv1, sdv2, and realvis.
 The selection reference uses the requested model, scheduler, guidance, steps,
 and seed count. Its seeds are N..2N-1; the experiment uses 0..N-1, so the two
 caches stay disjoint while all other sampling variables remain aligned.
-Once a frozen selection exists, cached reference generation is resumed to honor
-preview settings, then the selection is validated without rerunning reference
-SSCD.
+GMM, GMM-evidence, and Spearman selections have separate frozen and
+experiment-output paths, but reuse the same generation and SSCD caches.
+Complete published trajectory caches are checked structurally and skipped;
+--overwrite is the only option that forces their regeneration. SSCD caches
+follow the same rule. The reference selection and experiment proximity outputs
+are derived from those validated caches and rebuilt on every normal pipeline
+run; this does not rerun diffusion or SSCD inference. Theorem 1 receives no
+overwrite option.
 Download tuning options have effect only when --download is present. The
-Theorem 1 stage uses the same requested scheduler, guidance, steps, and seed
-count. --num-loss-seeds and --loss-seed configure only its independent
-conditional-loss draws. The PYTHON environment variable is honored by each
-wrapper.
+Theorem 1 stage uses the same requested selection strategy, scheduler,
+guidance, steps, and seed count. --num-loss-seeds and --loss-seed configure
+only its independent conditional-loss draws. The PYTHON environment variable
+is honored by each wrapper.
 EOF
 }
 
@@ -149,6 +159,10 @@ while (($# > 0)); do
             PLOT_ONLY=1
             shift
             ;;
+        --overwrite)
+            OVERWRITE=1
+            shift
+            ;;
         --model)
             (($# >= 2)) || missing_value "$1"
             MODEL="$2"
@@ -194,6 +208,15 @@ while (($# > 0)); do
             ;;
         --N=*)
             NUM_SEEDS="${1#*=}"
+            shift
+            ;;
+        --selection-strategy)
+            (($# >= 2)) || missing_value "$1"
+            SELECTION_STRATEGY="$2"
+            shift 2
+            ;;
+        --selection-strategy=*)
+            SELECTION_STRATEGY="${1#*=}"
             shift
             ;;
         --num-loss-seeds)
@@ -271,6 +294,15 @@ while (($# > 0)); do
     esac
 done
 
+case "$SELECTION_STRATEGY" in
+    gmm|gmm-evidence|spearman) ;;
+    *)
+        invalid_value \
+            "--selection-strategy" \
+            "$SELECTION_STRATEGY (expected gmm, gmm-evidence, or spearman)"
+        ;;
+esac
+
 if ((!MODEL_OPTION_PROVIDED)); then
     ALL_MODELS=(sdv1 sdv2 realvis)
     ARGUMENTS_WITHOUT_DOWNLOAD=()
@@ -299,12 +331,7 @@ if ((!MODEL_OPTION_PROVIDED)); then
 fi
 
 case "$MODEL" in
-    sdv1|sdv2)
-        DATASET_MODEL="$MODEL"
-        ;;
-    realvis)
-        DATASET_MODEL="realisticvision"
-        ;;
+    sdv1|sdv2|realvis) ;;
     *)
         printf 'run_all.sh: unsupported model: %s\n' "$MODEL" >&2
         exit 2
@@ -341,6 +368,9 @@ if ((PLOT_ONLY)); then
     if ((DOWNLOAD_WEBSTER)); then
         invalid_value "--plot" "cannot be combined with --download"
     fi
+    if ((OVERWRITE)); then
+        invalid_value "--plot" "cannot be combined with --overwrite"
+    fi
     cd "$PROJECT_ROOT"
     printf '[1/1] Plotting Theorem 1 loss–recovery from saved results\n'
     exec "$PROJECT_ROOT/theorem1_loss_recovery.sh" \
@@ -349,6 +379,7 @@ if ((PLOT_ONLY)); then
         --g "$GUIDANCE_SCALE" \
         --T "$NUM_INFERENCE_STEPS" \
         --N "$NUM_SEEDS" \
+        --selection-strategy "$SELECTION_STRATEGY" \
         --num-loss-seeds "$NUM_LOSS_SEEDS" \
         --loss-seed "$LOSS_SEED" \
         --device "$DEVICE" \
@@ -385,15 +416,19 @@ EXPERIMENT_ARGUMENTS=(
     --seed-start 0
 )
 
+SELECTION_ARGUMENTS=(
+    --selection-strategy "$SELECTION_STRATEGY"
+)
+
+CACHE_OVERWRITE_ARGUMENTS=()
+if ((OVERWRITE)); then
+    CACHE_OVERWRITE_ARGUMENTS=(--overwrite)
+fi
+
 cd "$PROJECT_ROOT"
 
-BASE_RUN_NAME="${MODEL}_${SCHEDULER}_g${GUIDANCE_SCALE}_T${NUM_INFERENCE_STEPS}_N${NUM_SEEDS}"
-SELECTION_DIRECTORY="$PROJECT_ROOT/data/webster/selection/$DATASET_MODEL/$BASE_RUN_NAME/reference_S${NUM_SEEDS}_N${NUM_SEEDS}"
 REFERENCE_LAST_SEED=$((NUM_SEEDS - 1 + NUM_SEEDS))
 REFERENCE_STAGE_COUNT=3
-if [[ -e "$SELECTION_DIRECTORY" || -L "$SELECTION_DIRECTORY" ]]; then
-    REFERENCE_STAGE_COUNT=2
-fi
 
 STAGE_INDEX=1
 STAGE_TOTAL=$((4 + REFERENCE_STAGE_COUNT))
@@ -416,55 +451,72 @@ else
     printf 'Webster data preparation skipped; pass --download to run it.\n'
 fi
 
-if ((REFERENCE_STAGE_COUNT == 2)); then
-    printf '[%s/%s] Resuming cached proximity-selection reference previews\n' \
-        "$STAGE_INDEX" "$STAGE_TOTAL"
-    "$PROJECT_ROOT/generate.sh" \
-        "${REFERENCE_ARGUMENTS[@]}" \
-        --device "$DEVICE" \
-        --downscale "$DOWNSCALE_FACTOR"
-    STAGE_INDEX=$((STAGE_INDEX + 1))
-
-    printf '[%s/%s] Validating and reusing frozen prompt selection\n' \
-        "$STAGE_INDEX" "$STAGE_TOTAL"
-    "$PROJECT_ROOT/compute_proximity.sh" "${REFERENCE_ARGUMENTS[@]}"
-    STAGE_INDEX=$((STAGE_INDEX + 1))
-else
-    printf '[%s/%s] Generating proximity-selection reference (seeds %s-%s)\n' \
+if ((OVERWRITE)); then
+    printf '[%s/%s] Regenerating proximity-selection reference (seeds %s-%s)\n' \
         "$STAGE_INDEX" "$STAGE_TOTAL" "$NUM_SEEDS" "$REFERENCE_LAST_SEED"
-    "$PROJECT_ROOT/generate.sh" \
-        "${REFERENCE_ARGUMENTS[@]}" \
-        --device "$DEVICE" \
-        --downscale "$DOWNSCALE_FACTOR"
-    STAGE_INDEX=$((STAGE_INDEX + 1))
+else
+    printf '[%s/%s] Checking/resuming proximity-selection reference (seeds %s-%s)\n' \
+        "$STAGE_INDEX" "$STAGE_TOTAL" "$NUM_SEEDS" "$REFERENCE_LAST_SEED"
+fi
+"$PROJECT_ROOT/generate.sh" \
+    "${REFERENCE_ARGUMENTS[@]}" \
+    --device "$DEVICE" \
+    --downscale "$DOWNSCALE_FACTOR" \
+    "${CACHE_OVERWRITE_ARGUMENTS[@]}"
+STAGE_INDEX=$((STAGE_INDEX + 1))
 
+if ((OVERWRITE)); then
     printf '[%s/%s] Computing proximity-selection SSCD (seeds %s-%s)\n' \
         "$STAGE_INDEX" "$STAGE_TOTAL" "$NUM_SEEDS" "$REFERENCE_LAST_SEED"
-    "$PROJECT_ROOT/sscd.sh" "${REFERENCE_ARGUMENTS[@]}" --device "$DEVICE"
-    STAGE_INDEX=$((STAGE_INDEX + 1))
-
-    printf '[%s/%s] Selecting prompts by %s-seed reference proximity correlation\n' \
-        "$STAGE_INDEX" "$STAGE_TOTAL" "$NUM_SEEDS"
-    "$PROJECT_ROOT/compute_proximity.sh" "${REFERENCE_ARGUMENTS[@]}"
-    STAGE_INDEX=$((STAGE_INDEX + 1))
+else
+    printf '[%s/%s] Checking/resuming proximity-selection SSCD (seeds %s-%s)\n' \
+        "$STAGE_INDEX" "$STAGE_TOTAL" "$NUM_SEEDS" "$REFERENCE_LAST_SEED"
 fi
+"$PROJECT_ROOT/sscd.sh" \
+    "${REFERENCE_ARGUMENTS[@]}" \
+    --device "$DEVICE" \
+    "${CACHE_OVERWRITE_ARGUMENTS[@]}"
+STAGE_INDEX=$((STAGE_INDEX + 1))
 
-printf '[%s/%s] Generating experiment trajectories (seeds 0-%s)\n' \
-    "$STAGE_INDEX" "$STAGE_TOTAL" "$((NUM_SEEDS - 1))"
+printf '[%s/%s] Rebuilding prompt selection with %s from %s-seed reference evidence\n' \
+    "$STAGE_INDEX" "$STAGE_TOTAL" "$SELECTION_STRATEGY" "$NUM_SEEDS"
+"$PROJECT_ROOT/compute_proximity.sh" \
+    "${REFERENCE_ARGUMENTS[@]}" "${SELECTION_ARGUMENTS[@]}" \
+    --overwrite
+STAGE_INDEX=$((STAGE_INDEX + 1))
+
+if ((OVERWRITE)); then
+    printf '[%s/%s] Regenerating experiment trajectories (seeds 0-%s)\n' \
+        "$STAGE_INDEX" "$STAGE_TOTAL" "$((NUM_SEEDS - 1))"
+else
+    printf '[%s/%s] Checking/resuming experiment trajectories (seeds 0-%s)\n' \
+        "$STAGE_INDEX" "$STAGE_TOTAL" "$((NUM_SEEDS - 1))"
+fi
 "$PROJECT_ROOT/generate.sh" \
     "${EXPERIMENT_ARGUMENTS[@]}" \
     --device "$DEVICE" \
-    --downscale "$DOWNSCALE_FACTOR"
+    --downscale "$DOWNSCALE_FACTOR" \
+    "${CACHE_OVERWRITE_ARGUMENTS[@]}"
 STAGE_INDEX=$((STAGE_INDEX + 1))
 
-printf '[%s/%s] Computing experiment SSCD (seeds 0-%s)\n' \
-    "$STAGE_INDEX" "$STAGE_TOTAL" "$((NUM_SEEDS - 1))"
-"$PROJECT_ROOT/sscd.sh" "${EXPERIMENT_ARGUMENTS[@]}" --device "$DEVICE"
+if ((OVERWRITE)); then
+    printf '[%s/%s] Recomputing experiment SSCD (seeds 0-%s)\n' \
+        "$STAGE_INDEX" "$STAGE_TOTAL" "$((NUM_SEEDS - 1))"
+else
+    printf '[%s/%s] Checking/resuming experiment SSCD (seeds 0-%s)\n' \
+        "$STAGE_INDEX" "$STAGE_TOTAL" "$((NUM_SEEDS - 1))"
+fi
+"$PROJECT_ROOT/sscd.sh" \
+    "${EXPERIMENT_ARGUMENTS[@]}" \
+    --device "$DEVICE" \
+    "${CACHE_OVERWRITE_ARGUMENTS[@]}"
 STAGE_INDEX=$((STAGE_INDEX + 1))
 
-printf '[%s/%s] Computing cache-only experiment proximity\n' \
-    "$STAGE_INDEX" "$STAGE_TOTAL"
-"$PROJECT_ROOT/compute_proximity.sh" "${EXPERIMENT_ARGUMENTS[@]}"
+printf '[%s/%s] Rebuilding cache-only experiment proximity with %s\n' \
+    "$STAGE_INDEX" "$STAGE_TOTAL" "$SELECTION_STRATEGY"
+"$PROJECT_ROOT/compute_proximity.sh" \
+    "${EXPERIMENT_ARGUMENTS[@]}" "${SELECTION_ARGUMENTS[@]}" \
+    --overwrite
 STAGE_INDEX=$((STAGE_INDEX + 1))
 
 printf '[%s/%s] Running Theorem 1 loss–recovery experiment\n' \
@@ -475,6 +527,7 @@ printf '[%s/%s] Running Theorem 1 loss–recovery experiment\n' \
     --g "$GUIDANCE_SCALE" \
     --T "$NUM_INFERENCE_STEPS" \
     --N "$NUM_SEEDS" \
+    --selection-strategy "$SELECTION_STRATEGY" \
     --num-loss-seeds "$NUM_LOSS_SEEDS" \
     --loss-seed "$LOSS_SEED" \
     --device "$DEVICE"
