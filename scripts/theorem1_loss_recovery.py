@@ -233,7 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SELECTION_STRATEGY,
         help=(
             "frozen prompt-selection strategy: GMM posterior, GMM evidence, or "
-            "Spearman (default: gmm)"
+            "Spearman (default: spearman)"
         ),
     )
     parser.add_argument("--scheduler", choices=SCHEDULER_CHOICES, default="ddim")

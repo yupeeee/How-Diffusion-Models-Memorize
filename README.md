@@ -2,8 +2,11 @@
 
 This project recovers the Webster prompt–image benchmark, caches complete
 diffusion trajectories, scores generated endpoints with SSCD, and measures
-terminal-latent proximity. The scientific cache is deliberately reusable:
-proximity and plotting never rerun diffusion.
+terminal-latent proximity. It also evaluates the initial conditional recovery
+of Theorem 1 and the zero-centered forms of Lemma 2 and Corollary 3. Passing
+`--use-mu` centers both latter experiments on a reusable model-implied mean.
+The scientific cache is deliberately reusable: proximity and plotting never
+rerun diffusion.
 
 ## Install
 
@@ -25,7 +28,7 @@ directory with one command:
   --g 7.5 \
   --T 50 \
   --N 20 \
-  --selection-strategy gmm \
+  --selection-strategy spearman \
   --num-loss-seeds 20 \
   --loss-seed 0 \
   --downscale 4 \
@@ -34,18 +37,46 @@ directory with one command:
 
 When `--model` is omitted, `run_all.sh` runs `sdv1`, `sdv2`, and
 `realvis` sequentially in that order. Pass, for example, `--model sdv1` to
-run only one model. The orchestrator uses the existing Webster dataset and
-makes seven stage invocations in order: reference generation for seeds `N`
-through `2N-1`; reference SSCD; cache-only reference proximity, which freezes one
-category-blind target-pair selection from all N reference observations per
-prompt; experiment generation for seeds 0 through `N-1`; experiment SSCD;
-cache-only experiment proximity; and the Theorem 1 loss–recovery experiment.
-Prompt selection uses `gmm` by default; set
+run only one model. The orchestrator has ten numbered stage positions:
+
+1. reference generation for seeds `N` through `2N-1`;
+2. optional shared unconditional-baseline computation (skipped by default);
+3. reference SSCD;
+4. cache-only reference proximity and frozen prompt selection;
+5. experiment generation for seeds `0` through `N-1`;
+6. experiment SSCD;
+7. cache-only experiment proximity;
+8. Theorem 1 loss–recovery;
+9. Lemma 2 convergence; and
+10. Corollary 3 CFG amplification.
+
+The default keeps stage 2 as an explicit skip and sets the Lemma 2 and
+Corollary 3 center to $\mathbf{0}$. Pass `--use-mu` to make stage 2 draw
+`B = --num-baseline-seeds` Gaussian initial latents (default `1000`) with seeds
+`N` through `N+B-1`, evaluate the empty-condition branch at the actual initial
+DDIM timestep, and save their mean as $\widehat{\boldsymbol{\mu}}$. This
+baseline stage never traverses prompt records or reads SSCD, categories,
+memorization labels, frozen selections, or cached prompt predictions.
+
+`run_all.sh` uses `spearman` prompt selection by default; set
 `--selection-strategy {gmm,gmm-evidence,spearman}` to choose the
 posterior-mean global mixture, the GMM evidence-and-correlation hybrid, or the
-within-prompt rank-correlation rule. Each strategy has its own frozen-selection,
-experiment-proximity, and Theorem 1 result directories, while all three reuse
-the same reference and experiment generation and SSCD caches.
+within-prompt rank-correlation rule. Each strategy has separate theory-result
+directories while reusing generation and SSCD caches. With `--use-mu`, the
+unconditional baseline is shared across selection strategies and lives in its
+own `S<N>_N<B>` namespace inside the reference generation run.
+
+Lemma 2 loads the exact frozen selection and evaluates every included prompt
+with all `N` experiment seeds at all `T` cached DDIM timesteps. For each
+prompt–seed–timestep cell it reads the cached $\mathbf{x}_t$ and unconditional
+epsilon prediction, reconstructs the unconditional clean estimate, and measures
+its distance from the active center: $\mathbf{0}$ by default or
+$\widehat{\boldsymbol{\mu}}$ with `--use-mu`. It draws no fresh Gaussian
+latent and runs no model inference. Corollary 3 uses the same centering choice
+for every selected prompt–target pair and all `N` experiment seeds at the actual
+initial DDIM timestep. It remains restricted to DDIM with `g = 7.5`.
+
+
 Before either generation stage, `generate.sh` performs a fast published-cache
 check. A matching complete summary, exact prompt/marker coverage, required
 regular artifact files, and marker publication order skip generation without
@@ -57,17 +88,22 @@ and safely published aggregate and per-prompt files skip SSCD before device,
 checkpoint, VAE, or SSCD-model setup. Any incomplete or uncertain cache falls
 back to per-record physical validation and resumes only the affected records.
 Reference proximity atomically rebuilds the selected strategy from the current
-validated generation and SSCD caches. Every model keeps the same seven
-auditable stage invocations, but a fully cached generation or SSCD stage
-returns without inference. A default all-model run therefore has 21 model
-stages regardless of selection state. Rebuilding the derived selection cannot
+validated generation and SSCD caches. Every model keeps the same ten numbered
+stage positions, including explicit skips when a configuration is incompatible.
+The optional baseline position is also explicitly skipped unless `--use-mu` is
+passed. A default all-model DDIM run therefore has 30 model stage positions
+without performing baseline inference. Rebuilding a derived selection cannot
 silently reuse stale completion-marker provenance.
-Pass `--download` to run or resume the shared Webster
-preparation once before the first model. Reference selection, experiment
-analysis, and Theorem 1 receive the same strategy, model, scheduler, guidance
-scale, step count, and `N`; only the reference and experiment seed blocks
-differ. Theorem 1 evaluates only prompt–target pairs included by that exact
-frozen selection; discarded and unusable prompts never enter its computation.
+
+Pass `--download` to run or resume the shared Webster preparation once before
+the first model. The reference and experiment cache stages and all downstream
+analyses receive the same model, scheduler, guidance scale, step count, and
+`N`; only the reference and experiment seed blocks differ. Theorem 1, Lemma 2,
+and Corollary 3 use only prompt–target pairs included by the exact frozen
+selection. Lemma 2 retains one cached observation per selected prompt,
+experiment seed, and timestep. `--num-baseline-seeds` affects only
+`--use-mu` runs and their mean-centered output namespaces.
+
 A downloader exit status of `2` means some records remain retryable; in that
 case the orchestrator continues with all currently available prompt–image
 pairs.
@@ -75,13 +111,13 @@ Other data errors and failures in later stages stop the sequence before the
 next model.
 
 Pass `--overwrite` only when every trajectory should be regenerated. The
-orchestrator then also recomputes SSCD. On every normal run, with or without
-that flag, `run_all.sh` atomically rebuilds only the selected strategy's frozen
-reference and experiment-proximity outputs from the validated caches. Thus a
-plain run repairs stale derived selection provenance while complete generation
-and SSCD caches are reused. A direct `sscd.sh --overwrite` recomputes only the
-requested SSCD seed pool; `run_all.sh --overwrite` coordinates the full
-expensive-cache rebuild. `--overwrite` cannot be combined with `--plot`.
+orchestrator then also recomputes SSCD and, only with `--use-mu`, the shared
+unconditional baseline. On every normal run, with or without that flag,
+`run_all.sh` atomically rebuilds only the selected strategy's frozen reference
+and experiment-proximity outputs from validated caches. Thus a plain run repairs
+stale derived selection provenance while complete generation and SSCD caches
+are reused. A direct `sscd.sh --overwrite` recomputes only the requested SSCD
+seed pool. `--overwrite` cannot be combined with `--plot`.
 
 Theorem 1 additionally averages its conditional-loss estimate over
 `--num-loss-seeds` independent corruption draws per prompt–target pair
@@ -101,24 +137,44 @@ identity. Default results are isolated under
 so changing the strategy or rebuilding its frozen selection cannot silently
 reuse or overwrite results from a different selected prompt set.
 
+The optional shared model-implied baseline is
+
+$\widehat{\boldsymbol{\mu}} = (1/B) \sum_b
+(\mathbf{x}_{T,b} - \sigma_T \boldsymbol{\epsilon}_{\emptyset}
+(\mathbf{x}_{T,b},T))/\alpha_T$.
+
+It is estimated only with `--use-mu`, exactly once at the actual initial DDIM
+timestep from `B` independent Gaussian initial latents with seeds `N` through
+`N+B-1`. The default instead sets the active center to $\mathbf{0}$ and has no
+baseline-artifact dependency. In either mode, Lemma 2 uses every
+frozen-selected prompt `i`, experiment seed `s`, and cached DDIM timestep `t`:
+
+$\widehat{\mathbf{x}}_{0\mid t,\emptyset}^{(i,s)} =
+(\mathbf{x}_{t}^{(i,s)} - \sigma_t
+\boldsymbol{\epsilon}_{\emptyset}^{(i,s,t)})/\alpha_t$.
+
+It logs `centered_distance_rmse` relative to $\mathbf{0}$ by default or to
+$\widehat{\boldsymbol{\mu}}$ with `--use-mu`. Both $\mathbf{x}_t$ and the
+unconditional epsilon prediction come from the validated experiment trajectory
+cache, producing exactly `P * N * T` rows for `P` selected prompts. Lemma 2
+performs no fresh sampling, model load, UNet evaluation, or prompt encoding.
+
 `--device auto` uses every CUDA device visible to PyTorch. Set
 `CUDA_VISIBLE_DEVICES` to restrict that pool, or pass `--device cpu`,
 `--device mps`, `--device cuda`, or `--device cuda:N` to select exactly one
-device. GPU stages run one model replica per device and shard by whole
-prompt–target pair; every seed for a pair stays on the same device. The three
-models remain sequential, so each model can use the complete visible GPU pool.
-Download, cache-only proximity, target-latent aggregation, and plotting stay on
-the CPU: they are network/I/O or small deterministic reductions for which GPU
-transfer and distributed aggregation would add overhead.
+device. Model-inference GPU stages run one model replica per device. When
+requested, the shared baseline shards Gaussian seeds across workers. Lemma 2
+and Corollary 3 shard whole selected prompts across devices; Lemma 2 workers
+perform only cached tensor loading and reductions, while Corollary 3 also loads
+its cached target and SSCD evidence. The three models remain sequential.
+Cache-only proximity and plotting stay on the CPU.
 
 The GPU stages use independent inference processes, not gradient-oriented
 `torch.distributed` DDP: there are no gradients or model updates to synchronize.
-At startup, each stage prints the exact prompt count assigned to every device.
-The `Records`, `Denoising`, SSCD, and Theorem 1 progress ETAs are worker-local;
-in particular, one prompt still evaluates all of its seeds on one GPU, so its
-current-record ETA should not become four times shorter on four GPUs. Use the
-overall stage duration or aggregate completed-prompt rate to measure scaling.
-Generation summaries also record every device's assigned and completed rows.
+With `--use-mu`, the shared baseline reports one `B`-sample unconditional-
+inference progress bar. Lemma 2 reports one `P * N * T` cached
+prompt–seed–timestep progress bar, and Corollary 3 reports one `P * N`
+prompt–experiment-seed progress bar.
 
 Each worker limits its PyTorch CPU thread pool to its share of the available
 CPUs. Generation hashes tensor files during the existing atomic write, and
@@ -137,30 +193,47 @@ faster. Long runs with repeated UNet calls are expected to benefit, but the
 speedup depends on the workload, model, GPU, and software environment.
 
 Pass `--plot` to `run_all.sh` to skip every computational stage and regenerate
-only the Theorem 1 PNG and PDF figures from saved CSVs. It follows the same
-all-model default;
-combine it with `--model` to plot one model. The experiment wrapper exposes
-the same mode directly:
+the Theorem 1, Lemma 2, and Corollary 3 PNG and PDF figures from their saved
+CSVs. With no centering option, it selects the zero-centered Lemma 2 and
+Corollary 3 outputs. Pass `--use-mu` as well to select their model-mean-centered
+outputs. The baseline command is never invoked in plot-only mode. Lemma 2 is
+explicitly skipped for non-DDIM configurations, and Corollary 3 is skipped
+unless the scheduler is DDIM and `g = 7.5`. The same all-model default applies.
 
 ```bash
 ./theorem1_loss_recovery.sh \
   --model sdv1 --scheduler ddim --g 7.5 --T 50 --N 20 \
-  --selection-strategy gmm \
-  --num-loss-seeds 20 --loss-seed 0 --plot
+  --selection-strategy spearman --num-loss-seeds 20 --loss-seed 0 --plot
+
+# Zero-centered defaults.
+./lemma2_mean_convergence.sh \
+  --model sdv1 --scheduler ddim --g 7.5 --T 50 --N 20 \
+  --selection-strategy spearman --plot
+./corollary3_cfg_amplification.sh \
+  --model sdv1 --scheduler ddim --g 7.5 --T 50 --N 20 \
+  --selection-strategy spearman --plot
+
+# Add both options to either theory wrapper to select its saved mean-centered run.
+# --use-mu --num-baseline-seeds 1000
 ```
 
-Plot-only mode verifies these values against the saved CSV and fails clearly
-instead of plotting results from a different experiment configuration.
+Zero-centered plot-only mode never loads or validates a baseline artifact. With
+`--use-mu`, it validates the shared-baseline metadata and hash without
+deserializing `mu_hat.pt`. Neither mode performs inference or rereads latent
+tensors. Plot-only validation combines each CSV's recorded centering and
+scientific fields with the requested generation-cache and frozen-selection
+context; mode-specific output paths keep zero- and mean-centered results
+separate.
 
-`N` must be positive. Experiment seeds `0` through `N-1` and reference
-seeds `N` through `2N-1` are therefore always disjoint. `run_all.sh` also
-rejects values whose reference block would exceed the supported random-seed
-domain. `--num-loss-seeds` must be positive, and `--loss-seed` must be between
-`0` and `2^63-1`, inclusive. All invoked stage wrappers use unbuffered Python
-output, and their `tqdm` progress stays visible in redirected logs: generation
-records, denoising steps, and previews; SSCD records and checkpoint bytes; and
-proximity prompt–target processing.
-When `--download` is present, Webster's ten local phases are also shown.
+`N` and `--num-baseline-seeds` must be positive. The baseline count matters only
+with `--use-mu`; its seeds `N` through `N+B-1` are disjoint from experiment
+trajectory seeds `0` through `N-1`. The prompt-selection reference still uses
+`N` through `2N-1`.
+`run_all.sh` rejects either seed block when its last seed would exceed the
+supported random-seed domain. `--num-loss-seeds` must be positive, and
+`--loss-seed` must
+be between `0` and `2^63-1`, inclusive. All invoked wrappers use unbuffered
+Python output, so their `tqdm` progress remains visible in redirected logs.
 
 To prepare or retry Webster data independently:
 
@@ -169,9 +242,10 @@ To prepare or retry Webster data independently:
 ```
 
 Choose one model and sampler configuration, then reuse it for the reference,
-experiment, and Theorem 1 stages. Choose one selection strategy for both
-proximity stages and Theorem 1. Only `--seed-start` differs between the
-reference and experiment:
+experiment, and theory stages. The example below includes the optional baseline
+and passes `--use-mu` to both Lemma 2 and Corollary 3. Omit the baseline command,
+`--use-mu`, and `--num-baseline-seeds` from those two commands for the
+zero-centered default. Only `--seed-start` differs between generation roles:
 
 ```bash
 MODEL=sdv1
@@ -179,11 +253,12 @@ SCHEDULER=ddim
 GUIDANCE_SCALE=7.5
 STEPS=50
 N=20
+NUM_BASELINE_SEEDS=1000
 NUM_LOSS_SEEDS=20
 LOSS_SEED=0
 DOWNSCALE=4
 DEVICE=auto
-SELECTION_STRATEGY=gmm
+SELECTION_STRATEGY=spearman
 
 # Independent selection reference: seeds N through 2N-1.
 ./generate.sh \
@@ -194,6 +269,16 @@ SELECTION_STRATEGY=gmm
   --N "$N" \
   --seed-start "$N" \
   --downscale "$DOWNSCALE" \
+  --device "$DEVICE"
+
+# Optional --use-mu baseline: B Gaussian seeds; no prompt traversal.
+./unconditional_baseline.sh \
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
+  --num-baseline-seeds "$NUM_BASELINE_SEEDS" \
   --device "$DEVICE"
 
 ./sscd.sh \
@@ -254,17 +339,41 @@ SELECTION_STRATEGY=gmm
   --num-loss-seeds "$NUM_LOSS_SEEDS" \
   --loss-seed "$LOSS_SEED" \
   --device "$DEVICE"
+
+# Lemma 2 reads every selected cached prompt trajectory.
+./lemma2_mean_convergence.sh \
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
+  --selection-strategy "$SELECTION_STRATEGY" \
+  --use-mu \
+  --num-baseline-seeds "$NUM_BASELINE_SEEDS" \
+  --device "$DEVICE"
+
+# Corollary 3 uses both cached branches, target latents, and target SSCD.
+./corollary3_cfg_amplification.sh \
+  --model "$MODEL" \
+  --scheduler "$SCHEDULER" \
+  --g "$GUIDANCE_SCALE" \
+  --T "$STEPS" \
+  --N "$N" \
+  --selection-strategy "$SELECTION_STRATEGY" \
+  --use-mu \
+  --num-baseline-seeds "$NUM_BASELINE_SEEDS" \
+  --device "$DEVICE"
 ```
 
-For direct theorem runs, `--sample-batch-size` remains a performance-only
-option (default `8`). It changes inference chunking, not the loss draws or
-scientific sample counts, and is intentionally not a `run_all.sh` option.
+For direct Theorem 1 runs, `--sample-batch-size` remains a performance-only
+option (default `8`). It changes inference chunking, not the scientific sample
+counts, and is intentionally not a `run_all.sh` option.
 
 The reference proximity call creates the selected strategy's frozen selection
 from all seeds `N` through `2N-1`. Run the experiment only after it succeeds.
-`run_all.sh` first performs the inexpensive generation and reference-SSCD cache
-checks, then atomically rebuilds the selection and its figures from those
-validated caches.
+`run_all.sh` checks reference generation, optionally computes or validates the
+shared baseline when `--use-mu` is passed, checks reference SSCD, and then
+atomically rebuilds the selection and its figures.
 
 Supported models are `sdv1`, `sdv2`, and `realvis`; supported schedulers are
 `ddim` and `ddpm`. The RealisticVision dataset directory remains named
@@ -272,6 +381,10 @@ Supported models are `sdv1`, `sdv2`, and `realvis`; supported schedulers are
 `Manojb/stable-diffusion-2-1-base` repository. At load time, its `main` branch
 is resolved to an immutable commit and that revision is recorded in every
 generation run configuration.
+
+Lemma 2 requires `--scheduler ddim`; Corollary 3 additionally requires
+`--g 7.5`. The optional baseline also requires DDIM. Other valid configurations
+keep all ten numbered positions and print explicit skips where needed.
 
 ### Data recovery
 
@@ -415,7 +528,21 @@ same matching pair:
 logs/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/
 ├── experiment_S0_N<N>/
 └── reference_S<N>_N<N>/
+    └── unconditional_baseline/
+        └── S<N>_N<B>/
+            ├── mu_hat.pt
+            └── metadata.json
 ```
+
+`mu_hat.pt` is the reusable float64 `[C,H,W]` baseline tensor. Its companion
+`metadata.json` records the model, actual initial timestep, `alpha_T`,
+`sigma_T`, `num_baseline_seeds`, `baseline_seed_start`, the exact baseline seed
+list, and $\|\widehat{\boldsymbol{\mu}}\|_2/\sqrt{d}$. It also pins the seed fingerprint, input
+identity, per-seed estimate-population fingerprint, and both the file and value
+hashes of the saved mean tensor, alongside model and schedule provenance.
+Different values of `B` cannot overwrite each other because each uses its own
+`S<N>_N<B>` directory. A normal baseline invocation validates and reuses these
+files; only an explicit `--overwrite` recomputes and atomically replaces them.
 
 A complete-run fast check requires the matching immutable configuration and
 summary, exact dataset/marker coverage, every required artifact as a regular
@@ -462,7 +589,7 @@ in the shared cache
 All N independent observations from seeds `N` through `2N-1` jointly determine
 each whole-prompt decision.
 
-The default `gmm` strategy pools the `(l2_norm, sscd)` observations from every
+The `gmm` strategy pools the `(l2_norm, sscd)` observations from every
 prompt with all N complete reference observations. It standardizes each of the
 two coordinates over that pooled population and fits one global,
 two-component, full-covariance Gaussian mixture. The components are ordered by
@@ -481,7 +608,7 @@ at least one and the Spearman correlation over all N paired observations is
 finite and negative. Thus an intermittent prompt is not discarded merely
 because most of its seeds occupy the low-SSCD cloud.
 
-With `--selection-strategy spearman`, each complete prompt instead computes
+The `spearman` strategy—the `run_all.sh` default—computes, for each complete prompt,
 Spearman's rank correlation between terminal latent L2 distance and
 paired-target SSCD. The whole prompt is included exactly when the correlation
 is finite and `prompt_spearman < 0`; a zero or positive correlation is
@@ -626,6 +753,111 @@ Plot-only mode reloads that same frozen selection and verifies the strategy and
 full selection hash against every CSV row before replacing both figure formats.
 It cannot silently plot a CSV produced from a different selected prompt set.
 
+### Lemma 2 convergence outputs
+
+Lemma 2 is zero-centered by default. Pass `--use-mu` to load the shared
+`mu_hat.pt` estimated from `B` Gaussian seeds `N` through `N+B-1` and instead
+center on $\widehat{\boldsymbol{\mu}}$. Both modes load the exact frozen GMM,
+GMM-evidence, or Spearman selection. For each of its `P` included prompts,
+every experiment seed `0` through `N-1`, and every timestep in the cached
+`T`-step DDIM trajectory, the experiment reconstructs the unconditional clean
+estimate from cached $\mathbf{x}_t$ and unconditional epsilon prediction. It
+computes `centered_distance_rmse` in float64 relative to the selected center and
+performs no fresh sampling or model, UNet, or prompt-encoder inference.
+
+The CSV has exactly one row per selected-prompt–generation-seed–timestep
+measurement and these columns:
+
+```text
+selection_strategy,selection_hash,model_name,scheduler_name,guidance_scale,num_inference_steps,centering_mode,num_baseline_seeds,evaluation_generation_scientific_config_hash,evaluation_schedule_sha256,baseline_generation_scientific_config_hash,baseline_mu_hat_sha256,record_id,original_index,generation_seed,step_index,timestep,alpha_t,sigma_t,snr_t,latent_dimension,centered_distance_rmse,trajectory_sha256,is_actual_ddim_initial_timestep,status,error
+```
+
+`centering_mode` is `zero` by default and `mu_hat` with `--use-mu`. Zero mode
+logs `num_baseline_seeds=0`, leaves both baseline-provenance fields empty, and
+never loads baseline metadata or tensor data. Mean-centered mode records `B`
+and the exact baseline scientific configuration and tensor hash.
+
+`evaluation_schedule_sha256` pins the physical SHA-256 of the experiment
+generation run's `schedule.pt`. With `--use-mu`, Lemma 2 also requires this
+digest to match the shared baseline/reference source's
+`source_schedule_sha256`; plot-only mode repeats that file-hash and cross-source
+check without deserializing the schedule tensor. Zero mode has no baseline
+cross-source check.
+
+For each selected prompt record, `trajectory_sha256` is the canonical hash of
+`{"latent": latent_file_sha256, "noise_prediction": prediction_file_sha256}`,
+using the two tensor hashes published by the generation completion marker. Its
+prompt-level value is repeated across that record's `N * T` rows. Plot-only
+mode rereads each selected lightweight completion marker and validates its
+identity and digest, but neither deserializes nor rehashes the tensor bytes.
+
+The two default namespaces are:
+
+```text
+# Default: active center is zero.
+outputs/<experiment-run>/lemma2_mean_convergence/centering_zero/<strategy>/<selection-hash>/
+
+# With --use-mu.
+outputs/<experiment-run>/lemma2_mean_convergence/centering_mu_hat/baseline_S<N>_N<B>/<strategy>/<selection-hash>/
+```
+
+Each contains only `lemma2_mean_convergence.csv` plus the PNG and PDF figure.
+`--output-dir` replaces the mode-specific default location. Both figures plot
+`alpha_t^2/sigma_t^2` on a logarithmic x-axis and summarize the `P * N`
+distances at each timestep with a black median curve and nested 5th–95th,
+25th–75th, and 40th–60th percentile bands. The y-axis shows distance to zero
+by default or to $\widehat{\boldsymbol{\mu}}$ with `--use-mu`.
+
+### Corollary 3 CFG-amplification outputs
+
+Corollary 3 uses the same active-center contract: $\mathbf{c}=\mathbf{0}$ by
+default and $\mathbf{c}=\widehat{\boldsymbol{\mu}}$ with `--use-mu`. It
+loads the exact frozen selection and matching experiment generation and SSCD
+caches. For every included prompt–target pair and experiment seed, it uses the
+cached initial latent and both cached epsilon-prediction branches, loads the
+target latent, and attaches same-seed target SSCD. It writes exactly `P * N`
+rows without averaging across seeds or saving latent tensors.
+
+With $\mathbf{v}_{\star}=\mathbf{x}^{\star}-\mathbf{c}$ and
+$\mathbf{v}_g=\widehat{\mathbf{x}}_{0\mid T,g}-\mathbf{c}$, the fit and
+logged metrics are
+
+$\widehat{g}=\langle\mathbf{v}_g,\mathbf{v}_{\star}\rangle/
+\|\mathbf{v}_{\star}\|_2^2$,
+
+`residual_rmse` $=\|\mathbf{v}_g-\widehat{g}\mathbf{v}_{\star}\|_2/\sqrt{d}$,
+
+`guided_target_rmse` $=\|\widehat{\mathbf{x}}_{0\mid T,g}
+-[\mathbf{c}+g(\mathbf{x}^{\star}-\mathbf{c})]\|_2/\sqrt{d}$, and
+
+`unconditional_rmse` $=\|\widehat{\mathbf{x}}_{0\mid T,\emptyset}
+-\mathbf{c}\|_2/\sqrt{d}$.
+
+`conditional_recovery_rmse` remains the distance between the conditional clean
+estimate and $\mathbf{x}^{\star}$. The implementation independently verifies
+the exact CFG identity and never fits the tautological branch-difference
+coefficient.
+
+The CSV has exactly these columns:
+
+```text
+record_id,generation_seed,timestep,alpha_t,sigma_t,snr_t,guidance_scale,centering_mode,baseline_generation_scientific_config_hash,baseline_schedule_sha256,baseline_mu_hat_sha256,num_baseline_seeds,fitted_guidance_scale,residual_rmse,guided_target_rmse,conditional_recovery_rmse,unconditional_rmse,target_sscd,status,error
+```
+
+Zero mode logs blank baseline hashes and `num_baseline_seeds=0`; `--use-mu` logs
+the shared baseline provenance and `B`. Results are isolated as follows:
+
+```text
+outputs/<experiment-run>/corollary3_cfg_amplification/centering_zero/<strategy>/<selection-hash>/
+outputs/<experiment-run>/corollary3_cfg_amplification/centering_mu_hat/baseline_S<N>_N<B>/<strategy>/<selection-hash>/
+```
+
+Each directory contains only the CSV and its PNG/PDF figure. The 4-by-4 STIX
+figure plots the fitted guidance scale against residual RMSE for the active
+center. Points use the fixed `[0, 1]` viridis scale for same-seed target SSCD,
+with an opaque `SSCD` colorbar and a reference line at `g = 7.5`. Plot-only
+mode selects and validates the requested centering mode without computation.
+
 ## Offline validation
 
 The unit suite uses synthetic tensors and mocked components; it performs no
@@ -635,5 +867,6 @@ network requests and loads no real diffusion or SSCD model:
 python -m compileall scripts utils
 pytest -q
 bash -n run_all.sh download_webster.sh generate.sh sscd.sh \
-  compute_proximity.sh theorem1_loss_recovery.sh
+  compute_proximity.sh theorem1_loss_recovery.sh unconditional_baseline.sh \
+  lemma2_mean_convergence.sh corollary3_cfg_amplification.sh
 ```

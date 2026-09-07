@@ -2079,6 +2079,18 @@ def test_generation_writes_new_or_explicitly_overwritten_record(
             "theorem1_loss_recovery.sh",
             "scripts/theorem1_loss_recovery.py",
         ),
+        (
+            "unconditional_baseline.sh",
+            "scripts/unconditional_baseline.py",
+        ),
+        (
+            "lemma2_mean_convergence.sh",
+            "scripts/lemma2_mean_convergence.py",
+        ),
+        (
+            "corollary3_cfg_amplification.sh",
+            "scripts/corollary3_cfg_amplification.py",
+        ),
     ],
 )
 def test_shell_wrappers_resolve_the_project_root_from_any_directory(
@@ -2166,6 +2178,9 @@ fi
         "sscd.sh",
         "compute_proximity.sh",
         "theorem1_loss_recovery.sh",
+        "unconditional_baseline.sh",
+        "lemma2_mean_convergence.sh",
+        "corollary3_cfg_amplification.sh",
     )
     for wrapper in wrappers:
         path = project / wrapper
@@ -2218,7 +2233,7 @@ fi
         "\t--model\tsdv2\t--scheduler\tddpm\t--g\t3.25"
         "\t--T\t12\t--N\t4\t--seed-start\t0"
     )
-    gmm_selection = "\t--selection-strategy\tgmm"
+    default_selection = "\t--selection-strategy\tspearman"
     spearman_selection = "\t--selection-strategy\tspearman"
     proximity_overwrite = "\t--overwrite"
     assert result.returncode == 0, result.stderr
@@ -2229,16 +2244,10 @@ fi
         ),
         f"generate.sh{reference}\t--device\tcuda:2\t--downscale\t8",
         f"sscd.sh{reference}\t--device\tcuda:2",
-        (
-            f"compute_proximity.sh{reference}{spearman_selection}"
-            f"{proximity_overwrite}"
-        ),
+        (f"compute_proximity.sh{reference}{spearman_selection}{proximity_overwrite}"),
         f"generate.sh{experiment}\t--device\tcuda:2\t--downscale\t8",
         f"sscd.sh{experiment}\t--device\tcuda:2",
-        (
-            f"compute_proximity.sh{experiment}{spearman_selection}"
-            f"{proximity_overwrite}"
-        ),
+        (f"compute_proximity.sh{experiment}{spearman_selection}{proximity_overwrite}"),
         (
             "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddpm"
             "\t--g\t3.25\t--T\t12\t--N\t4"
@@ -2246,11 +2255,14 @@ fi
             "\t--loss-seed\t11\t--device\tcuda:2"
         ),
     ]
-    stage_offsets = [result.stdout.index(f"[{stage}/8]") for stage in range(1, 9)]
+    stage_offsets = [result.stdout.index(f"[{stage}/11]") for stage in range(1, 12)]
     assert stage_offsets == sorted(stage_offsets)
     assert "retryable records" not in result.stderr
     assert "download progress marker" in result.stderr
     assert "reference (seeds 4-7)" in result.stdout
+    assert "[3/11] Skipping shared unconditional baseline" in result.stdout
+    assert "[10/11] Skipping Lemma 2" in result.stdout
+    assert "[11/11] Skipping Corollary 3" in result.stdout
 
     log.unlink()
     environment["DOWNLOAD_EXIT_CODE"] = "1"
@@ -2296,7 +2308,7 @@ fi
     )
     skipped_lines = log.read_text(encoding="utf-8").splitlines()
     assert skipped.returncode == 0, skipped.stderr
-    expected_stage_wrappers = [
+    expected_compatible_stage_wrappers = [
         "generate.sh",
         "sscd.sh",
         "compute_proximity.sh",
@@ -2304,6 +2316,8 @@ fi
         "sscd.sh",
         "compute_proximity.sh",
         "theorem1_loss_recovery.sh",
+        "lemma2_mean_convergence.sh",
+        "corollary3_cfg_amplification.sh",
     ]
     expected_skipped_lines = []
     for model in ("sdv1", "sdv2", "realvis"):
@@ -2320,19 +2334,19 @@ fi
                 f"generate.sh{model_reference}\t--device\tauto\t--downscale\t8",
                 f"sscd.sh{model_reference}\t--device\tauto",
                 (
-                    f"compute_proximity.sh{model_reference}{gmm_selection}"
+                    f"compute_proximity.sh{model_reference}{default_selection}"
                     f"{proximity_overwrite}"
                 ),
                 f"generate.sh{model_experiment}\t--device\tauto\t--downscale\t8",
                 f"sscd.sh{model_experiment}\t--device\tauto",
                 (
-                    f"compute_proximity.sh{model_experiment}{gmm_selection}"
+                    f"compute_proximity.sh{model_experiment}{default_selection}"
                     f"{proximity_overwrite}"
                 ),
                 (
                     f"theorem1_loss_recovery.sh\t--model\t{model}"
                     "\t--scheduler\tddpm\t--g\t3.25\t--T\t12\t--N\t1"
-                    "\t--selection-strategy\tgmm\t--num-loss-seeds\t20"
+                    "\t--selection-strategy\tspearman\t--num-loss-seeds\t20"
                     "\t--loss-seed\t0"
                     "\t--device\tauto"
                 ),
@@ -2340,15 +2354,25 @@ fi
         )
     assert skipped_lines == expected_skipped_lines
     assert all(not line.startswith("download_webster.sh") for line in skipped_lines)
-    assert all(skipped.stdout.count(f"[{stage}/7]") == 3 for stage in range(1, 8))
+    assert all(skipped.stdout.count(f"[{stage}/10]") == 3 for stage in range(1, 11))
     assert skipped.stdout.count("Webster data preparation skipped") == 3
     assert "download progress marker" not in skipped.stderr
     assert skipped.stdout.count("Running Theorem 1 loss–recovery experiment") == 3
+    assert skipped.stdout.count("[2/10] Skipping shared unconditional baseline") == 3
+    assert skipped.stdout.count("[9/10] Skipping Lemma 2") == 3
+    assert skipped.stdout.count("[10/10] Skipping Corollary 3") == 3
     assert "All-model pipeline complete." in skipped.stdout
 
     log.unlink()
     default_run = subprocess.run(
-        ["bash", str(run_all), "--model", "realvis"],
+        [
+            "bash",
+            str(run_all),
+            "--model",
+            "realvis",
+            "--num-baseline-seeds",
+            "7",
+        ],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -2366,24 +2390,162 @@ fi
         "sscd.sh",
         "compute_proximity.sh",
         "theorem1_loss_recovery.sh",
+        "lemma2_mean_convergence.sh",
+        "corollary3_cfg_amplification.sh",
     ]
+    assert all(
+        not line.startswith("unconditional_baseline.sh\t") for line in default_lines
+    )
+    assert all("\t--use-mu" not in line for line in default_lines)
     assert [
         line.split("\t", 1)[0]
         for line in default_lines
         if line.endswith(proximity_overwrite)
     ] == ["compute_proximity.sh", "compute_proximity.sh"]
-    assert default_lines[-1] == (
+    assert default_lines[-3] == (
         "theorem1_loss_recovery.sh\t--model\trealvis\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tgmm"
+        "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
         "\t--num-loss-seeds\t20"
         "\t--loss-seed\t0\t--device\tauto"
     )
-    stage_offsets = [default_run.stdout.index(f"[{stage}/7]") for stage in range(1, 8)]
+    assert default_lines[-2] == (
+        "lemma2_mean_convergence.sh\t--model\trealvis\t--scheduler\tddim"
+        "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
+        "\t--device\tauto"
+    )
+    assert default_lines[-1] == (
+        "corollary3_cfg_amplification.sh\t--model\trealvis\t--scheduler\tddim"
+        "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
+        "\t--device\tauto"
+    )
+    stage_offsets = [
+        default_run.stdout.index(f"[{stage}/10]") for stage in range(1, 11)
+    ]
     assert stage_offsets == sorted(stage_offsets)
+    assert "[2/10] Skipping shared unconditional baseline" in default_run.stdout
+    assert (
+        "[9/10] Computing zero-centered Lemma 2 from cached prompt trajectories"
+        in default_run.stdout
+    )
+    assert "fresh Gaussian evaluations" not in default_run.stdout
+
+    log.unlink()
+    custom_normal = subprocess.run(
+        [
+            "bash",
+            str(run_all),
+            "--use-mu",
+            "--model",
+            "sdv2",
+            "--scheduler",
+            "ddim",
+            "--g",
+            "7.5",
+            "--T",
+            "12",
+            "--N",
+            "4",
+            "--num-baseline-seeds",
+            "7",
+            "--selection-strategy",
+            "spearman",
+            "--device",
+            "cuda:2",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert custom_normal.returncode == 0, custom_normal.stderr
+    custom_normal_lines = log.read_text(encoding="utf-8").splitlines()
+    assert (
+        "unconditional_baseline.sh\t--model\tsdv2\t--scheduler\tddim"
+        "\t--g\t7.5\t--T\t12\t--N\t4\t--num-baseline-seeds\t7"
+        "\t--device\tcuda:2" in custom_normal_lines
+    )
+    assert (
+        "lemma2_mean_convergence.sh\t--model\tsdv2\t--scheduler\tddim"
+        "\t--g\t7.5\t--T\t12\t--N\t4"
+        "\t--selection-strategy\tspearman\t--use-mu"
+        "\t--num-baseline-seeds\t7\t--device\tcuda:2" in custom_normal_lines
+    )
+    assert (
+        "corollary3_cfg_amplification.sh\t--model\tsdv2\t--scheduler\tddim"
+        "\t--g\t7.5\t--T\t12\t--N\t4"
+        "\t--selection-strategy\tspearman\t--use-mu"
+        "\t--num-baseline-seeds\t7\t--device\tcuda:2" in custom_normal_lines
+    )
+    assert (
+        "[2/10] Computing/reusing shared unconditional baseline" in custom_normal.stdout
+    )
+    assert "[9/10] Computing mu-centered Lemma 2" in custom_normal.stdout
+
+    log.unlink()
+    custom_plot = subprocess.run(
+        [
+            "bash",
+            str(run_all),
+            "--plot",
+            "--use-mu",
+            "--model",
+            "sdv2",
+            "--scheduler",
+            "ddim",
+            "--g",
+            "7.5",
+            "--T",
+            "12",
+            "--N",
+            "4",
+            "--num-baseline-seeds",
+            "7",
+            "--selection-strategy",
+            "spearman",
+            "--device",
+            "cuda:2",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert custom_plot.returncode == 0, custom_plot.stderr
+    custom_plot_lines = log.read_text(encoding="utf-8").splitlines()
+    lemma_plot_lines = [
+        line
+        for line in custom_plot_lines
+        if line.startswith("lemma2_mean_convergence.sh\t")
+    ]
+    assert lemma_plot_lines == [
+        "lemma2_mean_convergence.sh\t--model\tsdv2\t--scheduler\tddim"
+        "\t--g\t7.5\t--T\t12\t--N\t4\t--selection-strategy\tspearman"
+        "\t--use-mu\t--num-baseline-seeds\t7\t--plot"
+    ]
+    corollary_plot_lines = [
+        line
+        for line in custom_plot_lines
+        if line.startswith("corollary3_cfg_amplification.sh\t")
+    ]
+    assert corollary_plot_lines == [
+        "corollary3_cfg_amplification.sh\t--model\tsdv2\t--scheduler\tddim"
+        "\t--g\t7.5\t--T\t12\t--N\t4\t--selection-strategy\tspearman"
+        "\t--use-mu\t--num-baseline-seeds\t7\t--plot"
+    ]
+    assert all(
+        "\t--device\t" not in line for line in lemma_plot_lines + corollary_plot_lines
+    )
+    assert all(
+        not line.startswith("unconditional_baseline.sh\t") for line in custom_plot_lines
+    )
 
     frozen = project / (
         "data/webster/selection/realisticvision/"
-        "realvis_ddpm_g3.25_T12_N4/gmm/reference_S4_N4"
+        "realvis_ddpm_g3.25_T12_N4/spearman/reference_S4_N4"
     )
     frozen.mkdir(parents=True)
     log.unlink()
@@ -2423,27 +2585,30 @@ fi
         f"generate.sh{normalized_reference}\t--device\tauto\t--downscale\t4",
         f"sscd.sh{normalized_reference}\t--device\tauto",
         (
-            f"compute_proximity.sh{normalized_reference}{gmm_selection}"
+            f"compute_proximity.sh{normalized_reference}{default_selection}"
             f"{proximity_overwrite}"
         ),
         f"generate.sh{normalized_experiment}\t--device\tauto\t--downscale\t4",
         f"sscd.sh{normalized_experiment}\t--device\tauto",
         (
-            f"compute_proximity.sh{normalized_experiment}{gmm_selection}"
+            f"compute_proximity.sh{normalized_experiment}{default_selection}"
             f"{proximity_overwrite}"
         ),
         (
             "theorem1_loss_recovery.sh\t--model\trealvis"
             "\t--scheduler\tddpm\t--g\t3.25\t--T\t12\t--N\t4"
-            "\t--selection-strategy\tgmm\t--num-loss-seeds\t20"
+            "\t--selection-strategy\tspearman\t--num-loss-seeds\t20"
             "\t--loss-seed\t0"
             "\t--device\tauto"
         ),
     ]
-    stage_offsets = [reused.stdout.index(f"[{stage}/7]") for stage in range(1, 8)]
+    stage_offsets = [reused.stdout.index(f"[{stage}/10]") for stage in range(1, 11)]
     assert stage_offsets == sorted(stage_offsets)
     assert "Checking/resuming proximity-selection reference" in reused.stdout
     assert "Checking/resuming proximity-selection SSCD" in reused.stdout
+    assert "[2/10] Skipping shared unconditional baseline" in reused.stdout
+    assert "[9/10] Skipping Lemma 2" in reused.stdout
+    assert "[10/10] Skipping Corollary 3" in reused.stdout
     frozen.rmdir()
 
     log.unlink()
@@ -2482,9 +2647,12 @@ fi
         "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddpm"
         "\t--g\t3.25\t--T\t12\t--N\t4\t--selection-strategy\tgmm-evidence"
         "\t--num-loss-seeds\t6"
-        "\t--loss-seed\t13\t--device\tcuda:2\t--plot"
+        "\t--loss-seed\t13\t--device\tcuda:2\t--plot",
     ]
-    assert "[1/1]" in plot_only.stdout
+    assert "[1/3]" in plot_only.stdout
+    assert "[2/3] Skipping Lemma 2" in plot_only.stdout
+    assert "[3/3] Skipping Corollary 3" in plot_only.stdout
+    assert "unconditional_baseline.sh" not in log.read_text(encoding="utf-8")
 
     log.unlink()
     all_plots = subprocess.run(
@@ -2500,24 +2668,56 @@ fi
     assert log.read_text(encoding="utf-8").splitlines() == [
         (
             "theorem1_loss_recovery.sh\t--model\tsdv1\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tgmm"
+            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
             "\t--num-loss-seeds\t20"
             "\t--loss-seed\t0\t--device\tauto\t--plot"
+        ),
+        (
+            "lemma2_mean_convergence.sh\t--model\tsdv1\t--scheduler\tddim"
+            "\t--g\t7.5\t--T\t50\t--N\t20"
+            "\t--selection-strategy\tspearman\t--plot"
+        ),
+        (
+            "corollary3_cfg_amplification.sh\t--model\tsdv1\t--scheduler\tddim"
+            "\t--g\t7.5\t--T\t50\t--N\t20"
+            "\t--selection-strategy\tspearman\t--plot"
         ),
         (
             "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tgmm"
+            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
             "\t--num-loss-seeds\t20"
             "\t--loss-seed\t0\t--device\tauto\t--plot"
         ),
         (
+            "lemma2_mean_convergence.sh\t--model\tsdv2\t--scheduler\tddim"
+            "\t--g\t7.5\t--T\t50\t--N\t20"
+            "\t--selection-strategy\tspearman\t--plot"
+        ),
+        (
+            "corollary3_cfg_amplification.sh\t--model\tsdv2\t--scheduler\tddim"
+            "\t--g\t7.5\t--T\t50\t--N\t20"
+            "\t--selection-strategy\tspearman\t--plot"
+        ),
+        (
             "theorem1_loss_recovery.sh\t--model\trealvis\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tgmm"
+            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
             "\t--num-loss-seeds\t20"
             "\t--loss-seed\t0\t--device\tauto\t--plot"
         ),
+        (
+            "lemma2_mean_convergence.sh\t--model\trealvis\t--scheduler\tddim"
+            "\t--g\t7.5\t--T\t50\t--N\t20"
+            "\t--selection-strategy\tspearman\t--plot"
+        ),
+        (
+            "corollary3_cfg_amplification.sh\t--model\trealvis\t--scheduler\tddim"
+            "\t--g\t7.5\t--T\t50\t--N\t20"
+            "\t--selection-strategy\tspearman\t--plot"
+        ),
     ]
-    assert all_plots.stdout.count("[1/1]") == 3
+    assert all_plots.stdout.count("[1/3]") == 3
+    assert all_plots.stdout.count("[2/3]") == 3
+    assert all_plots.stdout.count("[3/3]") == 3
     assert "All-model pipeline complete." in all_plots.stdout
 
     log.unlink()
@@ -2532,12 +2732,12 @@ fi
     )
     assert all_defaults.returncode == 0, all_defaults.stderr
     all_default_lines = log.read_text(encoding="utf-8").splitlines()
-    expected_default_wrappers = expected_stage_wrappers
+    expected_default_wrappers = expected_compatible_stage_wrappers
     assert [line.split("\t", 1)[0] for line in all_default_lines] == (
         expected_default_wrappers * 3
     )
     assert [line.split("\t")[2] for line in all_default_lines] == (
-        ["sdv1"] * 7 + ["sdv2"] * 7 + ["realvis"] * 7
+        ["sdv1"] * 9 + ["sdv2"] * 9 + ["realvis"] * 9
     )
 
     log.unlink()
@@ -2559,11 +2759,11 @@ fi
     failed_model_lines = log.read_text(encoding="utf-8").splitlines()
     assert failed_model.returncode == 17
     assert [line.split("\t", 1)[0] for line in failed_model_lines] == [
-        *expected_stage_wrappers,
+        *expected_compatible_stage_wrappers,
         "generate.sh",
     ]
     assert [line.split("\t")[2] for line in failed_model_lines] == (
-        ["sdv1"] * 7 + ["sdv2"]
+        ["sdv1"] * 9 + ["sdv2"]
     )
     assert "pipeline failed for model sdv2 (exit 17)" in failed_model.stderr
     assert "\t--model\trealvis\t" not in log.read_text(encoding="utf-8")
@@ -2585,7 +2785,7 @@ fi
         "download_webster.sh"
     ) == 1
     assert [line.split("\t")[2] for line in downloaded_lines[1:]] == (
-        ["sdv1"] * 7 + ["sdv2"] * 7 + ["realvis"] * 7
+        ["sdv1"] * 9 + ["sdv2"] * 9 + ["realvis"] * 9
     )
 
     log.unlink()
@@ -2613,10 +2813,13 @@ fi
     assert "\t--N\t21\t--seed-start\t0" in large_seed_count_lines[3]
     assert large_seed_count_lines[-1] == (
         "theorem1_loss_recovery.sh\t--model\tsdv1\t--scheduler\tddpm"
-        "\t--g\t7.5\t--T\t50\t--N\t21\t--selection-strategy\tgmm"
+        "\t--g\t7.5\t--T\t50\t--N\t21\t--selection-strategy\tspearman"
         "\t--num-loss-seeds\t20"
         "\t--loss-seed\t0\t--device\tauto"
     )
+    assert "[2/10] Skipping shared unconditional baseline" in large_seed_count.stdout
+    assert "[9/10] Skipping Lemma 2" in large_seed_count.stdout
+    assert "[10/10] Skipping Corollary 3" in large_seed_count.stdout
 
     log.unlink()
     overwritten = subprocess.run(
@@ -2639,11 +2842,14 @@ fi
     overwritten_lines = log.read_text(encoding="utf-8").splitlines()
     assert overwritten.returncode == 0, overwritten.stderr
     assert [line.split("\t", 1)[0] for line in overwritten_lines] == (
-        expected_stage_wrappers
+        expected_compatible_stage_wrappers
     )
-    for line in overwritten_lines[:-1]:
+    for line in overwritten_lines[:6]:
         assert line.endswith("\t--overwrite")
-    assert "--overwrite" not in overwritten_lines[-1]
+    assert all("--overwrite" not in line for line in overwritten_lines[6:])
+    assert all(
+        not line.startswith("unconditional_baseline.sh\t") for line in overwritten_lines
+    )
     assert "Regenerating proximity-selection reference" in overwritten.stdout
     assert "Regenerating experiment trajectories" in overwritten.stdout
 
@@ -2659,12 +2865,18 @@ fi
     )
     all_overwritten_lines = log.read_text(encoding="utf-8").splitlines()
     assert all_overwritten.returncode == 0, all_overwritten.stderr
-    assert len(all_overwritten_lines) == 21
+    assert len(all_overwritten_lines) == 27
     assert sum(line.endswith("\t--overwrite") for line in all_overwritten_lines) == 18
     assert all(
         "--overwrite" not in line
         for line in all_overwritten_lines
-        if line.startswith("theorem1_loss_recovery.sh")
+        if line.startswith(
+            (
+                "theorem1_loss_recovery.sh",
+                "lemma2_mean_convergence.sh",
+                "corollary3_cfg_amplification.sh",
+            )
+        )
     )
 
     log.unlink()
@@ -2708,6 +2920,33 @@ fi
         assert not log.exists(), "invalid N must fail before any stage"
         assert "invalid --N" in invalid.stderr
 
+    for invalid_baseline_seeds in (
+        "0",
+        "not-an-integer",
+        "9223372036854775789",
+    ):
+        invalid = subprocess.run(
+            [
+                "bash",
+                str(run_all),
+                "--N",
+                "20",
+                "--num-baseline-seeds",
+                invalid_baseline_seeds,
+            ],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert invalid.returncode == 2
+        assert not log.exists(), (
+            "invalid baseline seed count must fail before any stage"
+        )
+        assert "invalid --num-baseline-seeds" in invalid.stderr
+
     for invalid_guidance in ("nan", "inf", "1e999999"):
         invalid = subprocess.run(
             ["bash", str(run_all), "--g", invalid_guidance],
@@ -2722,14 +2961,14 @@ fi
         assert not log.exists(), "invalid guidance must fail before any stage"
         assert "invalid --g" in invalid.stderr
 
-    invalid_theorem_values = (
+    invalid_theory_values = (
         ("--num-loss-seeds", "0"),
         ("--num-loss-seeds", "not-an-integer"),
         ("--loss-seed", "-1"),
         ("--loss-seed", "not-an-integer"),
         ("--loss-seed", "9223372036854775808"),
     )
-    for option, value in invalid_theorem_values:
+    for option, value in invalid_theory_values:
         invalid = subprocess.run(
             ["bash", str(run_all), option, value],
             cwd=tmp_path,
@@ -2781,6 +3020,9 @@ fi
         "sscd.sh",
         "compute_proximity.sh",
         "theorem1_loss_recovery.sh",
+        "unconditional_baseline.sh",
+        "lemma2_mean_convergence.sh",
+        "corollary3_cfg_amplification.sh",
     )
     for wrapper in wrappers:
         path = project / wrapper
@@ -2808,10 +3050,10 @@ fi
         "sscd.sh",
         "compute_proximity.sh",
         "theorem1_loss_recovery.sh",
+        "lemma2_mean_convergence.sh",
+        "corollary3_cfg_amplification.sh",
     ]
-    proximity = [
-        line for line in lines if line.startswith("compute_proximity.sh\t")
-    ]
+    proximity = [line for line in lines if line.startswith("compute_proximity.sh\t")]
     assert len(proximity) == 2
     assert all(line.endswith("\t--overwrite") for line in proximity)
     assert all(
@@ -2833,9 +3075,43 @@ def test_run_all_documents_default_selection_strategy(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "--selection-strategy NAME" in result.stdout
-    assert "gmm, gmm-evidence, or spearman (default: gmm)" in result.stdout
+    assert "gmm, gmm-evidence, or spearman (default: spearman)" in result.stdout
     assert "--overwrite" in result.stdout
     assert "only option that forces their regeneration" in result.stdout
+    assert "shared baseline when --use-mu is passed" in result.stdout
+    assert "--num-baseline-seeds B" in result.stdout
+    assert "Baseline Gaussian seeds N..N+B-1 used with --use-mu" in result.stdout
+    assert "(default: 1000)" in result.stdout
+    assert "--use-mu" in result.stdout
+    assert "use zero as their center by default" in result.stdout
+    assert "With --use-mu, the shared baseline" in result.stdout
+    assert "B independent Gaussian" in result.stdout
+    assert "seeds N..N+B-1" in result.stdout
+    assert "empty-condition model branch directly" in result.stdout
+    assert "never traverses prompts" in result.stdout
+    assert "SSCD, categories, memorization labels" in result.stdout
+    assert "exact frozen selection" in result.stdout
+    assert "every included prompt" in result.stdout
+    assert "experiment seed" in result.stdout
+    assert "0..N-1, and cached DDIM timestep" in result.stdout
+    assert "P*N*T measurements relative to" in result.stdout
+    assert "cached x_t and unconditional epsilon" in result.stdout
+    assert (
+        "without drawing fresh Gaussian latents or running model inference"
+        in result.stdout
+    )
+    assert "cache-only workers shard whole selected prompts" in result.stdout
+    assert "fresh Gaussian evaluations" not in result.stdout
+    assert "reuses the same Gaussian latent across" not in result.stdout
+    assert "--num-timesteps" not in result.stdout
+    assert "actual initial DDIM timestep" in result.stdout
+    assert "guidance scale 7.5" in result.stdout
+    assert "both cached prediction" in result.stdout
+    assert "same-seed target SSCD" in result.stdout
+    assert "optional baseline retains a numbered stage" in result.stdout
+    assert "numbered Corollary 3 skip" in result.stdout
+    assert "--num-lemma2-seeds" not in result.stdout
+    assert "--lemma2-seed-start" not in result.stdout
 
 
 def test_run_all_rejects_unknown_selection_strategy(tmp_path: Path) -> None:
@@ -2860,6 +3136,100 @@ def _imports(tree: ast.AST) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             values.add(node.module)
     return values
+
+
+def test_lemma2_source_is_cached_prompt_major_without_model_inference() -> None:
+    path = ROOT / "scripts/lemma2_mean_convergence.py"
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    imports = _imports(tree)
+    assert imports.isdisjoint(
+        {
+            "utils.models.loading",
+            "utils.models.sampling",
+            "utils.models.schedulers",
+        }
+    )
+    calls = {
+        node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Name, ast.Attribute))
+    }
+    assert calls.isdisjoint(
+        {
+            "build_scheduler",
+            "compile_loaded_unet",
+            "encode_prompt_condition",
+            "load_model_components",
+            "make_initial_noise",
+            "predict_conditional_epsilon",
+            "preflight_model_components",
+            "randn",
+            "randn_like",
+        }
+    )
+    assert {
+        "_schedule_file_sha256",
+        "file_sha256",
+        "resolve_devices",
+        "round_robin_shard",
+        "safe_torch_load",
+        "validate_generation_record",
+    } <= calls
+    for snippet in (
+        "selection.prompt_frame",
+        'tensor_names=("latent", "noise_prediction")',
+        "prediction_value[0]",
+        "latents[:, step_index]",
+        "unconditional_epsilon[:, step_index]",
+        "total=len(prompt_rows) * cells_per_prompt",
+        "canonical prompt-major, seed-major, timestep-major CSV grid",
+        '"evaluation_schedule_sha256": contract.identity.schedule_sha256',
+        '"evaluation_schedule_sha256": identity.schedule_sha256',
+        "baseline.source_schedule_sha256 != contract.identity.schedule_sha256",
+        "verify_file_hashes=False",
+    ):
+        assert snippet in source
+
+
+def test_readme_documents_exact_cached_lemma2_schema_and_provenance() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    schema = (
+        "selection_strategy,selection_hash,model_name,scheduler_name,"
+        "guidance_scale,num_inference_steps,centering_mode,num_baseline_seeds,"
+        "evaluation_generation_scientific_config_hash,"
+        "evaluation_schedule_sha256,"
+        "baseline_generation_scientific_config_hash,baseline_mu_hat_sha256,"
+        "record_id,original_index,generation_seed,step_index,timestep,alpha_t,"
+        "sigma_t,snr_t,latent_dimension,centered_distance_rmse,trajectory_sha256,"
+        "is_actual_ddim_initial_timestep,status,error"
+    )
+    corollary_schema = (
+        "record_id,generation_seed,timestep,alpha_t,sigma_t,snr_t,guidance_scale,"
+        "centering_mode,baseline_generation_scientific_config_hash,"
+        "baseline_schedule_sha256,baseline_mu_hat_sha256,num_baseline_seeds,"
+        "fitted_guidance_scale,residual_rmse,guided_target_rmse,"
+        "conditional_recovery_rmse,unconditional_rmse,target_sscd,status,error"
+    )
+    assert schema in readme
+    assert corollary_schema in readme
+    assert "one row per selected-prompt–generation-seed–timestep" in readme
+    assert "P * N * T" in readme
+    assert "physical SHA-256 of the experiment" in readme
+    assert "`source_schedule_sha256`" in readme
+    assert "plot-only mode repeats that file-hash and cross-source" in readme
+    assert "without deserializing the schedule tensor" in readme
+    assert 'canonical hash of\n`{"latent": latent_file_sha256' in readme
+    assert "neither deserializes nor rehashes the tensor bytes" in readme
+    assert "centering_zero/<strategy>/<selection-hash>/" in readme
+    assert "centering_mu_hat/baseline_S<N>_N<B>/<strategy>/<selection-hash>/" in readme
+    assert "Zero-centered plot-only mode never loads or validates a baseline" in readme
+    assert r"\widehat{\boldsymbol{\mu}}" in readme
+    assert "one row per evaluation-seed–timestep" not in readme
+    assert "runs fresh unconditional inference" not in readme
+    assert "distance_to_mu_rmse" not in readme
+    assert "unconditional_baseline_rmse" not in readme
 
 
 def test_prompt_selection_is_owned_by_proximity_not_generation_or_sscd() -> None:
@@ -2905,6 +3275,8 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
             "generation.py",
             "plotting.py",
             "latent_statistics.py",
+            "_unconditional_baseline_metadata.py",
+            "unconditional_baseline.py",
             "proximity.py",
             "sscd.py",
         },
@@ -2938,6 +3310,9 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
         "generate.py",
         "sscd.py",
         "theorem1_loss_recovery.py",
+        "unconditional_baseline.py",
+        "lemma2_mean_convergence.py",
+        "corollary3_cfg_amplification.py",
     }
     assert not (ROOT / "utils/runtime_provenance.py").exists()
 

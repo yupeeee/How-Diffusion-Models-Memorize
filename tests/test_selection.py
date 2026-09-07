@@ -268,7 +268,7 @@ def test_reference_contract_is_dynamic_and_has_no_fixed_seed_split(
     guidance_scale: float,
     num_inference_steps: int,
 ) -> None:
-    assert DEFAULT_SELECTION_STRATEGY == "gmm"
+    assert DEFAULT_SELECTION_STRATEGY == "spearman"
     assert SELECTION_STRATEGIES == ("gmm", "gmm-evidence", "spearman")
     assert SELECTION_POLICIES == {
         "gmm": "prompt_gmm_mean_low_mode_probability_lt_half",
@@ -281,7 +281,7 @@ def test_reference_contract_is_dynamic_and_has_no_fixed_seed_split(
         inspect.signature(build_target_pair_selection)
         .parameters["selection_strategy"]
         .default
-        == "gmm"
+        == "spearman"
     )
     assert (
         inspect.signature(build_target_pair_selection).parameters["overwrite"].default
@@ -680,13 +680,17 @@ def test_gmm_load_rejects_tampered_posterior(tmp_path: Path) -> None:
         records=records,
         paired=_gmm_paired(records),
     )
-    directory = target_pair_selection_directory(tmp_path, **_identity())
+    directory = target_pair_selection_directory(
+        tmp_path, **_identity(), selection_strategy="gmm"
+    )
     frame = pd.read_csv(directory / "selection.csv")
     frame.loc[0, "gmm_low_mode_probability"] *= 0.9
     frame.to_csv(directory / "selection.csv", index=False)
 
     with pytest.raises(TargetPairSelectionError):
-        load_target_pair_selection(tmp_path, **_identity())
+        load_target_pair_selection(
+            tmp_path, **_identity(), selection_strategy="gmm"
+        )
 
 
 def test_gmm_load_rejects_tampered_marginal_boundary(tmp_path: Path) -> None:
@@ -697,14 +701,18 @@ def test_gmm_load_rejects_tampered_marginal_boundary(tmp_path: Path) -> None:
         records=records,
         paired=_gmm_paired(records),
     )
-    directory = target_pair_selection_directory(tmp_path, **_identity())
+    directory = target_pair_selection_directory(
+        tmp_path, **_identity(), selection_strategy="gmm"
+    )
     config_path = directory / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
     config["gmm_fit"]["sscd_marginal_boundary"] += 0.01
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
     with pytest.raises(TargetPairSelectionError, match="boundary is inconsistent"):
-        load_target_pair_selection(tmp_path, **_identity())
+        load_target_pair_selection(
+            tmp_path, **_identity(), selection_strategy="gmm"
+        )
 
 
 @pytest.mark.parametrize("num_seeds", (3, 7))

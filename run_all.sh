@@ -10,7 +10,9 @@ SCHEDULER="ddim"
 GUIDANCE_SCALE="7.5"
 NUM_INFERENCE_STEPS="50"
 NUM_SEEDS="20"
-SELECTION_STRATEGY="gmm"
+NUM_BASELINE_SEEDS="1000"
+USE_MU=0
+SELECTION_STRATEGY="spearman"
 NUM_LOSS_SEEDS="20"
 LOSS_SEED="0"
 DOWNSCALE_FACTOR="4"
@@ -27,21 +29,28 @@ usage() {
 Usage: ./run_all.sh [OPTIONS]
 
 Build proximity-rule prompt selection from an independent reference, then run
-the matching experiment and Theorem 1 analysis. Webster data preparation is
-opt-in.
+the matching experiment, Theorem 1 analysis, Lemma 2 analysis, and Corollary 3
+CFG-amplification analysis. Webster data preparation is opt-in. Both theory
+experiments are zero-centered unless --use-mu is passed.
 
 Options:
   --download            Run/resume Webster data preparation first
-  --plot                Plot Theorem 1 from its saved CSV; run no computation
-  --overwrite           Regenerate trajectories and SSCD caches
+  --plot                Plot Theorem 1, Lemma 2, and Corollary 3 from saved CSVs
+  --overwrite           Regenerate trajectories and SSCD; also regenerate the
+                        shared baseline when --use-mu is passed
   --model MODEL         Run only sdv1, sdv2, or realvis (default: all three)
   --scheduler NAME      ddim or ddpm (default: ddim)
   --g FLOAT             Classifier-free guidance scale (default: 7.5)
-  --T INTEGER           Number of inference steps (default: 50)
-  --N INTEGER           Seeds per pool: experiment 0..N-1, reference N..2N-1
-                        (default: 20)
+  --T INTEGER           Inference steps per cached trajectory (default: 50)
+  --N INTEGER           Experiment-trajectory seeds 0..N-1; selection
+                        reference seeds N..2N-1 (default: 20)
+  --num-baseline-seeds B
+                        Baseline Gaussian seeds N..N+B-1 used with --use-mu
+                        (default: 1000)
+  --use-mu              Center Lemma 2 and Corollary 3 on the saved model-implied
+                        baseline; by default both experiments use zero
   --selection-strategy NAME
-                        gmm, gmm-evidence, or spearman (default: gmm)
+                        gmm, gmm-evidence, or spearman (default: spearman)
   --num-loss-seeds K    Conditional-loss draws per pair (default: 20)
   --loss-seed SEED      Root seed for independent loss draws (default: 0)
   --downscale INTEGER   Preview downscale factor (default: 4)
@@ -67,8 +76,26 @@ overwrite option.
 Download tuning options have effect only when --download is present. The
 Theorem 1 stage uses the same requested selection strategy, scheduler,
 guidance, steps, and seed count. --num-loss-seeds and --loss-seed configure
-only its independent conditional-loss draws. The PYTHON environment variable
-is honored by each wrapper.
+only its independent conditional-loss draws. For DDIM, Lemma 2 and Corollary 3
+use zero as their center by default. With --use-mu, the shared baseline is
+estimated once at the actual initial DDIM timestep from B independent Gaussian
+latents with seeds N..N+B-1. It runs the empty-condition model branch directly,
+shards seeds across visible CUDA devices, and never traverses prompts or uses
+SSCD, categories, memorization labels, or frozen selection. Lemma 2 loads the
+exact frozen selection and evaluates every included prompt, experiment seed
+0..N-1, and cached DDIM timestep. It computes P*N*T measurements relative to
+the active center directly from each cached x_t and unconditional epsilon
+prediction, without drawing fresh Gaussian latents or running model inference;
+its cache-only workers shard whole selected prompts across requested devices.
+Corollary 3 uses the same active center and is defined here only for the actual
+initial DDIM timestep and guidance scale 7.5. It reconstructs x_T for every
+selected prompt and experiment seed, loads both cached prediction branches and
+the paired target latent, attaches same-seed target SSCD, and shards whole
+prompts across visible CUDA devices. Non-DDIM runs retain explicit numbered
+skips for Lemma 2; the optional baseline retains a numbered stage that is
+skipped without --use-mu. Other incompatible configurations likewise retain a
+numbered Corollary 3 skip.
+The PYTHON environment variable is honored by each wrapper.
 EOF
 }
 
@@ -163,6 +190,10 @@ while (($# > 0)); do
             OVERWRITE=1
             shift
             ;;
+        --use-mu)
+            USE_MU=1
+            shift
+            ;;
         --model)
             (($# >= 2)) || missing_value "$1"
             MODEL="$2"
@@ -208,6 +239,15 @@ while (($# > 0)); do
             ;;
         --N=*)
             NUM_SEEDS="${1#*=}"
+            shift
+            ;;
+        --num-baseline-seeds)
+            (($# >= 2)) || missing_value "$1"
+            NUM_BASELINE_SEEDS="$2"
+            shift 2
+            ;;
+        --num-baseline-seeds=*)
+            NUM_BASELINE_SEEDS="${1#*=}"
             shift
             ;;
         --selection-strategy)
@@ -347,6 +387,12 @@ fi
 
 normalize_positive_integer \
     "--N" "$NUM_SEEDS" NUM_SEEDS 4611686018427387904
+MAX_BASELINE_SEEDS=$((9223372036854775807 - NUM_SEEDS + 1))
+normalize_positive_integer \
+    "--num-baseline-seeds" \
+    "$NUM_BASELINE_SEEDS" \
+    NUM_BASELINE_SEEDS \
+    "$MAX_BASELINE_SEEDS"
 normalize_positive_integer \
     "--num-loss-seeds" "$NUM_LOSS_SEEDS" NUM_LOSS_SEEDS
 normalize_nonnegative_integer \
@@ -364,6 +410,24 @@ normalize_finite_float "--g" "$GUIDANCE_SCALE" GUIDANCE_SCALE
 
 normalize_positive_integer "--T" "$NUM_INFERENCE_STEPS" NUM_INFERENCE_STEPS
 
+LEMMA2_COMPATIBLE=0
+if [[ "$SCHEDULER" == "ddim" ]]; then
+    LEMMA2_COMPATIBLE=1
+fi
+
+COROLLARY3_COMPATIBLE=0
+if [[ "$SCHEDULER" == "ddim" && "$GUIDANCE_SCALE" == "7.5" ]]; then
+    COROLLARY3_COMPATIBLE=1
+fi
+
+CENTERING_ARGUMENTS=()
+if ((USE_MU)); then
+    CENTERING_ARGUMENTS=(
+        --use-mu
+        --num-baseline-seeds "$NUM_BASELINE_SEEDS"
+    )
+fi
+
 if ((PLOT_ONLY)); then
     if ((DOWNLOAD_WEBSTER)); then
         invalid_value "--plot" "cannot be combined with --download"
@@ -372,8 +436,8 @@ if ((PLOT_ONLY)); then
         invalid_value "--plot" "cannot be combined with --overwrite"
     fi
     cd "$PROJECT_ROOT"
-    printf '[1/1] Plotting Theorem 1 loss–recovery from saved results\n'
-    exec "$PROJECT_ROOT/theorem1_loss_recovery.sh" \
+    printf '[1/3] Plotting Theorem 1 loss–recovery from saved results\n'
+    "$PROJECT_ROOT/theorem1_loss_recovery.sh" \
         --model "$MODEL" \
         --scheduler "$SCHEDULER" \
         --g "$GUIDANCE_SCALE" \
@@ -384,6 +448,45 @@ if ((PLOT_ONLY)); then
         --loss-seed "$LOSS_SEED" \
         --device "$DEVICE" \
         --plot
+    if ((LEMMA2_COMPATIBLE)); then
+        if ((USE_MU)); then
+            printf '[2/3] Plotting mu-centered Lemma 2 convergence from saved results\n'
+        else
+            printf '[2/3] Plotting zero-centered Lemma 2 convergence from saved results\n'
+        fi
+        "$PROJECT_ROOT/lemma2_mean_convergence.sh" \
+            --model "$MODEL" \
+            --scheduler "$SCHEDULER" \
+            --g "$GUIDANCE_SCALE" \
+            --T "$NUM_INFERENCE_STEPS" \
+            --N "$NUM_SEEDS" \
+            --selection-strategy "$SELECTION_STRATEGY" \
+            "${CENTERING_ARGUMENTS[@]}" \
+            --plot
+    else
+        printf '[2/3] Skipping Lemma 2: requires --scheduler ddim '
+        printf '(received %s)\n' "$SCHEDULER"
+    fi
+    if ((COROLLARY3_COMPATIBLE)); then
+        if ((USE_MU)); then
+            printf '[3/3] Plotting mu-centered Corollary 3 CFG amplification from saved results\n'
+        else
+            printf '[3/3] Plotting zero-centered Corollary 3 CFG amplification from saved results\n'
+        fi
+        "$PROJECT_ROOT/corollary3_cfg_amplification.sh" \
+            --model "$MODEL" \
+            --scheduler "$SCHEDULER" \
+            --g "$GUIDANCE_SCALE" \
+            --T "$NUM_INFERENCE_STEPS" \
+            --N "$NUM_SEEDS" \
+            --selection-strategy "$SELECTION_STRATEGY" \
+            "${CENTERING_ARGUMENTS[@]}" \
+            --plot
+    else
+        printf '[3/3] Skipping Corollary 3: requires --scheduler ddim and --g 7.5 '
+        printf '(received %s and %s)\n' "$SCHEDULER" "$GUIDANCE_SCALE"
+    fi
+    exit 0
 fi
 normalize_positive_integer "--downscale" "$DOWNSCALE_FACTOR" DOWNSCALE_FACTOR
 if ((DOWNLOAD_WEBSTER)); then
@@ -428,10 +531,11 @@ fi
 cd "$PROJECT_ROOT"
 
 REFERENCE_LAST_SEED=$((NUM_SEEDS - 1 + NUM_SEEDS))
-REFERENCE_STAGE_COUNT=3
+BASELINE_LAST_SEED=$((NUM_SEEDS - 1 + NUM_BASELINE_SEEDS))
+REFERENCE_STAGE_COUNT=4
 
 STAGE_INDEX=1
-STAGE_TOTAL=$((4 + REFERENCE_STAGE_COUNT))
+STAGE_TOTAL=$((6 + REFERENCE_STAGE_COUNT))
 if ((DOWNLOAD_WEBSTER)); then
     STAGE_TOTAL=$((STAGE_TOTAL + 1))
     printf '[%s/%s] Preparing Webster data\n' "$STAGE_INDEX" "$STAGE_TOTAL"
@@ -463,6 +567,36 @@ fi
     --device "$DEVICE" \
     --downscale "$DOWNSCALE_FACTOR" \
     "${CACHE_OVERWRITE_ARGUMENTS[@]}"
+STAGE_INDEX=$((STAGE_INDEX + 1))
+
+if ((LEMMA2_COMPATIBLE && USE_MU)); then
+    if ((OVERWRITE)); then
+        printf '[%s/%s] Recomputing shared unconditional baseline (%s Gaussian seeds %s-%s)\n' \
+            "$STAGE_INDEX" "$STAGE_TOTAL" "$NUM_BASELINE_SEEDS" \
+            "$NUM_SEEDS" "$BASELINE_LAST_SEED"
+    else
+        printf '[%s/%s] Computing/reusing shared unconditional baseline (%s Gaussian seeds %s-%s)\n' \
+            "$STAGE_INDEX" "$STAGE_TOTAL" "$NUM_BASELINE_SEEDS" \
+            "$NUM_SEEDS" "$BASELINE_LAST_SEED"
+    fi
+    "$PROJECT_ROOT/unconditional_baseline.sh" \
+        --model "$MODEL" \
+        --scheduler "$SCHEDULER" \
+        --g "$GUIDANCE_SCALE" \
+        --T "$NUM_INFERENCE_STEPS" \
+        --N "$NUM_SEEDS" \
+        --num-baseline-seeds "$NUM_BASELINE_SEEDS" \
+        --device "$DEVICE" \
+        "${CACHE_OVERWRITE_ARGUMENTS[@]}"
+elif ((!USE_MU)); then
+    printf '[%s/%s] Skipping shared unconditional baseline: ' \
+        "$STAGE_INDEX" "$STAGE_TOTAL"
+    printf '%s\n' '--use-mu was not passed (using the zero center)'
+else
+    printf '[%s/%s] Skipping unconditional baseline: requires --scheduler ddim ' \
+        "$STAGE_INDEX" "$STAGE_TOTAL"
+    printf '(received %s)\n' "$SCHEDULER"
+fi
 STAGE_INDEX=$((STAGE_INDEX + 1))
 
 if ((OVERWRITE)); then
@@ -531,5 +665,53 @@ printf '[%s/%s] Running Theorem 1 loss–recovery experiment\n' \
     --num-loss-seeds "$NUM_LOSS_SEEDS" \
     --loss-seed "$LOSS_SEED" \
     --device "$DEVICE"
+STAGE_INDEX=$((STAGE_INDEX + 1))
+
+if ((LEMMA2_COMPATIBLE)); then
+    if ((USE_MU)); then
+        printf '[%s/%s] Computing mu-centered Lemma 2 from cached prompt trajectories\n' \
+            "$STAGE_INDEX" "$STAGE_TOTAL"
+    else
+        printf '[%s/%s] Computing zero-centered Lemma 2 from cached prompt trajectories\n' \
+            "$STAGE_INDEX" "$STAGE_TOTAL"
+    fi
+    "$PROJECT_ROOT/lemma2_mean_convergence.sh" \
+        --model "$MODEL" \
+        --scheduler "$SCHEDULER" \
+        --g "$GUIDANCE_SCALE" \
+        --T "$NUM_INFERENCE_STEPS" \
+        --N "$NUM_SEEDS" \
+        --selection-strategy "$SELECTION_STRATEGY" \
+        "${CENTERING_ARGUMENTS[@]}" \
+        --device "$DEVICE"
+else
+    printf '[%s/%s] Skipping Lemma 2: requires --scheduler ddim ' \
+        "$STAGE_INDEX" "$STAGE_TOTAL"
+    printf '(received %s)\n' "$SCHEDULER"
+fi
+STAGE_INDEX=$((STAGE_INDEX + 1))
+
+if ((COROLLARY3_COMPATIBLE)); then
+    if ((USE_MU)); then
+        printf '[%s/%s] Computing mu-centered Corollary 3 CFG amplification\n' \
+            "$STAGE_INDEX" "$STAGE_TOTAL"
+    else
+        printf '[%s/%s] Computing zero-centered Corollary 3 CFG amplification\n' \
+            "$STAGE_INDEX" "$STAGE_TOTAL"
+    fi
+    "$PROJECT_ROOT/corollary3_cfg_amplification.sh" \
+        --model "$MODEL" \
+        --scheduler "$SCHEDULER" \
+        --g "$GUIDANCE_SCALE" \
+        --T "$NUM_INFERENCE_STEPS" \
+        --N "$NUM_SEEDS" \
+        --selection-strategy "$SELECTION_STRATEGY" \
+        "${CENTERING_ARGUMENTS[@]}" \
+        --device "$DEVICE"
+else
+    printf '[%s/%s] Skipping Corollary 3: requires --scheduler ddim and --g 7.5 ' \
+        "$STAGE_INDEX" "$STAGE_TOTAL"
+    printf '(received %s and %s)\n' "$SCHEDULER" "$GUIDANCE_SCALE"
+fi
 
 printf 'Pipeline complete.\n'

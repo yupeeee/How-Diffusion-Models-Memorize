@@ -211,17 +211,9 @@ def _write_scatter_views(
     selected_statistics = _prompt_statistics(selected, column=spearman_column)
     figures: list[Figure] = []
     try:
-        all_figure = _scatter_figure(
-            all_prompts,
-            all_statistics,
-            population_label="Prompts before discard",
-        )
+        all_figure = _scatter_figure(all_prompts, all_statistics)
         figures.append(all_figure)
-        selected_figure = _scatter_figure(
-            selected,
-            selected_statistics,
-            population_label="Selected prompts",
-        )
+        selected_figure = _scatter_figure(selected, selected_statistics)
         figures.append(selected_figure)
         all_axes, selected_axes = all_figure.axes[0], selected_figure.axes[0]
         selected_axes.set_xlim(all_axes.get_xlim())
@@ -369,8 +361,6 @@ def _validate_prompt_spearman(frame: pd.DataFrame, *, column: str) -> None:
 def _scatter_figure(
     frame: pd.DataFrame,
     statistics: AnalysisStatistics,
-    *,
-    population_label: str,
 ) -> Figure:
     figure, axes = plt.subplots(figsize=FIGURE_SIZE)
     if frame.empty or "kind" not in frame.columns:
@@ -400,7 +390,7 @@ def _scatter_figure(
     axes.text(
         0.02,
         0.02,
-        _summary_text(statistics, population_label=population_label),
+        _summary_text(statistics),
         transform=axes.transAxes,
         ha="left",
         va="bottom",
@@ -426,11 +416,7 @@ def _scatter_figure(
     return figure
 
 
-def _summary_text(
-    statistics: AnalysisStatistics,
-    *,
-    population_label: str,
-) -> str:
+def _summary_text(statistics: AnalysisStatistics) -> str:
     denominator = statistics.evaluable_selected_prompts
     fraction = (
         "undefined"
@@ -443,11 +429,10 @@ def _summary_text(
         else f"{statistics.median_spearman:.3f}"
     )
     return (
-        f"{population_label}: {statistics.total_selected_prompts}\n"
-        f"Evaluable prompts: {denominator}\n"
-        f"rho < 0: {statistics.negative_spearman_prompts}/{denominator} "
+        f"#prompts: {statistics.total_selected_prompts}\n"
+        rf"$\rho < 0$: {statistics.negative_spearman_prompts}/{denominator} "
         f"({fraction})\n"
-        f"Median rho: {median}"
+        rf"Median $\rho$: {median}"
     )
 
 

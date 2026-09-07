@@ -101,7 +101,7 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
 
     arguments = parser.parse_args([])
     assert arguments.model == "sdv1"
-    assert arguments.selection_strategy == "gmm"
+    assert arguments.selection_strategy == "spearman"
     assert arguments.scheduler == "ddim"
     assert arguments.g == pytest.approx(7.5)
     assert arguments.num_inference_steps == 50
@@ -2000,6 +2000,8 @@ def test_plot_uses_saved_csv_without_loading_diffusion_model(
         experiment.main(
             [
                 "--plot",
+                "--selection-strategy",
+                "gmm",
                 "--N",
                 "2",
                 "--num-loss-seeds",
@@ -2038,6 +2040,8 @@ def test_plot_uses_saved_csv_without_loading_diffusion_model(
         experiment.main(
             [
                 "--plot",
+                "--selection-strategy",
+                "gmm",
                 "--N",
                 "2",
                 "--num-loss-seeds",

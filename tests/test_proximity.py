@@ -59,7 +59,7 @@ def test_compute_proximity_parser_supports_overwrite_and_strategies() -> None:
     parser = build_proximity_parser()
 
     defaults = parser.parse_args([])
-    assert defaults.selection_strategy == "gmm"
+    assert defaults.selection_strategy == "spearman"
     assert defaults.overwrite is False
     assert parser.parse_args(["--overwrite"]).overwrite is True
     assert (
@@ -220,7 +220,7 @@ def test_output_paths_do_not_define_a_per_prompt_proximity_cache(
     )
 
     assert paths.output_directory == (
-        tmp_path.resolve() / "outputs" / RUN_NAME / "proximity/gmm/experiment_S0_N20"
+        tmp_path.resolve() / "outputs" / RUN_NAME / "proximity/spearman/experiment_S0_N20"
     )
     assert spearman_paths.output_directory == (
         tmp_path.resolve()
@@ -482,7 +482,7 @@ def test_experiment_loads_only_the_n_matched_frozen_selection(
             "guidance_scale": 3.25,
             "num_inference_steps": 17,
             "num_seeds": 3,
-            "selection_strategy": "gmm",
+            "selection_strategy": "spearman",
         },
         {
             "model_name": "sdv1",
@@ -1247,8 +1247,8 @@ def test_selection_figure_publishes_selected_and_completed_finite_group_views(
     selection.to_csv(tmp_path / "selection.csv", index=False)
 
     read_paths: list[Path] = []
-    plotted_frames: dict[str, pd.DataFrame] = {}
-    plotted_figures: dict[str, object] = {}
+    plotted_frames: list[pd.DataFrame] = []
+    plotted_figures: list[object] = []
     real_read_csv = plotting_module.pd.read_csv
     real_scatter_figure = plotting_module._scatter_figure
 
@@ -1259,16 +1259,10 @@ def test_selection_figure_publishes_selected_and_completed_finite_group_views(
     def scatter_spy(
         frame: pd.DataFrame,
         statistics: plotting_module.AnalysisStatistics,
-        *,
-        population_label: str,
     ) -> object:
-        plotted_frames[population_label] = frame.copy(deep=True)
-        figure = real_scatter_figure(
-            frame,
-            statistics,
-            population_label=population_label,
-        )
-        plotted_figures[population_label] = figure
+        plotted_frames.append(frame.copy(deep=True))
+        figure = real_scatter_figure(frame, statistics)
+        plotted_figures.append(figure)
         return figure
 
     monkeypatch.setattr(plotting_module.pd, "read_csv", read_csv_spy)
@@ -1284,25 +1278,19 @@ def test_selection_figure_publishes_selected_and_completed_finite_group_views(
         "median_spearman": pytest.approx(-1.0),
     }
     assert read_paths == [tmp_path / "selection.csv"]
-    assert set(plotted_frames) == {"Prompts before discard", "Selected prompts"}
-    assert set(plotted_frames["Selected prompts"]["original_index"]) == {"included"}
-    assert set(plotted_frames["Prompts before discard"]["original_index"]) == {
-        "included",
-        "discarded",
-    }
-    assert (
-        plotted_frames["Prompts before discard"][["l2_norm", "sscd"]]
-        .notna()
-        .all()
-        .all()
-    )
-    selected_axes = plotted_figures["Selected prompts"].axes[0]
-    all_axes = plotted_figures["Prompts before discard"].axes[0]
+    assert len(plotted_frames) == 2
+    assert len(plotted_figures) == 2
+    all_frame, selected_frame = plotted_frames
+    assert set(selected_frame["original_index"]) == {"included"}
+    assert set(all_frame["original_index"]) == {"included", "discarded"}
+    assert all_frame[["l2_norm", "sscd"]].notna().all().all()
+    all_axes = plotted_figures[0].axes[0]
+    selected_axes = plotted_figures[1].axes[0]
     assert selected_axes.get_xlim() == pytest.approx(all_axes.get_xlim())
     assert selected_axes.get_ylim() == pytest.approx(all_axes.get_ylim())
     assert 8.0 < all_axes.get_xlim()[1] < 20.0
-    assert selected_axes.texts[0].get_text().startswith("Selected prompts: 1\n")
-    assert all_axes.texts[0].get_text().startswith("Prompts before discard: 2\n")
+    assert selected_axes.texts[0].get_text().startswith("#prompts: 1\n")
+    assert all_axes.texts[0].get_text().startswith("#prompts: 2\n")
     assert {path.name for path in tmp_path.iterdir()} == {
         "selection.csv",
         *plotting_module.PROXIMITY_FIGURE_FILENAMES,
@@ -1529,16 +1517,16 @@ def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
     assert all(label.get_fontsize() == 12 for label in axis.get_yticklabels())
     assert len(axis.texts) == 1
     assert axis.texts[0].get_text() == (
-        "Selected prompts: 3\n"
-        "Evaluable prompts: 2\n"
-        "rho < 0: 1/2 (50.0%)\n"
-        "Median rho: 0.000"
+        "#prompts: 3\n"
+        r"$\rho < 0$: 1/2 (50.0%)"
+        "\n"
+        r"Median $\rho$: 0.000"
     )
     assert all_axis.texts[0].get_text() == (
-        "Prompts before discard: 4\n"
-        "Evaluable prompts: 3\n"
-        "rho < 0: 2/3 (66.7%)\n"
-        "Median rho: -1.000"
+        "#prompts: 4\n"
+        r"$\rho < 0$: 2/3 (66.7%)"
+        "\n"
+        r"Median $\rho$: -1.000"
     )
     assert axis.get_xlim() == pytest.approx(all_axis.get_xlim())
     assert axis.get_ylim() == pytest.approx(all_axis.get_ylim())

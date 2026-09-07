@@ -31,6 +31,7 @@ from utils.models.sampling import (
 )
 from utils.models.schedulers import (
     build_scheduler,
+    build_scheduler_from_config,
     scheduler_config_dict,
     scheduler_step_kwargs,
 )
@@ -935,6 +936,70 @@ def test_scheduler_construction_preserves_native_configuration() -> None:
     result = build_scheduler(original, "ddim", scheduler_classes={"ddim": Built})
     assert result.config == original.config
     assert scheduler_step_kwargs(result.scheduler, "ddim") == {"eta": 0.0}
+
+
+def test_scheduler_construction_from_config_matches_component_wrapper() -> None:
+    received: list[dict[str, object]] = []
+
+    class Built:
+        def __init__(self, config: dict[str, object]) -> None:
+            self.config = dict(config)
+
+        @classmethod
+        def from_config(cls, config: dict[str, object]) -> "Built":
+            received.append(config)
+            return cls(config)
+
+    config = {
+        "prediction_type": "v_prediction",
+        "beta_start": 0.00085,
+        "_use_default_values": ["thresholding", "clip_sample_range"],
+    }
+    direct = build_scheduler_from_config(
+        config,
+        "ddim",
+        scheduler_classes={"ddim": Built},
+    )
+    wrapped = build_scheduler(
+        SimpleNamespace(config=config),
+        "ddim",
+        scheduler_classes={"ddim": Built},
+    )
+
+    assert received == [config, config]
+    assert direct.name == wrapped.name == "ddim"
+    assert direct.class_name == wrapped.class_name == "Built"
+    assert direct.config == wrapped.config == {
+        "prediction_type": "v_prediction",
+        "beta_start": 0.00085,
+        "_use_default_values": ["clip_sample_range", "thresholding"],
+    }
+    assert direct.removed_config_keys == wrapped.removed_config_keys == ()
+    assert direct.metadata() == wrapped.metadata()
+
+
+def test_scheduler_construction_from_config_rejects_changed_prediction_type() -> None:
+    class Built:
+        config = {"prediction_type": "epsilon"}
+
+        @classmethod
+        def from_config(cls, _config: object) -> "Built":
+            return cls()
+
+    with pytest.raises(
+        RuntimeError,
+        match="changed the checkpoint prediction_type",
+    ):
+        build_scheduler_from_config(
+            {"prediction_type": "v_prediction"},
+            "ddim",
+            scheduler_classes={"ddim": Built},
+        )
+
+
+def test_scheduler_construction_from_config_rejects_absent_configuration() -> None:
+    with pytest.raises(RuntimeError, match="Checkpoint scheduler has no config"):
+        build_scheduler_from_config(None, "ddim", scheduler_classes={})
 
 
 def test_scheduler_default_key_order_is_canonical() -> None:

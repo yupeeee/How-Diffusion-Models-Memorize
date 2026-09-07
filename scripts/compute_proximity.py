@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SELECTION_STRATEGY,
         help=(
             "prompt filter fitted to the reference observations: GMM posterior, "
-            "GMM evidence, or Spearman (default: gmm)"
+            "GMM evidence, or Spearman (default: spearman)"
         ),
     )
     parser.add_argument(

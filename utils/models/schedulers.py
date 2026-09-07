@@ -47,6 +47,26 @@ def build_scheduler(
 ) -> SchedulerBuildResult:
     """Build the requested scheduler from the checkpoint scheduler config."""
 
+    original_config = getattr(original_scheduler, "config", None)
+    if original_config is None:
+        raise SchedulerConstructionError("Checkpoint scheduler has no config")
+    return build_scheduler_from_config(
+        original_config,
+        scheduler_name,
+        scheduler_classes=scheduler_classes,
+    )
+
+
+def build_scheduler_from_config(
+    original_config: Any,
+    scheduler_name: str,
+    *,
+    scheduler_classes: Mapping[str, Any] | None = None,
+) -> SchedulerBuildResult:
+    """Build a scheduler directly from a validated checkpoint configuration."""
+
+    if original_config is None:
+        raise SchedulerConstructionError("Checkpoint scheduler has no config")
     name = _validated_scheduler_name(scheduler_name)
     classes = scheduler_classes or _diffusers_scheduler_classes()
     try:
@@ -55,10 +75,6 @@ def build_scheduler(
         raise SchedulerConstructionError(
             f"No scheduler class was supplied for {name!r}"
         ) from error
-
-    original_config = getattr(original_scheduler, "config", None)
-    if original_config is None:
-        raise SchedulerConstructionError("Checkpoint scheduler has no config")
     # Diffusers ConfigMixin handles compatible extra keys itself. We do not
     # rewrite betas, prediction type, timestep spacing, or clipping settings.
     scheduler = scheduler_type.from_config(original_config)

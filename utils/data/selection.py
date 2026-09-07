@@ -1,12 +1,12 @@
 """Freeze whole-prompt selection from terminal-L2/SSCD reference evidence.
 
 Selection uses all reference seeds N--2N-1, where N is the experiment seed
-count. The default strategy uses a global two-component Gaussian mixture and
-keeps a prompt when its mean low-SSCD-mode posterior is below one half. The
-GMM-evidence strategy additionally uses a marginal SSCD boundary, below-median
-L2 evidence, and negative within-prompt rank correlation. The Spearman strategy
-uses only that correlation. Webster kind is audit metadata and never affects a
-decision.
+count. The default Spearman strategy keeps a prompt when its within-prompt rank
+correlation is negative. The GMM strategy uses a global two-component Gaussian
+mixture and keeps a prompt when its mean low-SSCD-mode posterior is below one
+half. The GMM-evidence strategy additionally uses a marginal SSCD boundary,
+below-median L2 evidence, and negative within-prompt rank correlation. Webster
+kind is audit metadata and never affects a decision.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ from utils.data.proximity_gmm import (
 from utils.data.webster import normalize_webster_type
 from utils.experiments.cache import generation_log_relative_path
 
-DEFAULT_SELECTION_STRATEGY = "gmm"
+DEFAULT_SELECTION_STRATEGY = "spearman"
 SELECTION_STRATEGIES = ("gmm", "gmm-evidence", "spearman")
 SELECTION_POLICIES = {
     "gmm": "prompt_gmm_mean_low_mode_probability_lt_half",
