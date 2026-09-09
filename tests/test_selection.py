@@ -1,4 +1,4 @@
-"""Tests for category-blind GMM and Spearman prompt selection."""
+"""Tests for category-blind GMM prompt selection and cache integrity."""
 
 from __future__ import annotations
 
@@ -158,27 +158,19 @@ def _records(
 
 def _paired(
     records: pd.DataFrame,
-    directions: tuple[str, ...] | None = None,
     *,
     num_seeds: int = DEFAULT_NUM_SEEDS,
 ) -> pd.DataFrame:
-    directions = directions or tuple("negative" for _ in range(len(records)))
+    """Build two separated seed-level clouds for provenance-focused tests."""
+
     rows: list[dict[str, object]] = []
-    for record, direction in zip(
-        records.to_dict(orient="records"), directions, strict=True
-    ):
+    for record_position, record in enumerate(records.to_dict(orient="records")):
+        high_component = record_position >= 2
         for position, seed in enumerate(_reference_seeds(num_seeds)):
-            l2 = float(position + 1)
-            if direction == "negative":
-                sscd = float(num_seeds - position) / num_seeds
-            elif direction == "positive":
-                sscd = float(position + 1) / num_seeds
-            elif direction == "constant_l2":
-                l2, sscd = 1.0, float(position + 1) / num_seeds
-            elif direction == "constant_sscd":
-                sscd = 0.5
-            else:
-                raise AssertionError(direction)
+            l2 = float(position + 1) + (6.0 if high_component else 0.0)
+            sscd = (0.70 if high_component else 0.05) + (
+                0.25 if high_component else 0.10
+            ) * (num_seeds - position) / num_seeds
             rows.append(
                 {
                     **record,
@@ -229,7 +221,7 @@ def _build(
     guidance_scale: float = DEFAULT_GUIDANCE_SCALE,
     num_inference_steps: int = DEFAULT_NUM_INFERENCE_STEPS,
     num_seeds: int = DEFAULT_NUM_SEEDS,
-    selection_strategy: str = "spearman",
+    selection_strategy: str = "gmm",
     overwrite: bool = False,
     records: pd.DataFrame | None = None,
     paired: pd.DataFrame | None = None,
@@ -268,20 +260,16 @@ def test_reference_contract_is_dynamic_and_has_no_fixed_seed_split(
     guidance_scale: float,
     num_inference_steps: int,
 ) -> None:
-    assert DEFAULT_SELECTION_STRATEGY == "spearman"
-    assert SELECTION_STRATEGIES == ("gmm", "gmm-evidence", "spearman")
+    assert DEFAULT_SELECTION_STRATEGY == "gmm"
+    assert SELECTION_STRATEGIES == ("gmm",)
     assert SELECTION_POLICIES == {
-        "gmm": "prompt_gmm_mean_low_mode_probability_lt_half",
-        "gmm-evidence": (
-            "prompt_gmm_high_proximity_evidence_and_negative_spearman"
-        ),
-        "spearman": "prompt_spearman_l2_sscd_lt_zero",
+        "gmm": "prompt_gmm_any_high_component_diagonal_covariance_v3",
     }
     assert (
         inspect.signature(build_target_pair_selection)
         .parameters["selection_strategy"]
         .default
-        == "spearman"
+        == "gmm"
     )
     assert (
         inspect.signature(build_target_pair_selection).parameters["overwrite"].default
@@ -326,6 +314,55 @@ def test_reference_contract_is_dynamic_and_has_no_fixed_seed_split(
         **identity,
         seed_start=num_seeds + 1,
     )
+
+
+@pytest.mark.parametrize(
+    ("model_name", "dataset_model"),
+    (("sdv1", "sdv1"), ("sdv2", "sdv2"), ("realvis", "realisticvision")),
+)
+@pytest.mark.parametrize(
+    ("scheduler_name", "guidance_scale", "num_inference_steps"),
+    (("ddim", 7.5, 50), ("ddpm", 3.25, 17)),
+)
+@pytest.mark.parametrize("num_seeds", (3, 7))
+def test_selection_directory_is_directly_under_the_experiment_run(
+    tmp_path: Path,
+    model_name: str,
+    dataset_model: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+) -> None:
+    identity = _identity(
+        model_name,
+        scheduler_name=scheduler_name,
+        guidance_scale=guidance_scale,
+        num_inference_steps=num_inference_steps,
+        num_seeds=num_seeds,
+    )
+    expected = (
+        tmp_path
+        / "data/webster/selection"
+        / dataset_model
+        / f"{model_name}_{scheduler_name}_g{guidance_scale}_T{num_inference_steps}_N{num_seeds}"
+        / f"reference_S{num_seeds}_N{num_seeds}"
+    )
+    assert target_pair_selection_directory(tmp_path, **identity) == expected
+    assert (
+        target_pair_selection_directory(tmp_path, **identity, selection_strategy="gmm")
+        == expected
+    )
+
+
+@pytest.mark.parametrize("strategy", ("spearman", "gmm-evidence", "all", None))
+def test_only_gmm_selection_is_supported(tmp_path: Path, strategy: object) -> None:
+    with pytest.raises(TargetPairSelectionError, match="must be one of: gmm"):
+        selection_module.normalize_selection_strategy(strategy)
+    with pytest.raises(TargetPairSelectionError, match="must be one of: gmm"):
+        target_pair_selection_directory(
+            tmp_path, **_identity(), selection_strategy=strategy
+        )
 
 
 def test_reference_completion_fingerprint_tracks_exact_marker_jsons(
@@ -382,36 +419,14 @@ def test_seed_count_must_leave_room_for_the_full_reference_block(
     )
 
 
-def test_every_kind_uses_the_same_spearman_rule(tmp_path: Path) -> None:
-    records = _records()
-    selection = _build(
-        tmp_path,
-        records=records,
-        paired=_paired(
-            records,
-            ("negative", "positive", "negative", "positive", "negative"),
-        ),
-    )
-    prompts = selection.prompt_frame.set_index("original_index")
-
-    assert list(prompts["kind"]) == ["MV", "RV", "TV", "N", "UNKNOWN"]
-    assert selection.included_indices == frozenset({"10000", "10002", "10004"})
-    assert selection.excluded_indices == frozenset({"10001", "10003"})
-    assert prompts.loc["10000", "prompt_spearman"] == pytest.approx(-1.0)
-    assert prompts.loc["10001", "prompt_spearman"] == pytest.approx(1.0)
-    assert prompts.loc["10000", "selection_status"] == INCLUDED_PROXIMITY_RULE
-    assert prompts.loc["10001", "selection_status"] == DISCARDED_PROXIMITY_RULE
-    assert prompts.loc["10000", "selection_reason"] == "prompt_spearman_lt_0"
-    assert prompts.loc["10001", "selection_reason"] == "prompt_spearman_ge_0"
-
-
-def test_gmm_uses_mean_low_mode_posterior_without_a_spearman_gate(
+def test_gmm_retains_every_high_component_seed_without_a_prompt_average_gate(
     tmp_path: Path,
 ) -> None:
     records = _records(kinds=("MV", "N", "TV", "RV"))
     paired = _gmm_paired(records)
     intermittent = paired["original_index"].eq("10000") & paired["seed"].eq(3)
-    paired.loc[intermittent, ["l2_norm", "sscd"]] = (0.8, 0.80)
+    # Put one seed in the high component, the other two in the low component.
+    paired.loc[intermittent, ["l2_norm", "sscd"]] = (7.4, 0.80)
 
     selection = _build(
         tmp_path,
@@ -421,127 +436,78 @@ def test_gmm_uses_mean_low_mode_posterior_without_a_spearman_gate(
     )
     prompts = selection.prompt_frame.set_index("original_index")
 
-    assert selection.included_indices == frozenset({"10002", "10003"})
-    assert selection.excluded_indices == frozenset({"10000", "10001"})
+    assert selection.included_indices == frozenset({"10000", "10002", "10003"})
+    assert selection.excluded_indices == frozenset({"10001"})
     assert prompts.loc["10002", "prompt_spearman"] > 0.0
     assert bool(prompts.loc["10002", "include_prompt"])
     for index, prompt in prompts.iterrows():
         rows = selection.frame.loc[selection.frame["original_index"].eq(index)]
-        mean_low_probability = rows["gmm_low_mode_probability"].mean()
-        assert bool(prompt["include_prompt"]) is bool(mean_low_probability < 0.5)
-        assert math.isnan(prompt["prompt_gmm_evidence_seed_count"])
-    intermittent_rows = selection.frame.loc[
-        selection.frame["original_index"].eq("10000")
-    ]
-    assert intermittent_rows["gmm_low_mode_probability"].mean() > 0.5
-    assert not intermittent_rows["include_prompt"].any()
-    assert selection.configuration["selection_metric"] == (
-        "two_component_full_covariance_gmm(l2_norm,sscd)"
-    )
-    assert selection.configuration["prompt_reduction"] == (
-        "mean(gmm_low_mode_probability)"
-    )
-    assert selection.configuration["include_when"] == (
-        "mean(gmm_low_mode_probability) < 0.5"
-    )
-
-
-def test_gmm_decision_uses_a_strict_mean_posterior_threshold() -> None:
-    assert selection_module._gmm_decision([0.0, 0.999998]) == (
-        True,
-        INCLUDED_PROXIMITY_RULE,
-        "mean_gmm_low_mode_probability_lt_0_5",
-    )
-    assert selection_module._gmm_decision([0.0, 1.0]) == (
-        False,
-        DISCARDED_PROXIMITY_RULE,
-        "mean_gmm_low_mode_probability_ge_0_5",
-    )
-
-
-def test_gmm_evidence_keeps_intermittent_high_sscd_low_l2_evidence_with_negative_rho(
-    tmp_path: Path,
-) -> None:
-    records = _records(kinds=("MV", "N", "TV", "RV"))
-    paired = _gmm_paired(records)
-    intermittent = paired["original_index"].eq("10000") & paired["seed"].eq(3)
-    paired.loc[intermittent, ["l2_norm", "sscd"]] = (0.8, 0.80)
-    selection = _build(
-        tmp_path,
-        selection_strategy="gmm-evidence",
-        records=records,
-        paired=paired,
-    )
-    prompts = selection.prompt_frame.set_index("original_index")
-
-    assert selection.selection_strategy == "gmm-evidence"
-    assert selection.included_indices == frozenset({"10000", "10003"})
-    assert selection.excluded_indices == frozenset({"10001", "10002"})
-    assert prompts.loc["10000", "prompt_spearman"] < 0.0
-    assert prompts.loc["10000", "prompt_gmm_evidence_seed_count"] == 1
-    assert prompts.loc["10002", "prompt_spearman"] > 0.0
-    assert prompts.loc["10002", "prompt_gmm_evidence_seed_count"] >= 1
+        has_high_seed = rows["gmm_component"].eq("high_sscd_mode").any()
+        assert bool(prompt["include_prompt"]) is bool(has_high_seed)
+        assert rows["gmm_component"].isin({"low_sscd_mode", "high_sscd_mode"}).all()
+        assert rows["gmm_low_mode_probability"].between(0.0, 1.0).all()
     intermittent_rows = selection.frame.loc[
         selection.frame["original_index"].eq("10000")
     ]
     assert intermittent_rows["gmm_low_mode_probability"].mean() > 0.5
     assert intermittent_rows["include_prompt"].all()
-    assert (
-        selection.frame["gmm_component"].isin({"low_sscd_mode", "high_sscd_mode"}).all()
-    )
-    assert selection.frame["gmm_low_mode_probability"].between(0.0, 1.0).all()
+    assert selection.configuration["gmm_fit"]["covariance_type"] == "diag"
+    for covariance in selection.configuration["gmm_fit"]["covariances_standardized"]:
+        assert covariance[0][1] == covariance[1][0] == 0.0
     assert selection.configuration["selection_metric"] == (
-        "two_component_full_covariance_gmm(l2_norm,sscd)"
+        "two_component_diagonal_covariance_gmm(l2_norm,sscd)"
     )
-    assert selection.configuration["gmm_sscd_boundary"] == (
-        "equal_weighted_marginal_density_between_component_means"
+    assert selection.configuration["prompt_reduction"] == (
+        "any(gmm_component == high_sscd_mode)"
     )
     assert selection.configuration["include_when"] == (
-        "prompt_spearman < 0 and prompt_gmm_evidence_seed_count >= 1"
-    )
-    assert selection.configuration["gmm_fit"]["usable_prompt_count"] == 4
-    assert selection.configuration["gmm_fit"]["usable_observation_count"] == 12
-    boundary = selection.configuration["gmm_fit"]["sscd_marginal_boundary"]
-    assert 0.12 < boundary < 0.75
-
-
-def test_gmm_evidence_requires_one_seed_to_pass_both_strict_boundaries() -> None:
-    observations = [
-        {"l2_norm": 1.0, "sscd": 0.5, "observation_status": "complete"},
-        {"l2_norm": 2.0, "sscd": 0.9, "observation_status": "complete"},
-        {"l2_norm": 3.0, "sscd": 0.1, "observation_status": "complete"},
-    ]
-
-    rho, count, include, status, reason = selection_module._gmm_evidence_decision(
-        observations, sscd_boundary=0.5
+        "any(gmm_low_mode_probability < 0.5)"
     )
 
-    assert rho < 0.0
-    assert count == 0
-    assert not include
-    assert status == DISCARDED_PROXIMITY_RULE
-    assert reason == "no_gmm_high_proximity_evidence"
 
-
-def test_gmm_evidence_does_not_override_nonnegative_spearman() -> None:
-    observations = [
-        {"l2_norm": 1.0, "sscd": 0.6, "observation_status": "complete"},
-        {"l2_norm": 2.0, "sscd": 0.7, "observation_status": "complete"},
-        {"l2_norm": 3.0, "sscd": 0.9, "observation_status": "complete"},
-    ]
-
-    rho, count, include, status, reason = selection_module._gmm_evidence_decision(
-        observations, sscd_boundary=0.5
+@pytest.mark.parametrize(
+    "probabilities", ([0.0, 0.999998], [0.0, 1.0], [1.0] * 19 + [0.01])
+)
+def test_gmm_keeps_a_high_component_seed_even_in_a_low_component_majority(
+    probabilities: list[float],
+) -> None:
+    assert selection_module._gmm_decision(probabilities) == (
+        True,
+        INCLUDED_PROXIMITY_RULE,
+        "has_high_sscd_mode_seed",
     )
 
-    assert rho > 0.0
-    assert count == 1
-    assert not include
-    assert status == DISCARDED_PROXIMITY_RULE
-    assert reason == "prompt_spearman_ge_0"
+
+@pytest.mark.parametrize("probabilities", ([0.5, 0.5], [0.9, 1.0]))
+def test_gmm_low_component_includes_posterior_ties(probabilities: list[float]) -> None:
+    assert selection_module._gmm_decision(probabilities) == (
+        False,
+        DISCARDED_PROXIMITY_RULE,
+        "all_reference_seeds_in_low_sscd_mode",
+    )
 
 
-def test_gmm_excludes_incomplete_prompt_from_fit_but_keeps_its_audit_rows(
+@pytest.mark.parametrize("selection_strategy", SELECTION_STRATEGIES)
+@pytest.mark.parametrize("invalid_policy", (None, "not-the-current-policy"))
+def test_selection_rejects_mismatched_contract(
+    tmp_path: Path, selection_strategy: str, invalid_policy: str | None
+) -> None:
+    records = _records(kinds=("MV", "N", "TV", "RV"))
+    selection = _build(
+        tmp_path,
+        selection_strategy=selection_strategy,
+        records=records,
+        paired=_gmm_paired(records),
+    )
+    selection.configuration["selection_policy"] = invalid_policy
+    with pytest.raises(
+        TargetPairSelectionError,
+        match="config.json does not match the selection contract",
+    ):
+        selection_module.validate_target_pair_selection(selection)
+
+
+def test_gmm_fits_and_assigns_valid_seeds_even_in_an_incomplete_prompt(
     tmp_path: Path,
 ) -> None:
     records = _records(kinds=("MV", "N", "TV", "RV", "N"))
@@ -558,31 +524,16 @@ def test_gmm_excludes_incomplete_prompt_from_fit_but_keeps_its_audit_rows(
 
     assert prompt["selection_status"] == UNUSABLE_REFERENCE_OBSERVATIONS
     assert not bool(prompt["include_prompt"])
-    assert rows["gmm_component"].eq("").all()
-    assert rows["gmm_low_mode_probability"].isna().all()
-    assert selection.configuration["gmm_fit"]["usable_prompt_count"] == 4
-    assert selection.configuration["gmm_fit"]["usable_observation_count"] == 12
-
-
-def test_gmm_evidence_fit_can_use_constant_prompt_but_undefined_rho_is_unusable(
-    tmp_path: Path,
-) -> None:
-    records = _records(kinds=("MV", "N", "TV", "RV"))
-    paired = _gmm_paired(records)
-    first = paired["original_index"].eq("10000")
-    paired.loc[first, ["l2_norm", "sscd"]] = (1.4, 0.08)
-
-    selection = _build(
-        tmp_path,
-        selection_strategy="gmm-evidence",
-        records=records,
-        paired=paired,
+    valid = rows["observation_status"].eq("complete")
+    assert valid.sum() == 2
+    assert (
+        rows.loc[valid, "gmm_component"].isin({"low_sscd_mode", "high_sscd_mode"}).all()
     )
-    prompt = selection.prompt_frame.set_index("original_index").loc["10000"]
-
-    assert prompt["selection_status"] == UNUSABLE_REFERENCE_OBSERVATIONS
-    assert math.isnan(prompt["prompt_spearman"])
-    assert prompt["prompt_gmm_evidence_seed_count"] == 0
+    assert rows.loc[valid, "gmm_low_mode_probability"].between(0.0, 1.0).all()
+    assert rows.loc[~valid, "gmm_component"].eq("").all()
+    assert rows.loc[~valid, "gmm_low_mode_probability"].isna().all()
+    assert selection.configuration["gmm_fit"]["usable_prompt_count"] == 5
+    assert selection.configuration["gmm_fit"]["usable_observation_count"] == 14
 
 
 def test_gmm_does_not_use_undefined_spearman_as_a_decision_gate(
@@ -602,28 +553,22 @@ def test_gmm_does_not_use_undefined_spearman_as_a_decision_gate(
     prompt = selection.prompt_frame.set_index("original_index").loc["10000"]
 
     assert math.isnan(prompt["prompt_spearman"])
-    assert math.isnan(prompt["prompt_gmm_evidence_seed_count"])
     assert not bool(prompt["include_prompt"])
     assert prompt["selection_status"] == DISCARDED_PROXIMITY_RULE
-    assert prompt["selection_reason"] == "mean_gmm_low_mode_probability_ge_0_5"
+    assert prompt["selection_reason"] == "all_reference_seeds_in_low_sscd_mode"
 
 
-@pytest.mark.parametrize("selection_strategy", ("gmm", "gmm-evidence"))
-def test_gmm_strategies_are_category_blind(
-    tmp_path: Path, selection_strategy: str
-) -> None:
+def test_gmm_selection_is_category_blind(tmp_path: Path) -> None:
     records = _records(kinds=("MV", "N", "TV", "RV"))
     relabeled = records.copy()
     relabeled["kind"] = ["TV", "RV", "N", "MV"]
     first = _build(
         tmp_path / "first",
-        selection_strategy=selection_strategy,
         records=records,
         paired=_gmm_paired(records),
     )
     second = _build(
         tmp_path / "second",
-        selection_strategy=selection_strategy,
         records=relabeled,
         paired=_gmm_paired(relabeled),
     )
@@ -631,45 +576,11 @@ def test_gmm_strategies_are_category_blind(
     columns = [
         "gmm_component",
         "gmm_low_mode_probability",
-        "prompt_gmm_evidence_seed_count",
         "include_prompt",
     ]
     pd.testing.assert_frame_equal(
         first.frame.loc[:, columns], second.frame.loc[:, columns]
     )
-
-
-def test_all_frozen_selection_strategies_have_distinct_paths_and_hashes(
-    tmp_path: Path,
-) -> None:
-    records = _records(kinds=("MV", "N", "TV", "RV"))
-    paired = _gmm_paired(records)
-    selections = {
-        strategy: _build(
-            tmp_path,
-            selection_strategy=strategy,
-            records=records,
-            paired=paired,
-        )
-        for strategy in SELECTION_STRATEGIES
-    }
-    directories = {
-        strategy: target_pair_selection_directory(
-            tmp_path, **_identity(), selection_strategy=strategy
-        )
-        for strategy in SELECTION_STRATEGIES
-    }
-
-    assert len(set(directories.values())) == len(SELECTION_STRATEGIES)
-    assert all(directory.is_dir() for directory in directories.values())
-    assert len({selection.sha256 for selection in selections.values()}) == len(
-        SELECTION_STRATEGIES
-    )
-    for strategy, selection in selections.items():
-        loaded = load_target_pair_selection(
-            tmp_path, **_identity(), selection_strategy=strategy
-        )
-        assert loaded.sha256 == selection.sha256
 
 
 def test_gmm_load_rejects_tampered_posterior(tmp_path: Path) -> None:
@@ -688,31 +599,22 @@ def test_gmm_load_rejects_tampered_posterior(tmp_path: Path) -> None:
     frame.to_csv(directory / "selection.csv", index=False)
 
     with pytest.raises(TargetPairSelectionError):
-        load_target_pair_selection(
-            tmp_path, **_identity(), selection_strategy="gmm"
-        )
+        load_target_pair_selection(tmp_path, **_identity(), selection_strategy="gmm")
 
 
-def test_gmm_load_rejects_tampered_marginal_boundary(tmp_path: Path) -> None:
+def test_gmm_load_rejects_nondiagonal_covariance(tmp_path: Path) -> None:
     records = _records(kinds=("MV", "N", "TV", "RV"))
-    _build(
+    selection = _build(
         tmp_path,
         selection_strategy="gmm",
         records=records,
         paired=_gmm_paired(records),
     )
-    directory = target_pair_selection_directory(
-        tmp_path, **_identity(), selection_strategy="gmm"
-    )
-    config_path = directory / "config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["gmm_fit"]["sscd_marginal_boundary"] += 0.01
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-
-    with pytest.raises(TargetPairSelectionError, match="boundary is inconsistent"):
-        load_target_pair_selection(
-            tmp_path, **_identity(), selection_strategy="gmm"
-        )
+    fit = json.loads(json.dumps(selection.configuration["gmm_fit"]))
+    covariance = fit["covariances_standardized"][0]
+    covariance[0][1] = covariance[1][0] = 1e-8
+    with pytest.raises(TargetPairSelectionError, match="covariance is not diagonal"):
+        selection_module._validate_gmm_decisions(selection.frame, fit, "gmm")
 
 
 @pytest.mark.parametrize("num_seeds", (3, 7))
@@ -720,30 +622,27 @@ def test_single_csv_is_seed_level_and_points_to_dynamic_montage_tiles(
     tmp_path: Path,
     num_seeds: int,
 ) -> None:
-    records = _records(kinds=("TV",))
+    records = _records(kinds=("TV",) * 4)
     paired = _paired(records, num_seeds=num_seeds)
     selection = _build(tmp_path, num_seeds=num_seeds, records=records, paired=paired)
     directory = target_pair_selection_directory(
-        tmp_path, **_identity(num_seeds=num_seeds), selection_strategy="spearman"
+        tmp_path, **_identity(num_seeds=num_seeds), selection_strategy="gmm"
     )
 
     assert selection.num_seeds == num_seeds
     assert tuple(selection.frame.columns) == SELECTION_COLUMNS
-    assert len(selection.frame) == num_seeds
-    assert len(selection.prompt_frame) == 1
-    assert tuple(selection.frame["seed"]) == _reference_seeds(num_seeds)
-    assert tuple(selection.frame["generated_image_tile_index"]) == tuple(
-        range(num_seeds)
-    )
-    assert selection.frame["generated_image_path"].unique().tolist() == [
+    assert len(selection.frame) == num_seeds * len(records)
+    assert len(selection.prompt_frame) == len(records)
+    first = selection.frame.loc[selection.frame["original_index"].eq("10000")]
+    assert tuple(first["seed"]) == _reference_seeds(num_seeds)
+    assert tuple(first["generated_image_tile_index"]) == tuple(range(num_seeds))
+    assert first["generated_image_path"].unique().tolist() == [
         f"logs/sdv1_ddim_g7.5_T50_N{num_seeds}/"
         f"reference_S{num_seeds}_N{num_seeds}/image/10000.png"
     ]
-    assert selection.frame["prompt"].eq("prompt 0").all()
+    assert first["prompt"].eq("prompt 0").all()
     assert selection.frame["kind"].eq("TV").all()
-    assert selection.frame["l2_norm"].tolist() == pytest.approx(
-        list(range(1, num_seeds + 1))
-    )
+    assert first["l2_norm"].tolist() == pytest.approx(list(range(1, num_seeds + 1)))
     assert selection.frame["observation_status"].eq("complete").all()
     assert selection.frame["observation_error"].eq("").all()
     assert {path.name for path in directory.iterdir()} == {
@@ -755,18 +654,21 @@ def test_single_csv_is_seed_level_and_points_to_dynamic_montage_tiles(
 
     summary = json.loads((directory / "summary.json").read_text())
     assert summary["complete"] is True
-    assert summary["selection_strategy"] == "spearman"
-    assert summary["reference_observation_count"] == num_seeds
-    assert summary["total_prompt_count"] == 1
-    assert summary["included_prompt_count"] == 1
+    assert summary["selection_strategy"] == "gmm"
+    assert summary["reference_observation_count"] == num_seeds * len(records)
+    assert summary["total_prompt_count"] == len(records)
+    assert summary["included_prompt_count"] == len(selection.included_indices)
     config = json.loads((directory / "config.json").read_text())
     assert config["reference_seed_start"] == num_seeds
     assert config["reference_num_seeds"] == num_seeds
     assert config["reference_seeds"] == list(_reference_seeds(num_seeds))
     assert "generated_image_tile_columns" not in config
-    assert config["selection_metric"] == "spearman(l2_norm,sscd)"
-    assert config["prompt_reduction"] == "within_prompt_spearman"
-    assert config["include_when"] == "prompt_spearman < 0"
+    assert (
+        config["selection_metric"]
+        == "two_component_diagonal_covariance_gmm(l2_norm,sscd)"
+    )
+    assert config["prompt_reduction"] == "any(gmm_component == high_sscd_mode)"
+    assert config["include_when"] == "any(gmm_low_mode_probability < 0.5)"
     assert config["kind_affects_selection"] is False
     assert "schema_version" not in config
     assert "threshold" not in config
@@ -775,7 +677,7 @@ def test_single_csv_is_seed_level_and_points_to_dynamic_montage_tiles(
 
 def test_all_configured_seeds_affect_one_correlation_and_hash(tmp_path: Path) -> None:
     num_seeds = 7
-    records = _records(kinds=("N",))
+    records = _records(kinds=("N",) * 4)
     first_rows = _paired(records, num_seeds=num_seeds)
     changed_rows = first_rows.copy()
     changed_rows.loc[changed_rows["seed"].eq(2 * num_seeds - 1), "sscd"] = 1.0
@@ -786,8 +688,9 @@ def test_all_configured_seeds_affect_one_correlation_and_hash(tmp_path: Path) ->
     changed = _build(
         tmp_path / "changed", num_seeds=num_seeds, records=records, paired=changed_rows
     )
+    first_prompt_rows = changed_rows.loc[changed_rows["original_index"].eq("10000")]
     expected = spearman_correlation(
-        changed_rows["l2_norm"].tolist(), changed_rows["sscd"].tolist()
+        first_prompt_rows["l2_norm"].tolist(), first_prompt_rows["sscd"].tolist()
     )
 
     assert first.prompt_frame.iloc[0]["prompt_spearman"] == pytest.approx(-1.0)
@@ -802,28 +705,22 @@ def test_all_configured_seeds_affect_one_correlation_and_hash(tmp_path: Path) ->
         "duplicate",
         "nonfinite_l2",
         "nonfinite_sscd",
-        "constant_l2",
-        "constant_sscd",
         "reported_failure",
     ),
 )
 def test_bad_reference_evidence_is_logged_and_never_included(
     tmp_path: Path, case: str
 ) -> None:
-    records = _records(kinds=("MV",))
-    paired = _paired(records)
+    records = _records(kinds=("MV", "N", "TV", "RV"))
+    paired = _gmm_paired(records)
     if case == "missing":
-        paired = paired.loc[paired["seed"].ne(DEFAULT_NUM_SEEDS)].reset_index(drop=True)
+        paired = paired.drop(index=0).reset_index(drop=True)
     elif case == "duplicate":
         paired = pd.concat([paired, paired.iloc[[0]]], ignore_index=True)
     elif case == "nonfinite_l2":
         paired.loc[0, "l2_norm"] = math.inf
     elif case == "nonfinite_sscd":
         paired.loc[0, "sscd"] = math.nan
-    elif case == "constant_l2":
-        paired["l2_norm"] = 1.0
-    elif case == "constant_sscd":
-        paired["sscd"] = 0.5
     elif case == "reported_failure":
         paired.loc[0, ["l2_norm", "sscd"]] = math.nan
         paired.loc[0, "observation_status"] = "cache_failure"
@@ -831,27 +728,22 @@ def test_bad_reference_evidence_is_logged_and_never_included(
 
     selection = _build(tmp_path, records=records, paired=paired)
     prompt = selection.prompt_frame.iloc[0]
-
-    assert selection.included_indices == frozenset()
-    assert selection.excluded_indices == frozenset({"10000"})
+    assert "10000" not in selection.included_indices
+    assert "10000" in selection.excluded_indices
     assert prompt["selection_status"] == UNUSABLE_REFERENCE_OBSERVATIONS
     assert math.isnan(prompt["prompt_spearman"])
-    assert len(selection.frame) == DEFAULT_NUM_SEEDS
-    if case not in {"constant_l2", "constant_sscd"}:
-        failures = selection.frame.loc[
-            selection.frame["observation_status"].ne("complete")
-        ]
-        assert len(failures) >= 1
-        assert failures["observation_error"].str.len().gt(0).all()
+    assert len(selection.frame) == DEFAULT_NUM_SEEDS * len(records)
+    failures = selection.frame.loc[selection.frame["observation_status"].ne("complete")]
+    assert len(failures) >= 1
+    assert failures["observation_error"].str.len().gt(0).all()
 
 
 def test_apply_selection_filters_whole_prompts_not_seeds(tmp_path: Path) -> None:
-    records = _records(kinds=("TV", "N"))
-    selection = _build(
-        tmp_path,
-        records=records,
-        paired=_paired(records, ("negative", "positive")),
-    )
+    records = _records(kinds=("MV", "N", "TV", "RV"))
+    paired = _gmm_paired(records)
+    # One high observation is enough to retain every experiment seed for its prompt.
+    paired.loc[0, ["l2_norm", "sscd"]] = (7.4, 0.80)
+    selection = _build(tmp_path, records=records, paired=paired)
     experiment = pd.DataFrame(
         {
             "original_index": ["10000"] * DEFAULT_NUM_SEEDS
@@ -865,7 +757,6 @@ def test_apply_selection_filters_whole_prompts_not_seeds(tmp_path: Path) -> None
     assert len(selected) == DEFAULT_NUM_SEEDS
     assert set(selected["original_index"]) == {"10000"}
     assert set(selected["seed"]) == set(range(DEFAULT_NUM_SEEDS))
-
     with pytest.raises(TargetPairSelectionError, match="absent"):
         apply_target_pair_selection(
             pd.DataFrame({"original_index": ["unknown"]}), selection
@@ -882,13 +773,13 @@ def test_tied_ranks_use_average_rank_spearman() -> None:
 def test_frozen_selection_reuses_identical_and_rejects_changed_evidence(
     tmp_path: Path,
 ) -> None:
-    records = _records(kinds=("RV",))
+    records = _records(kinds=("RV",) * 4)
     paired = _paired(records)
     first = _build(tmp_path, records=records, paired=paired)
     before = {
         path.name: path.read_bytes()
         for path in target_pair_selection_directory(
-            tmp_path, **_identity(), selection_strategy="spearman"
+            tmp_path, **_identity(), selection_strategy="gmm"
         ).iterdir()
     }
     second = _build(tmp_path, records=records, paired=paired)
@@ -896,7 +787,7 @@ def test_frozen_selection_reuses_identical_and_rejects_changed_evidence(
     assert before == {
         path.name: path.read_bytes()
         for path in target_pair_selection_directory(
-            tmp_path, **_identity(), selection_strategy="spearman"
+            tmp_path, **_identity(), selection_strategy="gmm"
         ).iterdir()
     }
 
@@ -913,11 +804,11 @@ def test_frozen_selection_reuses_identical_and_rejects_changed_evidence(
     )
     assert replaced.sha256 != first.sha256
     directory = target_pair_selection_directory(
-        tmp_path, **_identity(), selection_strategy="spearman"
+        tmp_path, **_identity(), selection_strategy="gmm"
     )
     assert (
         load_target_pair_selection(
-            tmp_path, **_identity(), selection_strategy="spearman"
+            tmp_path, **_identity(), selection_strategy="gmm"
         ).sha256
         == replaced.sha256
     )
@@ -930,7 +821,7 @@ def test_frozen_selection_reuses_identical_and_rejects_changed_evidence(
 def test_reference_marker_fingerprint_is_bound_to_selection_hash(
     tmp_path: Path,
 ) -> None:
-    records = _records(kinds=("RV",))
+    records = _records(kinds=("RV",) * 4)
     paired = _paired(records)
     original = _build(tmp_path, records=records, paired=paired)
     original_fingerprint = original.configuration["reference_completion_fingerprint"]
@@ -961,11 +852,11 @@ def test_overwrite_rolls_back_if_frozen_directory_installation_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    records = _records(kinds=("RV",))
+    records = _records(kinds=("RV",) * 4)
     paired = _paired(records)
     original = _build(tmp_path, records=records, paired=paired)
     directory = target_pair_selection_directory(
-        tmp_path, **_identity(), selection_strategy="spearman"
+        tmp_path, **_identity(), selection_strategy="gmm"
     )
     before = {path.name: path.read_bytes() for path in directory.iterdir()}
     real_replace = selection_module.os.replace
@@ -991,7 +882,7 @@ def test_overwrite_rolls_back_if_frozen_directory_installation_fails(
     assert before == {path.name: path.read_bytes() for path in directory.iterdir()}
     assert (
         load_target_pair_selection(
-            tmp_path, **_identity(), selection_strategy="spearman"
+            tmp_path, **_identity(), selection_strategy="gmm"
         ).sha256
         == original.sha256
     )
@@ -1004,31 +895,31 @@ def test_overwrite_rolls_back_if_frozen_directory_installation_fails(
 def test_load_rejects_tampered_csv_and_summary(tmp_path: Path) -> None:
     _build(tmp_path / "csv")
     directory = target_pair_selection_directory(
-        tmp_path / "csv", **_identity(), selection_strategy="spearman"
+        tmp_path / "csv", **_identity(), selection_strategy="gmm"
     )
     frame = pd.read_csv(directory / "selection.csv")
     frame.loc[0, "l2_norm"] += 1.0
     frame.to_csv(directory / "selection.csv", index=False)
     with pytest.raises(TargetPairSelectionError):
         load_target_pair_selection(
-            tmp_path / "csv", **_identity(), selection_strategy="spearman"
+            tmp_path / "csv", **_identity(), selection_strategy="gmm"
         )
 
     _build(tmp_path / "summary")
     directory = target_pair_selection_directory(
-        tmp_path / "summary", **_identity(), selection_strategy="spearman"
+        tmp_path / "summary", **_identity(), selection_strategy="gmm"
     )
     summary = json.loads((directory / "summary.json").read_text())
     summary["complete"] = False
     (directory / "summary.json").write_text(json.dumps(summary))
     with pytest.raises(TargetPairSelectionError, match="summary"):
         load_target_pair_selection(
-            tmp_path / "summary", **_identity(), selection_strategy="spearman"
+            tmp_path / "summary", **_identity(), selection_strategy="gmm"
         )
 
 
 def test_reference_configuration_and_seed_range_are_strict(tmp_path: Path) -> None:
-    records = _records(kinds=("TV",))
+    records = _records(kinds=("TV",) * 4)
     generation, sscd = _configs()
     science = dict(generation["scientific_config"])
     science["seeds"] = list(range(DEFAULT_NUM_SEEDS + 1, 2 * DEFAULT_NUM_SEEDS + 1))
@@ -1042,7 +933,7 @@ def test_reference_configuration_and_seed_range_are_strict(tmp_path: Path) -> No
             tmp_path,
             **_identity(),
             overwrite=False,
-            selection_strategy="spearman",
+            selection_strategy="gmm",
             paired_frame=_paired(records),
             records_frame=records,
             reference_run_config=generation,
@@ -1059,7 +950,7 @@ def test_reference_configuration_and_seed_range_are_strict(tmp_path: Path) -> No
 
 
 def test_csv_inputs_and_empty_prompt_round_trip(tmp_path: Path) -> None:
-    records = _records(kinds=("normal",))
+    records = _records(kinds=("normal",) * 4)
     records.loc[0, "prompt"] = ""
     paired = _paired(records)
     records_path, paired_path = tmp_path / "records.csv", tmp_path / "paired.csv"
@@ -1072,7 +963,7 @@ def test_csv_inputs_and_empty_prompt_round_trip(tmp_path: Path) -> None:
         tmp_path,
         **_identity(),
         overwrite=False,
-        selection_strategy="spearman",
+        selection_strategy="gmm",
         paired_frame=paired_path,
         records_frame=records_path,
         reference_run_config=generation,
@@ -1082,7 +973,7 @@ def test_csv_inputs_and_empty_prompt_round_trip(tmp_path: Path) -> None:
     assert selection.prompt_frame.iloc[0]["kind"] == "N"
     assert (
         load_target_pair_selection(
-            tmp_path, **_identity(), selection_strategy="spearman"
+            tmp_path, **_identity(), selection_strategy="gmm"
         ).sha256
         == selection.sha256
     )
@@ -1097,14 +988,14 @@ def test_missing_selection_error_names_exact_reference_commands(tmp_path: Path) 
         num_inference_steps=17,
         num_seeds=num_seeds,
     )
-    identity["selection_strategy"] = "spearman"
+    identity["selection_strategy"] = "gmm"
     expected = (
         "./generate.sh --model sdv2 --scheduler ddpm --g 3.25 --T 17 "
         "--N 7 --seed-start 7\n"
         "./sscd.sh --model sdv2 --scheduler ddpm --g 3.25 --T 17 "
         "--N 7 --seed-start 7\n"
         "./compute_proximity.sh --model sdv2 --scheduler ddpm --g 3.25 "
-        "--T 17 --N 7 --seed-start 7 --selection-strategy spearman"
+        "--T 17 --N 7 --seed-start 7 --selection-strategy gmm"
     )
     assert reference_selection_command(**identity) == expected
     with pytest.raises(TargetPairSelectionMissingError) as captured:
@@ -1116,9 +1007,9 @@ def test_model_specific_frozen_directories_are_distinct(tmp_path: Path) -> None:
     sdv1 = _build(
         tmp_path,
         model_name="sdv1",
-        records=_records(kinds=("MV",), model_name="sdv1"),
+        records=_records(kinds=("MV",) * 4, model_name="sdv1"),
     )
-    realvis_records = _records(kinds=("MV",), model_name="realvis")
+    realvis_records = _records(kinds=("MV",) * 4, model_name="realvis")
     realvis = _build(
         tmp_path,
         model_name="realvis",
@@ -1128,9 +1019,9 @@ def test_model_specific_frozen_directories_are_distinct(tmp_path: Path) -> None:
     assert sdv1.root == realvis.root
     assert sdv1.sha256 != realvis.sha256
     assert target_pair_selection_directory(
-        tmp_path, **_identity("sdv1"), selection_strategy="spearman"
+        tmp_path, **_identity("sdv1"), selection_strategy="gmm"
     ) != target_pair_selection_directory(
-        tmp_path, **_identity("realvis"), selection_strategy="spearman"
+        tmp_path, **_identity("realvis"), selection_strategy="gmm"
     )
 
 
@@ -1152,19 +1043,19 @@ def test_sampler_specific_frozen_directories_and_hashes_are_distinct(
 
     assert default.sha256 != alternate.sha256
     assert target_pair_selection_directory(
-        tmp_path, **_identity(), selection_strategy="spearman"
+        tmp_path, **_identity(), selection_strategy="gmm"
     ) != target_pair_selection_directory(
-        tmp_path, **alternate_identity, selection_strategy="spearman"
+        tmp_path, **alternate_identity, selection_strategy="gmm"
     )
     assert (
         load_target_pair_selection(
-            tmp_path, **_identity(), selection_strategy="spearman"
+            tmp_path, **_identity(), selection_strategy="gmm"
         ).sha256
         == default.sha256
     )
     assert (
         load_target_pair_selection(
-            tmp_path, **alternate_identity, selection_strategy="spearman"
+            tmp_path, **alternate_identity, selection_strategy="gmm"
         ).sha256
         == alternate.sha256
     )

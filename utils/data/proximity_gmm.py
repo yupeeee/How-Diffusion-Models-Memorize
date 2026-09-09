@@ -13,7 +13,7 @@ DEFAULT_REG_COVAR = 1e-6
 MAX_ITERATIONS = 300
 TOLERANCE = 1e-10
 LIKELIHOOD_DECREASE_TOLERANCE = 1e-9
-INITIALIZATION_NAME = "deterministic_first_pc_extrema_kmeans"
+INITIALIZATION_NAME = "deterministic_first_pc_and_sscd_kmeans_best_likelihood"
 
 
 @dataclass(frozen=True)
@@ -66,18 +66,6 @@ def _kmeans_two(values: np.ndarray) -> np.ndarray:
     raise ValueError(f"k-means did not converge within {MAX_ITERATIONS} iterations")
 
 
-def _regularize_covariance(covariance: np.ndarray, floor: float) -> np.ndarray:
-    symmetric = (covariance + covariance.T) / 2.0
-    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
-    if np.any(~np.isfinite(eigenvalues)):
-        raise ValueError("Gaussian covariance has nonfinite eigenvalues")
-    eigenvalues = np.maximum(eigenvalues, floor)
-    result = (eigenvectors * eigenvalues) @ eigenvectors.T
-    result = (result + result.T) / 2.0
-    np.linalg.cholesky(result)
-    return result
-
-
 def _maximization(
     values: np.ndarray,
     responsibilities: np.ndarray,
@@ -94,10 +82,10 @@ def _maximization(
     covariances = np.empty((2, values.shape[1], values.shape[1]), dtype=np.float64)
     for component in range(2):
         delta = values - means[component]
-        covariance = (
-            (delta.T * responsibilities[:, component]) @ delta
+        variances = (
+            np.square(delta).T @ responsibilities[:, component]
         ) / component_mass[component]
-        covariances[component] = _regularize_covariance(covariance, reg_covar)
+        covariances[component] = np.diag(np.maximum(variances, reg_covar))
     return weights, means, covariances
 
 
@@ -132,69 +120,6 @@ def expectation(
     return responsibilities, float(log_normalizer.sum())
 
 
-def marginal_component_boundary(
-    weights: np.ndarray,
-    means: np.ndarray,
-    covariances: np.ndarray,
-    *,
-    feature_index: int,
-) -> float:
-    """Return the equal-posterior marginal boundary between ordered means.
-
-    The component weights are part of the one-dimensional marginal posterior.
-    A usable boundary must lie strictly between the two component means, with
-    each component dominating at its own mean.
-    """
-
-    weights = np.asarray(weights, dtype=np.float64)
-    means = np.asarray(means, dtype=np.float64)
-    covariances = np.asarray(covariances, dtype=np.float64)
-    if (
-        weights.shape != (2,)
-        or means.ndim != 2
-        or means.shape[0] != 2
-        or covariances.shape != (2, means.shape[1], means.shape[1])
-        or isinstance(feature_index, bool)
-        or not isinstance(feature_index, int)
-        or not 0 <= feature_index < means.shape[1]
-        or not np.all(np.isfinite(weights))
-        or not np.all(np.isfinite(means))
-        or not np.all(np.isfinite(covariances))
-        or np.any(weights <= 0.0)
-    ):
-        raise ValueError("marginal boundary parameters are invalid")
-    component_means = means[:, feature_index]
-    variances = covariances[:, feature_index, feature_index]
-    if component_means[0] >= component_means[1] or np.any(variances <= 0.0):
-        raise ValueError("marginal components are not ordered and nondegenerate")
-
-    def log_density_difference(value: float) -> float:
-        return float(
-            math.log(weights[0] / weights[1])
-            - 0.5 * math.log(variances[0] / variances[1])
-            - (value - component_means[0]) ** 2 / (2.0 * variances[0])
-            + (value - component_means[1]) ** 2 / (2.0 * variances[1])
-        )
-
-    lower, upper = (float(value) for value in component_means)
-    lower_difference = log_density_difference(lower)
-    upper_difference = log_density_difference(upper)
-    if not lower_difference > 0.0 or not upper_difference < 0.0:
-        raise ValueError(
-            "marginal components have no unambiguous boundary between their means"
-        )
-    for _ in range(128):
-        midpoint = lower + (upper - lower) / 2.0
-        if log_density_difference(midpoint) > 0.0:
-            lower = midpoint
-        else:
-            upper = midpoint
-    boundary = lower + (upper - lower) / 2.0
-    if not component_means[0] < boundary < component_means[1]:
-        raise ValueError("marginal component boundary is outside its means")
-    return boundary
-
-
 def _validate_fit(fit: GaussianMixtureFit, values: np.ndarray) -> None:
     if fit.responsibilities.shape != (len(values), 2):
         raise ValueError("Gaussian responsibilities have the wrong shape")
@@ -227,7 +152,12 @@ def fit_gaussian_mixture(
     *,
     reg_covar: float = DEFAULT_REG_COVAR,
 ) -> GaussianMixtureFit:
-    """Fit a deterministic full-covariance GMM ordered by SSCD mean."""
+    """Fit the diagonal-covariance two-component GMM ordered by SSCD mean.
+
+    Select the largest converged likelihood from the deterministic
+    first-PC initialization and an SSCD-only k-means initialization. These
+    fixed starts add no fitted decision thresholds or user tuning parameters.
+    """
 
     values = np.asarray(values, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] != 2 or not np.all(np.isfinite(values)):
@@ -239,7 +169,35 @@ def fit_gaussian_mixture(
     if not np.allclose(values.std(axis=0, ddof=0), 1.0, atol=1e-10):
         raise ValueError("Gaussian input does not have unit variance")
 
-    initial_labels = _kmeans_two(values)
+    fits: list[GaussianMixtureFit] = []
+    errors: list[str] = []
+    for initialization_features in (values, values[:, 1:2]):
+        try:
+            fits.append(
+                _fit_from_labels(
+                    values,
+                    _kmeans_two(initialization_features),
+                    reg_covar=reg_covar,
+                )
+            )
+        except ValueError as error:
+            errors.append(str(error))
+    if not fits:
+        raise ValueError(
+            "Gaussian diagonal EM failed for all deterministic initializations: "
+            + "; ".join(errors)
+        )
+    return max(fits, key=lambda fit: fit.log_likelihood)
+
+
+def _fit_from_labels(
+    values: np.ndarray,
+    initial_labels: np.ndarray,
+    *,
+    reg_covar: float,
+) -> GaussianMixtureFit:
+    """Run the same constrained EM iteration for one fixed initialization."""
+
     initial_responsibilities = np.eye(2, dtype=np.float64)[initial_labels]
     weights, means, covariances = _maximization(
         values,

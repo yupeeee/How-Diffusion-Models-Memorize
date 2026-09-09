@@ -1,12 +1,11 @@
-"""Freeze whole-prompt selection from terminal-L2/SSCD reference evidence.
+"""Freeze whole-prompt GMM selection from terminal-L2/SSCD reference evidence.
 
 Selection uses all reference seeds N--2N-1, where N is the experiment seed
-count. The default Spearman strategy keeps a prompt when its within-prompt rank
-correlation is negative. The GMM strategy uses a global two-component Gaussian
-mixture and keeps a prompt when its mean low-SSCD-mode posterior is below one
-half. The GMM-evidence strategy additionally uses a marginal SSCD boundary,
-below-median L2 evidence, and negative within-prompt rank correlation. Webster
-kind is audit metadata and never affects a decision.
+count. The diagonal-covariance GMM fits every valid reference observation and
+assigns each to exactly one of two components. A complete prompt is kept if any
+seed belongs to the high-SSCD component; posteriors are not averaged into a second
+selection gate. Webster kind and within-prompt Spearman correlation are descriptive
+audit metadata and never affect the selection.
 """
 
 from __future__ import annotations
@@ -48,20 +47,16 @@ from utils.data.proximity_gmm import (
     TOLERANCE,
     expectation,
     fit_gaussian_mixture,
-    marginal_component_boundary,
     standardize_features,
 )
 from utils.data.webster import normalize_webster_type
 from utils.experiments.cache import generation_log_relative_path
 
-DEFAULT_SELECTION_STRATEGY = "spearman"
-SELECTION_STRATEGIES = ("gmm", "gmm-evidence", "spearman")
+DEFAULT_SELECTION_STRATEGY = "gmm"
+SELECTION_STRATEGIES = ("gmm",)
 SELECTION_POLICIES = {
-    "gmm": "prompt_gmm_mean_low_mode_probability_lt_half",
-    "gmm-evidence": "prompt_gmm_high_proximity_evidence_and_negative_spearman",
-    "spearman": "prompt_spearman_l2_sscd_lt_zero",
+    "gmm": "prompt_gmm_any_high_component_diagonal_covariance_v3",
 }
-_GMM_SELECTION_STRATEGIES = frozenset({"gmm", "gmm-evidence"})
 INCLUDED_PROXIMITY_RULE = "included_proximity_rule"
 DISCARDED_PROXIMITY_RULE = "discarded_proximity_rule"
 UNUSABLE_REFERENCE_OBSERVATIONS = "unusable_reference_observations"
@@ -71,7 +66,7 @@ SELECTION_COLUMNS = tuple(
     "target_image_sha256 generated_image_path generated_image_tile_index "
     "l2_norm sscd observation_status observation_error selection_strategy "
     "prompt_spearman gmm_component gmm_low_mode_probability "
-    "prompt_gmm_evidence_seed_count include_prompt "
+    "include_prompt "
     "selection_status selection_reason reference_run_name "
     "reference_generation_hash reference_sscd_hash selection_policy selection_hash".split()
 )
@@ -274,13 +269,12 @@ def target_pair_selection_directory(
     namespace = generation_cache_namespace(
         model, scheduler, guidance, steps, count, seed_start=count
     )
-    strategy = normalize_selection_strategy(selection_strategy)
+    normalize_selection_strategy(selection_strategy)
     return (
         Path(root).expanduser().resolve()
         / "data/webster/selection"
         / _MODELS[model]
         / parent
-        / strategy
         / namespace
     )
 
@@ -535,7 +529,7 @@ def validate_target_pair_selection(selection: TargetPairSelection) -> None:
         raise TargetPairSelectionError("selection.csv has an invalid schema")
     if not pd.api.types.is_bool_dtype(frame["include_prompt"]):
         raise TargetPairSelectionError("include_prompt must contain booleans")
-    gmm_fit = config.get("gmm_fit") if strategy in _GMM_SELECTION_STRATEGIES else None
+    gmm_fit = config.get("gmm_fit")
     completion_fingerprint = _normalize_completion_fingerprint(
         config.get("reference_completion_fingerprint")
     )
@@ -591,9 +585,8 @@ def validate_target_pair_selection(selection: TargetPairSelection) -> None:
         _validate_prompt_group(
             str(index), group, model, scheduler, guidance, steps, count, strategy
         )
-    if strategy in _GMM_SELECTION_STRATEGIES:
-        assert isinstance(gmm_fit, Mapping)
-        _validate_gmm_decisions(frame, gmm_fit, strategy)
+    assert isinstance(gmm_fit, Mapping)
+    _validate_gmm_decisions(frame, gmm_fit, strategy)
     digest = compute_target_pair_selection_hash(
         frame,
         model_name=model,
@@ -660,10 +653,8 @@ def compute_target_pair_selection_hash(
     completion_fingerprint = _normalize_completion_fingerprint(
         reference_completion_fingerprint
     )
-    if strategy in _GMM_SELECTION_STRATEGIES and not isinstance(gmm_fit, Mapping):
+    if not isinstance(gmm_fit, Mapping):
         raise TargetPairSelectionError("GMM selection fit is missing")
-    if strategy == "spearman" and gmm_fit is not None:
-        raise TargetPairSelectionError("Spearman selection must not contain a GMM fit")
     if not _is_hash(reference_generation_hash) or not _is_hash(reference_sscd_hash):
         raise TargetPairSelectionError("Selection provenance hash is invalid")
     columns = tuple(
@@ -704,30 +695,12 @@ def compute_target_pair_selection_hash(
 
 
 def _strategy_contract(selection_strategy: str) -> dict[str, object]:
-    strategy = normalize_selection_strategy(selection_strategy)
-    if strategy == "gmm":
-        return {
-            "selection_metric": "two_component_full_covariance_gmm(l2_norm,sscd)",
-            "prompt_reduction": "mean(gmm_low_mode_probability)",
-            "include_when": "mean(gmm_low_mode_probability) < 0.5",
-        }
-    if strategy == "gmm-evidence":
-        return {
-            "selection_metric": "two_component_full_covariance_gmm(l2_norm,sscd)",
-            "gmm_sscd_boundary": (
-                "equal_weighted_marginal_density_between_component_means"
-            ),
-            "prompt_reduction": (
-                "count(sscd > sscd_marginal_boundary and l2_norm < median(l2_norm))"
-            ),
-            "include_when": (
-                "prompt_spearman < 0 and prompt_gmm_evidence_seed_count >= 1"
-            ),
-        }
+    normalize_selection_strategy(selection_strategy)
     return {
-        "selection_metric": "spearman(l2_norm,sscd)",
-        "prompt_reduction": "within_prompt_spearman",
-        "include_when": "prompt_spearman < 0",
+        "selection_metric": "two_component_diagonal_covariance_gmm(l2_norm,sscd)",
+        "fit_population": "all_complete_reference_observations",
+        "prompt_reduction": "any(gmm_component == high_sscd_mode)",
+        "include_when": "any(gmm_low_mode_probability < 0.5)",
     }
 
 
@@ -768,7 +741,7 @@ def _manifest(
     sscd_hash: str,
     num_seeds: int,
     selection_strategy: str,
-) -> tuple[pd.DataFrame, dict[str, object] | None]:
+) -> tuple[pd.DataFrame, dict[str, object]]:
     count = _num_seeds(num_seeds)
     strategy = normalize_selection_strategy(selection_strategy)
     reference_seeds = _reference_seeds(count)
@@ -797,8 +770,6 @@ def _manifest(
                 UNUSABLE_REFERENCE_OBSERVATIONS,
                 "invalid_reference_observations:" + ",".join(issues),
             )
-        elif strategy == "spearman":
-            rho, include, status, reason = _spearman_decision(per_seed)
         else:
             include, status, reason = False, "", ""
         common = {
@@ -813,7 +784,6 @@ def _manifest(
             "prompt_spearman": rho,
             "gmm_component": "",
             "gmm_low_mode_probability": math.nan,
-            "prompt_gmm_evidence_seed_count": math.nan,
             "include_prompt": include,
             "selection_status": status,
             "selection_reason": reason,
@@ -831,11 +801,7 @@ def _manifest(
         kind="stable",
         ignore_index=True,
     )
-    gmm_fit = (
-        _apply_gmm_decisions(frame, strategy)
-        if strategy in _GMM_SELECTION_STRATEGIES
-        else None
-    )
+    gmm_fit = _apply_gmm_decisions(frame, strategy)
     return frame, gmm_fit
 
 
@@ -862,121 +828,51 @@ def _prompt_spearman(observations: Sequence[Mapping[str, object]]) -> float:
     )
 
 
-def _spearman_decision(
-    observations: Sequence[Mapping[str, object]],
-) -> tuple[float, bool, str, str]:
-    issues = _observation_issues(observations)
-    if issues:
-        return (
-            math.nan,
-            False,
-            UNUSABLE_REFERENCE_OBSERVATIONS,
-            "invalid_reference_observations:" + ",".join(issues),
-        )
-    l2 = [float(row["l2_norm"]) for row in observations]
-    sscd = [float(row["sscd"]) for row in observations]
-    if len(set(l2)) == 1:
-        return math.nan, False, UNUSABLE_REFERENCE_OBSERVATIONS, "constant_l2_norm"
-    if len(set(sscd)) == 1:
-        return math.nan, False, UNUSABLE_REFERENCE_OBSERVATIONS, "constant_sscd"
-    rho = spearman_correlation(l2, sscd)
-    if not math.isfinite(rho):
-        return (
-            math.nan,
-            False,
-            UNUSABLE_REFERENCE_OBSERVATIONS,
-            "undefined_prompt_spearman",
-        )
-    if rho < 0.0:
-        return rho, True, INCLUDED_PROXIMITY_RULE, "prompt_spearman_lt_0"
-    return rho, False, DISCARDED_PROXIMITY_RULE, "prompt_spearman_ge_0"
-
-
-def _gmm_evidence_decision(
-    observations: Sequence[Mapping[str, object]],
-    *,
-    sscd_boundary: float,
-) -> tuple[float, int, bool, str, str]:
-    if not math.isfinite(sscd_boundary):
-        raise TargetPairSelectionError("GMM SSCD boundary must be finite")
-    if _observation_issues(observations):
-        rho, _include, status, reason = _spearman_decision(observations)
-        return rho, 0, False, status, reason
-    l2 = [float(row["l2_norm"]) for row in observations]
-    sscd = [float(row["sscd"]) for row in observations]
-    median_l2 = float(np.median(np.asarray(l2, dtype=np.float64)))
-    evidence_count = sum(
-        score > sscd_boundary and distance < median_l2
-        for distance, score in zip(l2, sscd, strict=True)
-    )
-    rho, _include, status, reason = _spearman_decision(observations)
-    if status == UNUSABLE_REFERENCE_OBSERVATIONS:
-        return rho, evidence_count, False, status, reason
-    if rho >= 0.0:
-        return (
-            rho,
-            evidence_count,
-            False,
-            DISCARDED_PROXIMITY_RULE,
-            "prompt_spearman_ge_0",
-        )
-    if evidence_count == 0:
-        return (
-            rho,
-            evidence_count,
-            False,
-            DISCARDED_PROXIMITY_RULE,
-            "no_gmm_high_proximity_evidence",
-        )
-    return (
-        rho,
-        evidence_count,
-        True,
-        INCLUDED_PROXIMITY_RULE,
-        "gmm_high_proximity_evidence_and_prompt_spearman_lt_0",
-    )
-
-
 def _gmm_decision(
     low_mode_probabilities: Sequence[float],
 ) -> tuple[bool, str, str]:
     probabilities = [float(value) for value in low_mode_probabilities]
     if not probabilities or any(
-        not math.isfinite(value) or not 0.0 <= value <= 1.0
-        for value in probabilities
+        not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in probabilities
     ):
         raise TargetPairSelectionError("GMM low-mode probabilities are invalid")
-    mean_low_probability = math.fsum(probabilities) / len(probabilities)
-    if mean_low_probability < 0.5:
+    # An exact posterior tie belongs to the first (low-SSCD) component.
+    # A high-component seed must not be voted away by other seeds.
+    if any(value < 0.5 for value in probabilities):
         return (
             True,
             INCLUDED_PROXIMITY_RULE,
-            "mean_gmm_low_mode_probability_lt_0_5",
+            "has_high_sscd_mode_seed",
         )
     return (
         False,
         DISCARDED_PROXIMITY_RULE,
-        "mean_gmm_low_mode_probability_ge_0_5",
+        "all_reference_seeds_in_low_sscd_mode",
     )
+
+
+def _gmm_fit_positions(frame: pd.DataFrame) -> list[int]:
+    """Fit every valid seed, including valid siblings of an incomplete seed."""
+
+    return [
+        int(position)
+        for position in frame.index[frame["observation_status"].eq("complete")]
+    ]
 
 
 def _apply_gmm_decisions(
     frame: pd.DataFrame, selection_strategy: str
 ) -> dict[str, object]:
-    strategy = normalize_selection_strategy(selection_strategy)
-    if strategy not in _GMM_SELECTION_STRATEGIES:
-        raise TargetPairSelectionError(
-            f"Cannot apply GMM decisions for selection strategy {strategy!r}"
-        )
-    usable_positions: list[int] = []
-    usable_prompts: list[str] = []
-    for index, group in frame.groupby("original_index", sort=False):
-        if group["observation_status"].eq("complete").all():
-            usable_positions.extend(int(position) for position in group.index)
-            usable_prompts.append(str(index))
+    normalize_selection_strategy(selection_strategy)
+    usable_positions = _gmm_fit_positions(frame)
+    usable_prompts = [
+        str(index)
+        for index, group in frame.groupby("original_index", sort=False)
+        if group["observation_status"].eq("complete").all()
+    ]
     if not usable_positions:
         raise TargetPairSelectionError(
-            "GMM selection has no prompt with complete reference observations"
+            "GMM selection has no complete reference observations"
         )
     raw = frame.loc[usable_positions, ["l2_norm", "sscd"]].to_numpy(dtype=np.float64)
     try:
@@ -991,40 +887,11 @@ def _apply_gmm_decisions(
     hard_component = np.asarray(COMPONENT_NAMES)[fit.responsibilities.argmax(axis=1)]
     frame.loc[usable_positions, "gmm_low_mode_probability"] = low_probability
     frame.loc[usable_positions, "gmm_component"] = hard_component
-    try:
-        boundary_standardized = marginal_component_boundary(
-            fit.weights,
-            fit.means,
-            fit.covariances,
-            feature_index=1,
-        )
-    except ValueError as error:
-        raise TargetPairSelectionError(
-            f"Cannot derive selection GMM SSCD boundary: {error}"
-        ) from error
-    sscd_boundary = float(feature_mean[1] + boundary_standardized * feature_scale[1])
     for index in usable_prompts:
         positions = frame.index[frame["original_index"].eq(index)].tolist()
-        if strategy == "gmm":
-            include, status, reason = _gmm_decision(
-                [float(low_probability.loc[position]) for position in positions]
-            )
-        else:
-            observations = frame.loc[
-                positions, ["l2_norm", "sscd", "observation_status"]
-            ]
-            rho, evidence_count, include, status, reason = _gmm_evidence_decision(
-                observations.to_dict(orient="records"),
-                sscd_boundary=sscd_boundary,
-            )
-            stored_rho = _optional_float(
-                frame.at[positions[0], "prompt_spearman"], "prompt_spearman"
-            )
-            if not _same_float(rho, stored_rho):
-                raise TargetPairSelectionError(
-                    f"Prompt {index} Spearman value changed during GMM selection"
-                )
-            frame.loc[positions, "prompt_gmm_evidence_seed_count"] = evidence_count
+        include, status, reason = _gmm_decision(
+            [float(low_probability.loc[position]) for position in positions]
+        )
         frame.loc[positions, "include_prompt"] = include
         frame.loc[positions, "selection_status"] = status
         frame.loc[positions, "selection_reason"] = reason
@@ -1037,7 +904,7 @@ def _apply_gmm_decisions(
         "feature_scale": [float(value) for value in feature_scale],
         "component_names": list(COMPONENT_NAMES),
         "num_components": 2,
-        "covariance_type": "full",
+        "covariance_type": "diag",
         "initialization": INITIALIZATION_NAME,
         "reg_covar": DEFAULT_REG_COVAR,
         "max_iterations": MAX_ITERATIONS,
@@ -1046,11 +913,11 @@ def _apply_gmm_decisions(
         "weights": [float(value) for value in fit.weights],
         "means_standardized": fit.means.astype(float).tolist(),
         "covariances_standardized": fit.covariances.astype(float).tolist(),
-        "sscd_marginal_boundary_standardized": float(boundary_standardized),
-        "sscd_marginal_boundary": sscd_boundary,
         "log_likelihood": float(fit.log_likelihood),
-        "iterations": fit.iterations,
-        "usable_prompt_count": len(usable_prompts),
+        "iterations": int(fit.iterations),
+        "usable_prompt_count": int(
+            frame.loc[usable_positions, "original_index"].nunique()
+        ),
         "usable_observation_count": len(usable_positions),
     }
 
@@ -1197,7 +1064,7 @@ def _validate_prompt_group(
     selection_strategy: str,
 ) -> None:
     count = _num_seeds(num_seeds)
-    strategy = normalize_selection_strategy(selection_strategy)
+    normalize_selection_strategy(selection_strategy)
     if len(group) != count:
         raise TargetPairSelectionError(
             f"Prompt {index} must contain exactly {count} rows"
@@ -1225,7 +1092,6 @@ def _validate_prompt_group(
         "target_image_sha256",
         "selection_strategy",
         "prompt_spearman",
-        "prompt_gmm_evidence_seed_count",
         "include_prompt",
         "selection_status",
         "selection_reason",
@@ -1260,24 +1126,7 @@ def _validate_prompt_group(
         _optional_float(value, "gmm_low_mode_probability")
         for value in group["gmm_low_mode_probability"]
     ]
-    evidence_count = _optional_float(
-        first["prompt_gmm_evidence_seed_count"],
-        "prompt_gmm_evidence_seed_count",
-    )
     components = [str(value) for value in group["gmm_component"]]
-    if strategy == "spearman":
-        expected = _spearman_decision(observations)
-        _require_prompt_decision(index, first, *expected[1:])
-        if any(components) or any(not math.isnan(value) for value in low_probability):
-            raise TargetPairSelectionError(
-                f"Prompt {index} has GMM fields under Spearman selection"
-            )
-        if not math.isnan(evidence_count):
-            raise TargetPairSelectionError(
-                f"Prompt {index} has a GMM evidence count under Spearman selection"
-            )
-        return
-
     issues = _observation_issues(observations)
     if issues:
         _require_prompt_decision(
@@ -1287,14 +1136,20 @@ def _validate_prompt_group(
             UNUSABLE_REFERENCE_OBSERVATIONS,
             "invalid_reference_observations:" + ",".join(issues),
         )
-        if any(components) or any(not math.isnan(value) for value in low_probability):
-            raise TargetPairSelectionError(
-                f"Unusable prompt {index} has seed-level GMM fields"
-            )
-        if not math.isnan(evidence_count):
-            raise TargetPairSelectionError(
-                f"Unusable prompt {index} has a GMM evidence count"
-            )
+        for observation, component, probability in zip(
+            observations, components, low_probability, strict=True
+        ):
+            if observation["observation_status"] == "complete":
+                if component not in COMPONENT_NAMES or not (
+                    math.isfinite(probability) and 0.0 <= probability <= 1.0
+                ):
+                    raise TargetPairSelectionError(
+                        f"Valid observation in prompt {index} lacks a GMM assignment"
+                    )
+            elif component or not math.isnan(probability):
+                raise TargetPairSelectionError(
+                    f"Unusable observation in prompt {index} has seed-level GMM fields"
+                )
         return
     if any(component not in COMPONENT_NAMES for component in components):
         raise TargetPairSelectionError(f"Prompt {index} has an invalid GMM component")
@@ -1302,21 +1157,7 @@ def _validate_prompt_group(
         math.isnan(value) or value < 0.0 or value > 1.0 for value in low_probability
     ):
         raise TargetPairSelectionError(f"Prompt {index} has an invalid GMM posterior")
-    if strategy == "gmm":
-        if not math.isnan(evidence_count):
-            raise TargetPairSelectionError(
-                f"Prompt {index} has a GMM evidence count under GMM selection"
-            )
-        _require_prompt_decision(index, first, *_gmm_decision(low_probability))
-        return
-    if (
-        math.isnan(evidence_count)
-        or not evidence_count.is_integer()
-        or not 0 <= evidence_count <= count
-    ):
-        raise TargetPairSelectionError(
-            f"Prompt {index} has an invalid GMM evidence count"
-        )
+    _require_prompt_decision(index, first, *_gmm_decision(low_probability))
 
 
 def _require_prompt_decision(
@@ -1351,8 +1192,6 @@ _GMM_FIT_KEYS = {
     "weights",
     "means_standardized",
     "covariances_standardized",
-    "sscd_marginal_boundary_standardized",
-    "sscd_marginal_boundary",
     "log_likelihood",
     "iterations",
     "usable_prompt_count",
@@ -1365,11 +1204,7 @@ def _validate_gmm_decisions(
     gmm_fit: Mapping[str, object],
     selection_strategy: str,
 ) -> None:
-    strategy = normalize_selection_strategy(selection_strategy)
-    if strategy not in _GMM_SELECTION_STRATEGIES:
-        raise TargetPairSelectionError(
-            f"Cannot validate GMM decisions for selection strategy {strategy!r}"
-        )
+    normalize_selection_strategy(selection_strategy)
     if set(gmm_fit) != _GMM_FIT_KEYS:
         raise TargetPairSelectionError("GMM fit has an invalid schema")
     fixed = {
@@ -1378,7 +1213,7 @@ def _validate_gmm_decisions(
         "standardization_ddof": 0,
         "component_names": list(COMPONENT_NAMES),
         "num_components": 2,
-        "covariance_type": "full",
+        "covariance_type": "diag",
         "initialization": INITIALIZATION_NAME,
         "reg_covar": DEFAULT_REG_COVAR,
         "max_iterations": MAX_ITERATIONS,
@@ -1391,16 +1226,8 @@ def _validate_gmm_decisions(
     ):
         raise TargetPairSelectionError("GMM fit settings are inconsistent")
 
-    usable_positions = [
-        int(position)
-        for _index_value, group in frame.groupby("original_index", sort=False)
-        if group["observation_status"].eq("complete").all()
-        for position in group.index
-    ]
-    usable_prompt_count = sum(
-        group["observation_status"].eq("complete").all()
-        for _index_value, group in frame.groupby("original_index", sort=False)
-    )
+    usable_positions = _gmm_fit_positions(frame)
+    usable_prompt_count = int(frame.loc[usable_positions, "original_index"].nunique())
     if _integer(
         gmm_fit.get("usable_prompt_count"), "usable_prompt_count"
     ) != usable_prompt_count or _integer(
@@ -1435,6 +1262,8 @@ def _validate_gmm_decisions(
     ):
         raise TargetPairSelectionError("GMM fit parameters are invalid")
     for covariance in covariances:
+        if not np.array_equal(covariance, np.diag(np.diag(covariance))):
+            raise TargetPairSelectionError("GMM covariance is not diagonal")
         if not np.allclose(covariance, covariance.T, rtol=0.0, atol=1e-12):
             raise TargetPairSelectionError("GMM covariance is not symmetric")
         try:
@@ -1448,40 +1277,6 @@ def _validate_gmm_decisions(
             raise TargetPairSelectionError(
                 "GMM covariance is below its eigenvalue floor"
             )
-
-    try:
-        expected_boundary_standardized = marginal_component_boundary(
-            weights,
-            means,
-            covariances,
-            feature_index=1,
-        )
-    except ValueError as error:
-        raise TargetPairSelectionError(
-            f"GMM SSCD boundary is invalid: {error}"
-        ) from error
-    observed_boundary_standardized = _optional_float(
-        gmm_fit.get("sscd_marginal_boundary_standardized"),
-        "sscd_marginal_boundary_standardized",
-    )
-    expected_boundary = float(
-        feature_mean[1] + expected_boundary_standardized * feature_scale[1]
-    )
-    observed_boundary = _optional_float(
-        gmm_fit.get("sscd_marginal_boundary"), "sscd_marginal_boundary"
-    )
-    if not math.isclose(
-        observed_boundary_standardized,
-        expected_boundary_standardized,
-        rel_tol=1e-12,
-        abs_tol=1e-12,
-    ) or not math.isclose(
-        observed_boundary,
-        expected_boundary,
-        rel_tol=1e-12,
-        abs_tol=1e-12,
-    ):
-        raise TargetPairSelectionError("GMM SSCD boundary is inconsistent")
 
     raw = frame.loc[usable_positions, ["l2_norm", "sscd"]].to_numpy(dtype=np.float64)
     try:
@@ -1541,37 +1336,11 @@ def _validate_gmm_decisions(
     for index, group in frame.groupby("original_index", sort=False):
         if not group["observation_status"].eq("complete").all():
             continue
-        if strategy == "gmm":
-            positions = [int(position) for position in group.index]
-            include, status, reason = _gmm_decision(
-                [float(expected_low.loc[position]) for position in positions]
-            )
-            _require_prompt_decision(
-                str(index), group.iloc[0], include, status, reason
-            )
-            continue
-        observations = group.loc[:, ["l2_norm", "sscd", "observation_status"]].to_dict(
-            orient="records"
+        positions = [int(position) for position in group.index]
+        include, status, reason = _gmm_decision(
+            [float(expected_low.loc[position]) for position in positions]
         )
-        _rho, evidence_count, include, status, reason = _gmm_evidence_decision(
-            observations,
-            sscd_boundary=expected_boundary,
-        )
-        observed_count = _optional_float(
-            group.iloc[0]["prompt_gmm_evidence_seed_count"],
-            "prompt_gmm_evidence_seed_count",
-        )
-        if observed_count != evidence_count:
-            raise TargetPairSelectionError(
-                f"Prompt {index} GMM evidence count is inconsistent"
-            )
-        _require_prompt_decision(
-            str(index),
-            group.iloc[0],
-            include,
-            status,
-            reason,
-        )
+        _require_prompt_decision(str(index), group.iloc[0], include, status, reason)
 
 
 def _completion_marker_directory_fingerprint(
@@ -1650,10 +1419,8 @@ def _selection_config(
     reference_seeds = _reference_seeds(count)
     strategy = normalize_selection_strategy(selection_strategy)
     fingerprint = _normalize_completion_fingerprint(completion_fingerprint)
-    if strategy in _GMM_SELECTION_STRATEGIES and not isinstance(gmm_fit, Mapping):
+    if not isinstance(gmm_fit, Mapping):
         raise TargetPairSelectionError("GMM selection fit is missing")
-    if strategy == "spearman" and gmm_fit is not None:
-        raise TargetPairSelectionError("Spearman selection must not contain a GMM fit")
     result: dict[str, object] = {
         "selection_strategy": strategy,
         "selection_policy": selection_policy(strategy),
@@ -1684,8 +1451,7 @@ def _selection_config(
         "sscd_preprocessing_hash": preprocessing_hash,
         "selection_hash": selection_hash,
     }
-    if strategy in _GMM_SELECTION_STRATEGIES:
-        result["gmm_fit"] = dict(gmm_fit)
+    result["gmm_fit"] = dict(gmm_fit)
     return result
 
 
@@ -1902,7 +1668,6 @@ def _normalize_csv(frame: pd.DataFrame) -> pd.DataFrame:
         "sscd",
         "prompt_spearman",
         "gmm_low_mode_probability",
-        "prompt_gmm_evidence_seed_count",
     ):
         result[column] = result[column].map(
             lambda value, name=column: _optional_float(value, name)

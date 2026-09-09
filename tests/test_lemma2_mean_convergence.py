@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import inspect
 import math
 from pathlib import Path
+import warnings
 from types import SimpleNamespace
+from unittest.mock import Mock
 from typing import Any
 
 import matplotlib
 
 matplotlib.use("Agg")
-from matplotlib.collections import PathCollection, PolyCollection
+from matplotlib.collections import (
+    LineCollection,
+    PathCollection,
+    PolyCollection,
+    QuadMesh,
+)
+from matplotlib.ticker import LogFormatterMathtext, LogLocator, NullFormatter
 import numpy as np
 import pandas as pd
 import pytest
@@ -31,6 +40,7 @@ EXPECTED_COLUMNS = (
     "scheduler_name",
     "guidance_scale",
     "num_inference_steps",
+    "evaluation_source",
     "centering_mode",
     "num_baseline_seeds",
     "evaluation_generation_scientific_config_hash",
@@ -47,8 +57,9 @@ EXPECTED_COLUMNS = (
     "snr_t",
     "latent_dimension",
     "centered_distance_rmse",
+    "target_sscd",
     "trajectory_sha256",
-    "is_actual_ddim_initial_timestep",
+    "is_initial_timestep",
     "status",
     "error",
 )
@@ -62,6 +73,12 @@ OTHER_SCHEDULE_HASH = "0" * 64
 NUM_BASELINE_SEEDS = 3
 LATENT_HASHES = {"10": "1" * 64, "11": "2" * 64}
 PREDICTION_HASHES = {"10": "3" * 64, "11": "4" * 64}
+TARGET_SSCD = {
+    ("10", 0): 0.10,
+    ("10", 1): 0.30,
+    ("11", 0): 0.70,
+    ("11", 1): 0.90,
+}
 
 
 def _selection(root: Path) -> TargetPairSelection:
@@ -270,6 +287,59 @@ def _contract(root: Path) -> experiment.GenerationContract:
     )
 
 
+def _scheduler_science(scheduler_name: str) -> dict[str, object]:
+    science = _science()
+    scheduler = science["scheduler"]
+    assert isinstance(scheduler, dict)
+    return {
+        **science,
+        "scheduler": {
+            **scheduler,
+            "name": scheduler_name,
+            "class": f"{scheduler_name.upper()}Scheduler",
+        },
+    }
+
+
+def _scheduler_identity(
+    root: Path, scheduler_name: str
+) -> experiment.GenerationIdentity:
+    return replace(
+        _identity(root),
+        science=_scheduler_science(scheduler_name),
+    )
+
+
+def _scheduler_schedule(scheduler_name: str) -> dict[str, object]:
+    return {
+        **_schedule(),
+        "scheduler_name": scheduler_name,
+        "scheduler_class": f"{scheduler_name.upper()}Scheduler",
+    }
+
+
+def _scheduler_contract(
+    root: Path, scheduler_name: str
+) -> experiment.GenerationContract:
+    return replace(
+        _contract(root),
+        identity=_scheduler_identity(root, scheduler_name),
+        schedule_payload=_scheduler_schedule(scheduler_name),
+    )
+
+
+def _scheduler_selection(root: Path, scheduler_name: str) -> TargetPairSelection:
+    return replace(_selection(root), scheduler_name=scheduler_name)
+
+
+def _scheduler_marker(index: str, scheduler_name: str) -> dict[str, object]:
+    return {
+        **_marker(index),
+        "scheduler_name": scheduler_name,
+        "scheduler_class": f"{scheduler_name.upper()}Scheduler",
+    }
+
+
 def _baseline_contract(
     mu_hat: torch.Tensor | None = None,
     *,
@@ -282,7 +352,7 @@ def _baseline_contract(
         source_scientific_hash=BASELINE_HASH,
         source_schedule_sha256=source_schedule_sha256,
         num_baseline_seeds=NUM_BASELINE_SEEDS,
-        source_seeds=(2, 3, 4),
+        baseline_seeds=(2, 3, 4),
         timestep=9,
         alpha_t=float(torch.tensor(0.10, dtype=torch.float32)),
         sigma_t=float(torch.sqrt(torch.tensor(0.99, dtype=torch.float32))),
@@ -355,7 +425,32 @@ def _rows(root: Path) -> list[dict[str, object]]:
         centering=_mu_centering_contract(None),
     )
     assert failed == 0
+    return experiment._attach_target_sscd(rows, TARGET_SSCD)
+
+
+def _gaussian_measurements() -> tuple[experiment._GaussianBatchMeasurement, ...]:
+    return (
+        experiment._GaussianBatchMeasurement(
+            entries=((0, 0), (1, 1)),
+            values=np.asarray([[1.1, 1.2, 1.3], [2.1, 2.2, 2.3]], dtype=np.float64),
+            error="",
+        ),
+    )
+
+
+def _gaussian_rows(root: Path) -> list[dict[str, object]]:
+    rows, failed = experiment._expand_gaussian_measurements(
+        _gaussian_measurements(),
+        selection=_selection(root),
+        contract=_contract(root),
+        centering=_mu_centering_contract(None),
+    )
+    assert failed == 0
     return rows
+
+
+def _both_rows(root: Path) -> list[dict[str, object]]:
+    return [*_gaussian_rows(root), *_rows(root)]
 
 
 def test_public_schema_and_cli_keep_generation_N_and_baseline_B() -> None:
@@ -369,17 +464,36 @@ def test_public_schema_and_cli_keep_generation_N_and_baseline_B() -> None:
     assert arguments.num_seeds == 7
     assert arguments.num_baseline_seeds == 13
     assert defaults.num_baseline_seeds == 1000
-    assert defaults.selection_strategy == "spearman"
+    assert defaults.selection_strategy == "gmm"
+    assert (
+        parser.parse_args(["--selection-strategy", "gmm"]).selection_strategy == "gmm"
+    )
+    for unsupported in ("spearman", "gmm-evidence", "all"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--selection-strategy", unsupported])
+    assert defaults.evaluation_source == "both"
     assert defaults.use_mu is False
     assert parser.parse_args(["--use-mu"]).use_mu is True
     assert arguments.num_inference_steps == 11
     assert arguments.device == "cpu"
     assert "cached experiment generation seeds" in parser.format_help()
-    assert "(default: spearman)" in parser.format_help()
+    assert "(default: gmm)" in parser.format_help()
+    assert "(default: both)" in parser.format_help()
+    assert parser.parse_args(["--evaluation-source", "gaussian"]).evaluation_source == (
+        "gaussian"
+    )
 
 
-def test_source_has_no_model_or_fresh_noise_inference_path() -> None:
-    source = inspect.getsource(experiment)
+def test_evaluation_source_resolution_is_explicit_and_canonical() -> None:
+    assert experiment._evaluation_sources("gaussian") == ("gaussian",)
+    assert experiment._evaluation_sources("trajectory") == ("trajectory",)
+    assert experiment._evaluation_sources("both") == ("gaussian", "trajectory")
+    with pytest.raises(experiment.ExperimentError, match="unsupported evaluation"):
+        experiment._evaluation_sources("legacy")
+
+
+def test_trajectory_source_remains_cache_only() -> None:
+    source = inspect.getsource(experiment._compute_rows)
 
     for forbidden in (
         "load_model_components",
@@ -388,10 +502,12 @@ def test_source_has_no_model_or_fresh_noise_inference_path() -> None:
         "make_initial_noise",
         "build_scheduler",
         "compile_loaded_unet",
+        "_compute_gaussian_rows",
     ):
         assert forbidden not in source
-    assert "latents[:, step_index]" in source
-    assert "unconditional_epsilon[:, step_index]" in source
+    distance_source = inspect.getsource(experiment._centered_trajectory_distances)
+    assert "latents[:, step_index]" in distance_source
+    assert "unconditional_epsilon[:, step_index]" in distance_source
 
 
 def test_selection_returns_every_included_prompt_in_canonical_order(
@@ -403,10 +519,15 @@ def test_selection_returns_every_included_prompt_in_canonical_order(
     assert [row["record_id"] for row in rows] == ["record-10", "record-11"]
 
 
-def test_ddim_is_required() -> None:
-    experiment._validate_scientific_request("ddim")
-    with pytest.raises(experiment.ExperimentError, match="requires --scheduler ddim"):
-        experiment._validate_scientific_request("ddpm")
+def test_ddim_and_ddpm_are_supported() -> None:
+    for scheduler_name in ("ddim", "ddpm"):
+        experiment._validate_scientific_request(scheduler_name)
+    with pytest.raises(experiment.ExperimentError, match="ddim, ddpm"):
+        experiment._validate_scientific_request("euler")
+    assert (
+        experiment.build_parser().parse_args(["--scheduler", "ddpm"]).scheduler
+        == "ddpm"
+    )
 
 
 def test_generation_identity_is_json_only_and_indexes_completion_markers(
@@ -487,6 +608,90 @@ def test_schedule_contract_loads_every_cached_ddim_timestep(
     )
 
 
+def test_ddpm_generation_schedule_and_active_scheduler_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = GenerationPaths(tmp_path / "logs" / "run" / "experiment_S0_N2")
+    path_builder = Mock(return_value=paths)
+    monkeypatch.setattr(experiment, "generation_paths", path_builder)
+    monkeypatch.setattr(
+        experiment,
+        "require_generation_run",
+        lambda _paths: {
+            "scientific_config": _scheduler_science("ddpm"),
+            "scientific_config_hash": EVALUATION_HASH,
+        },
+    )
+    monkeypatch.setattr(
+        experiment,
+        "list_completed_records",
+        lambda _paths: [_completed(tmp_path, "10"), _completed(tmp_path, "11")],
+    )
+    monkeypatch.setattr(
+        experiment,
+        "_schedule_file_sha256",
+        lambda _paths: SCHEDULE_HASH,
+    )
+    monkeypatch.setattr(
+        experiment,
+        "safe_torch_load",
+        lambda _path: _scheduler_schedule("ddpm"),
+    )
+
+    identity = experiment._load_generation_identity(
+        tmp_path,
+        model_name="sdv1",
+        scheduler_name="ddpm",
+        guidance_scale=7.5,
+        num_inference_steps=3,
+        num_seeds=2,
+    )
+    contract = experiment._load_generation_contract(identity)
+
+    assert identity.scheduler_name == contract.scheduler_name == "ddpm"
+    assert path_builder.call_args.kwargs["scheduler_name"] == "ddpm"
+    assert contract.schedule_payload["scheduler_name"] == "ddpm"
+
+    class ActiveDDPM:
+        init_noise_sigma = 1.0
+
+        def __init__(self) -> None:
+            self.timesteps = contract.timesteps.clone()
+            self.calls: list[tuple[int, torch.device]] = []
+
+        def set_timesteps(self, steps: int, *, device: torch.device) -> None:
+            self.calls.append((steps, device))
+
+    active = ActiveDDPM()
+    original_scheduler = object()
+    builder = Mock(
+        return_value=SimpleNamespace(
+            scheduler=active,
+            config=contract.scheduler_config,
+        )
+    )
+    coefficients = Mock(
+        return_value=(
+            contract.alpha_t.clone(),
+            contract.sigma_t.clone(),
+            contract.alpha_t.square(),
+        )
+    )
+    monkeypatch.setattr(experiment, "build_scheduler", builder)
+    monkeypatch.setattr(experiment, "schedule_alpha_sigma", coefficients)
+    components = SimpleNamespace(
+        original_scheduler=original_scheduler,
+        device=torch.device("cpu"),
+    )
+
+    assert experiment._validate_active_scheduler(components, contract) is active
+    builder.assert_called_once_with(original_scheduler, "ddpm")
+    assert active.calls == [(3, torch.device("cpu"))]
+    assert torch.equal(coefficients.call_args.args[1], contract.timesteps)
+    assert coefficients.call_args.kwargs == {"dtype": torch.float32}
+
+
 @pytest.mark.parametrize(
     ("timesteps", "message"),
     (
@@ -540,8 +745,8 @@ def _baseline_artifact(
         mu_hat_sha256=MU_HASH,
         source_scientific_config_hash=BASELINE_HASH,
         source_schedule_sha256=source_schedule_sha256,
-        source_seed_start=2,
-        source_seeds=(2, 3, 4),
+        baseline_seed_start=2,
+        baseline_seeds=(2, 3, 4),
         num_baseline_seeds=NUM_BASELINE_SEEDS,
         timestep=9,
         alpha_t=float(torch.tensor(0.10, dtype=torch.float32)),
@@ -586,7 +791,7 @@ def test_baseline_loader_uses_disjoint_B_seed_pool(
     )
 
     assert baseline.mu_hat is mu_hat
-    assert baseline.source_seeds == (2, 3, 4)
+    assert baseline.baseline_seeds == (2, 3, 4)
     assert calls[0]["num_baseline_seeds"] == NUM_BASELINE_SEEDS
     assert calls[0]["load_tensor"] is True
 
@@ -758,6 +963,67 @@ def test_cached_loader_reads_full_latent_and_prediction_trajectories(
     assert [path.parent.name for path in seen] == ["latent", "noise_pred"]
 
 
+def test_gaussian_formula_reuses_one_standard_noise_batch_across_all_timesteps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract = _contract(tmp_path)
+    raw = torch.tensor(
+        [[[[1.0, 2.0]]], [[[3.0, 4.0]]]], dtype=torch.float32
+    ).contiguous()
+    center = torch.tensor([[[0.25, -0.75]]], dtype=torch.float64)
+    noise_calls: list[tuple[int, ...]] = []
+    prediction_calls: list[tuple[int, torch.Tensor]] = []
+
+    def make_noise(seeds: Any, latent_shape: Any) -> torch.Tensor:
+        noise_calls.append(tuple(seeds))
+        assert tuple(latent_shape) == contract.latent_shape
+        return raw.clone()
+
+    epsilon_by_timestep = {9: 0.1, 6: 0.2, 3: 0.3}
+
+    def predict(**kwargs: Any) -> torch.Tensor:
+        timestep = int(kwargs["timestep"])
+        samples = kwargs["conversion_sample"]
+        prediction_calls.append((timestep, samples.detach().cpu().clone()))
+        return torch.full_like(samples, epsilon_by_timestep[timestep])
+
+    monkeypatch.setattr(experiment, "make_initial_noise", make_noise)
+    monkeypatch.setattr(experiment, "predict_conditional_epsilon", predict)
+    runtime = experiment._GaussianRuntime(
+        contract=contract,
+        components=SimpleNamespace(
+            device=torch.device("cpu"),
+            inference_dtype=torch.float32,
+            unet=object(),
+        ),
+        scheduler=object(),
+        empty_condition=torch.zeros((1, 1, 1), dtype=torch.float32),
+    )
+
+    observed = experiment._measure_gaussian_batch(runtime, ((0, 0), (1, 1)), center)
+
+    assert noise_calls == [(0, 1)]
+    assert [timestep for timestep, _sample in prediction_calls] == [9, 6, 3]
+    for _timestep, sample in prediction_calls:
+        torch.testing.assert_close(sample, raw, rtol=0.0, atol=0.0)
+    assert observed.error == ""
+    assert observed.values is not None
+    expected = np.empty((2, 3), dtype=np.float64)
+    for seed_position in range(2):
+        for step_index, timestep in enumerate((9, 6, 3)):
+            estimate = (
+                raw[seed_position].double()
+                - float(contract.sigma_t[step_index])
+                * float(
+                    torch.tensor(epsilon_by_timestep[timestep], dtype=torch.float32)
+                )
+            ) / float(contract.alpha_t[step_index])
+            expected[seed_position, step_index] = float(
+                (estimate - center).square().mean().sqrt()
+            )
+    np.testing.assert_array_equal(observed.values, expected)
+
+
 def test_centered_formula_uses_each_cached_prompt_seed_timestep_cell(
     tmp_path: Path,
 ) -> None:
@@ -789,6 +1055,75 @@ def test_centered_formula_uses_each_cached_prompt_seed_timestep_cell(
     np.testing.assert_array_equal(observed, expected)
 
 
+def test_ddpm_cached_computation_reloads_for_plot_without_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _scheduler_contract(tmp_path, "ddpm")
+    selection = _scheduler_selection(tmp_path, "ddpm")
+    latents, unconditional, _conditional = _cached_tensors()
+    center = torch.zeros(contract.latent_shape, dtype=torch.float64)
+    distances = experiment._centered_trajectory_distances(
+        latents,
+        unconditional,
+        center,
+        contract=contract,
+        device="cpu",
+    )
+    measurements = tuple(
+        replace(measurement, values=distances.copy())
+        for measurement in _measurements(tmp_path)
+    )
+    rows, failed = experiment._expand_measurements(
+        measurements,
+        experiment._included_prompt_rows(selection),
+        selection=selection,
+        contract=contract,
+        centering=_zero_centering_contract(),
+    )
+    rows = experiment._attach_target_sscd(rows, TARGET_SSCD)
+
+    assert failed == 0
+    assert {row["scheduler_name"] for row in rows} == {"ddpm"}
+    assert sum(bool(row["is_initial_timestep"]) for row in rows) == 4
+
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame(rows, columns=EXPECTED_COLUMNS).to_csv(csv_path, index=False)
+
+    def validate_record(_paths: Path, index: str, **_kwargs: object) -> object:
+        return SimpleNamespace(
+            valid=True,
+            metadata=_scheduler_marker(str(index), "ddpm"),
+            errors=(),
+        )
+
+    monkeypatch.setattr(experiment, "validate_generation_record", validate_record)
+    monkeypatch.setattr(
+        experiment,
+        "load_model_components",
+        lambda *_args, **_kwargs: pytest.fail("DDPM plot loaded a model"),
+    )
+    render = Mock()
+    monkeypatch.setattr(experiment, "_render_figure", render)
+
+    experiment.plot_saved_results(
+        csv_path,
+        tmp_path,
+        selection=selection,
+        identity=contract.identity,
+        centering=_zero_centering_contract(),
+        evaluation_source="trajectory",
+    )
+
+    render.assert_called_once()
+    plotted = render.call_args.kwargs["frame"]
+    assert plotted["scheduler_name"].eq("ddpm").all()
+    np.testing.assert_array_equal(
+        plotted["centered_distance_rmse"].to_numpy().reshape(2, 2, 3),
+        np.broadcast_to(distances, (2, *distances.shape)),
+    )
+
+
 def test_centered_formula_rejects_incomplete_or_nonfinite_cache(
     tmp_path: Path,
 ) -> None:
@@ -814,6 +1149,43 @@ def test_centered_formula_rejects_incomplete_or_nonfinite_cache(
             contract=contract,
             device="cpu",
         )
+
+
+def test_expand_gaussian_measurements_emits_exact_N_times_T_grid_without_prompts(
+    tmp_path: Path,
+) -> None:
+    rows, failed = experiment._expand_gaussian_measurements(
+        _gaussian_measurements(),
+        selection=_selection(tmp_path),
+        contract=_contract(tmp_path),
+        centering=_mu_centering_contract(None),
+    )
+
+    assert failed == 0
+    assert len(rows) == 6
+    assert all(tuple(row) == EXPECTED_COLUMNS for row in rows)
+    assert [
+        (row["evaluation_source"], row["generation_seed"], row["step_index"])
+        for row in rows
+    ] == [
+        ("gaussian", 0, 0),
+        ("gaussian", 0, 1),
+        ("gaussian", 0, 2),
+        ("gaussian", 1, 0),
+        ("gaussian", 1, 1),
+        ("gaussian", 1, 2),
+    ]
+    assert {row["record_id"] for row in rows} == {""}
+    assert {row["original_index"] for row in rows} == {""}
+    assert {row["trajectory_sha256"] for row in rows} == {""}
+    assert [row["centered_distance_rmse"] for row in rows] == [
+        1.1,
+        1.2,
+        1.3,
+        2.1,
+        2.2,
+        2.3,
+    ]
 
 
 def test_expand_measurements_emits_complete_canonical_P_times_N_times_T_grid(
@@ -861,7 +1233,7 @@ def test_expand_measurements_emits_complete_canonical_P_times_N_times_T_grid(
         1.1,
         1.2,
     ]
-    assert sum(bool(row["is_actual_ddim_initial_timestep"]) for row in rows) == 4
+    assert sum(bool(row["is_initial_timestep"]) for row in rows) == 4
 
 
 def test_expand_measurements_preserves_one_error_row_per_prompt_seed_timestep(
@@ -890,6 +1262,75 @@ def test_expand_measurements_preserves_one_error_row_per_prompt_seed_timestep(
     assert len(failures) == 6
     assert {row["record_id"] for row in failures} == {"record-11"}
     assert all(math.isnan(float(row["centered_distance_rmse"])) for row in failures)
+
+
+def test_single_device_gaussian_compute_loads_once_and_tracks_exact_N_times_T(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selection = _selection(tmp_path)
+    contract = _contract(tmp_path)
+    centering = _zero_centering_contract(
+        torch.zeros(contract.latent_shape, dtype=torch.float64)
+    )
+    builds: list[torch.device] = []
+    batches: list[tuple[tuple[int, int], ...]] = []
+
+    class Progress:
+        def __init__(self, **options: object) -> None:
+            self.options = options
+            self.n = 0
+
+        def __enter__(self) -> Progress:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def update(self, amount: int) -> None:
+            self.n += amount
+
+    instances: list[Progress] = []
+
+    def progress_factory(**kwargs: object) -> Progress:
+        progress = Progress(**kwargs)
+        instances.append(progress)
+        return progress
+
+    def build(_contract: Any, *, device: torch.device, worker_count: int) -> object:
+        assert worker_count == 1
+        builds.append(device)
+        return object()
+
+    def measure(
+        _runtime: object,
+        entries: tuple[tuple[int, int], ...],
+        _center: torch.Tensor,
+    ) -> experiment._GaussianBatchMeasurement:
+        batches.append(entries)
+        values = np.asarray(
+            [[seed + 0.1, seed + 0.2, seed + 0.3] for _position, seed in entries],
+            dtype=np.float64,
+        )
+        return experiment._GaussianBatchMeasurement(entries, values, "")
+
+    monkeypatch.setattr(experiment, "_build_gaussian_runtime", build)
+    monkeypatch.setattr(experiment, "_measure_gaussian_batch_safely", measure)
+    rows, failed = experiment._compute_gaussian_rows(
+        selection=selection,
+        contract=contract,
+        centering=centering,
+        devices=(torch.device("cpu"),),
+        progress_factory=progress_factory,
+    )
+
+    assert failed == 0
+    assert len(rows) == 6
+    assert builds == [torch.device("cpu")]
+    assert batches == [((0, 0), (1, 1))]
+    assert len(instances) == 1
+    assert instances[0].options["total"] == 6
+    assert instances[0].options["unit"] == "observation"
+    assert instances[0].n == 6
 
 
 def test_single_device_compute_has_one_exact_P_times_N_times_T_progress_bar(
@@ -966,6 +1407,99 @@ def test_canonical_measurements_reorders_workers_and_rejects_missing() -> None:
         experiment._canonical_measurements(values[:1], 2)
 
 
+def test_plot_validation_enforces_source_specific_grids_and_current_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selection = _selection(tmp_path)
+    identity = _identity(tmp_path)
+    centering = _mu_centering_contract(None)
+    calls: list[str] = []
+
+    def validate(prompt: Any, **_kwargs: object) -> dict[str, object]:
+        index = str(prompt["original_index"])
+        calls.append(index)
+        return _marker(index)
+
+    monkeypatch.setattr(experiment, "_validate_generation_prompt", validate)
+    both = pd.DataFrame(_both_rows(tmp_path), columns=EXPECTED_COLUMNS)
+    validated = experiment._validated_plot_frame(
+        both,
+        selection=selection,
+        identity=identity,
+        centering=centering,
+        evaluation_source="both",
+    )
+
+    assert len(validated) == 18
+    assert validated["evaluation_source"].tolist()[:6] == ["gaussian"] * 6
+    assert validated["evaluation_source"].tolist()[6:] == ["trajectory"] * 12
+    assert calls == ["10", "11"]
+
+    changed_score = both.copy()
+    changed_score.loc[
+        changed_score["evaluation_source"].eq("trajectory")
+        & changed_score["record_id"].eq("record-10")
+        & changed_score["generation_seed"].eq(0)
+        & changed_score["step_index"].eq(1),
+        "target_sscd",
+    ] = 0.10000000000000002
+    with pytest.raises(
+        experiment.ExperimentError,
+        match="same-seed endpoint target_sscd differs across trajectory timesteps",
+    ):
+        experiment._validated_plot_frame(
+            changed_score,
+            selection=selection,
+            identity=identity,
+            centering=centering,
+            evaluation_source="both",
+        )
+
+    gaussian = both.iloc[:6].copy()
+    monkeypatch.setattr(
+        experiment,
+        "_validate_generation_prompt",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Gaussian-only plot validation inspected prompt trajectories"
+        ),
+    )
+    experiment._validated_plot_frame(
+        gaussian,
+        selection=selection,
+        identity=identity,
+        centering=centering,
+        evaluation_source="gaussian",
+    )
+
+    incomplete = both.drop(columns="evaluation_source")
+    with pytest.raises(experiment.ExperimentError, match="columns.*schema"):
+        experiment._validated_plot_frame(
+            incomplete,
+            selection=selection,
+            identity=identity,
+            centering=centering,
+            evaluation_source="both",
+        )
+    with pytest.raises(experiment.ExperimentError, match="rows for"):
+        experiment._validated_plot_frame(
+            both,
+            selection=selection,
+            identity=identity,
+            centering=centering,
+            evaluation_source="gaussian",
+        )
+    changed = gaussian.copy()
+    changed.loc[0, "record_id"] = "prompt-should-be-empty"
+    with pytest.raises(experiment.ExperimentError, match="record_id"):
+        experiment._validated_plot_frame(
+            changed,
+            selection=selection,
+            identity=identity,
+            centering=centering,
+            evaluation_source="gaussian",
+        )
+
+
 def test_plot_validation_requires_exact_P_times_N_times_T_grid_and_hashes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -988,7 +1522,7 @@ def test_plot_validation_requires_exact_P_times_N_times_T_grid_and_hashes(
 
     assert len(validated) == 12
     assert calls == [("10", False), ("11", False)]
-    with pytest.raises(experiment.ExperimentError, match="prompt-seed-timestep rows"):
+    with pytest.raises(experiment.ExperimentError, match="rows for"):
         experiment._validated_plot_frame(
             frame.iloc[:-1],
             selection=_selection(tmp_path),
@@ -1037,8 +1571,8 @@ def test_plot_validation_rejects_noncanonical_prompt_seed_or_step_order(
     frame = pd.DataFrame(_rows(tmp_path), columns=EXPECTED_COLUMNS)
     for column, first, second, pattern in (
         ("record_id", 0, 6, "record_id"),
-        ("generation_seed", 0, 3, "seed grid"),
-        ("step_index", 0, 1, "schedule grid"),
+        ("generation_seed", 0, 3, "generation_seed"),
+        ("step_index", 0, 1, "step_index"),
     ):
         changed = frame.copy()
         changed.loc[first, column], changed.loc[second, column] = (
@@ -1117,6 +1651,89 @@ def test_plot_validation_rejects_invalid_cached_schedule_values(
             identity=_identity(tmp_path),
             centering=_mu_centering_contract(None),
         )
+
+
+def test_multi_cuda_gaussian_path_shards_seeds_and_restores_canonical_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initialized_devices: list[str] = []
+    submitted: list[tuple[tuple[int, int], ...]] = []
+
+    class ImmediateFuture:
+        def __init__(self, result: experiment._GaussianBatchMeasurement) -> None:
+            self._result = result
+
+        def result(self) -> experiment._GaussianBatchMeasurement:
+            return self._result
+
+    class Executor:
+        def __init__(self, **kwargs: object) -> None:
+            initargs = kwargs["initargs"]
+            assert isinstance(initargs, tuple)
+            initialized_devices.append(str(initargs[2]))
+
+        def __enter__(self) -> Executor:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def submit(
+            self,
+            _function: object,
+            entries: tuple[tuple[int, int], ...],
+        ) -> ImmediateFuture:
+            submitted.append(entries)
+            values = np.asarray(
+                [[seed + 0.1, seed + 0.2, seed + 0.3] for _position, seed in entries],
+                dtype=np.float64,
+            )
+            return ImmediateFuture(
+                experiment._GaussianBatchMeasurement(entries, values, "")
+            )
+
+    class Progress:
+        def __init__(self, **kwargs: object) -> None:
+            self.total = int(kwargs["total"])
+            self.n = 0
+
+        def __enter__(self) -> Progress:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def update(self, amount: int) -> None:
+            self.n += amount
+
+    progress = Progress(total=0)
+    monkeypatch.setattr(experiment, "ProcessPoolExecutor", Executor)
+    monkeypatch.setattr(
+        experiment, "as_completed", lambda futures: tuple(reversed(tuple(futures)))
+    )
+
+    def progress_factory(**kwargs: object) -> Progress:
+        nonlocal progress
+        progress = Progress(**kwargs)
+        return progress
+
+    contract = _contract(tmp_path)
+    rows, failed = experiment._compute_gaussian_rows(
+        selection=_selection(tmp_path),
+        contract=contract,
+        centering=_zero_centering_contract(
+            torch.zeros(contract.latent_shape, dtype=torch.float64)
+        ),
+        devices=(torch.device("cuda:0"), torch.device("cuda:1")),
+        progress_factory=progress_factory,
+    )
+
+    assert failed == 0
+    assert initialized_devices == ["cuda:0", "cuda:1"]
+    assert submitted == [((0, 0),), ((1, 1),)]
+    assert progress.total == 6
+    assert progress.n == 6
+    assert [row["generation_seed"] for row in rows] == [0, 0, 0, 1, 1, 1]
 
 
 def test_multi_cuda_path_round_robins_prompts_and_restores_canonical_order(
@@ -1202,6 +1819,122 @@ def test_multi_cuda_path_round_robins_prompts_and_restores_canonical_order(
     ]
 
 
+def test_run_both_uses_one_progress_bar_and_canonical_source_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selection = _selection(tmp_path)
+    identity = _identity(tmp_path)
+    contract = _contract(tmp_path)
+    centering = _zero_centering_contract(
+        torch.zeros(contract.latent_shape, dtype=torch.float64)
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    seen_progress: list[object] = []
+    written: dict[str, Any] = {}
+
+    class Progress:
+        def __init__(self, **kwargs: object) -> None:
+            self.options = kwargs
+            self.n = 0
+
+        def __enter__(self) -> Progress:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def update(self, amount: int) -> None:
+            self.n += amount
+
+    instances: list[Progress] = []
+
+    def progress_factory(**kwargs: object) -> Progress:
+        progress = Progress(**kwargs)
+        instances.append(progress)
+        return progress
+
+    monkeypatch.setattr(
+        experiment, "_load_frozen_selection", lambda *_args, **_kwargs: selection
+    )
+    monkeypatch.setattr(
+        experiment, "_load_generation_identity", lambda *_args, **_kwargs: identity
+    )
+    monkeypatch.setattr(
+        experiment, "_load_centering_contract", lambda **_kwargs: centering
+    )
+    monkeypatch.setattr(
+        experiment, "_load_generation_contract", lambda _identity: contract
+    )
+    monkeypatch.setattr(
+        experiment, "_requested_output_directory", lambda **_kwargs: output
+    )
+    monkeypatch.setattr(
+        experiment, "_prepare_output_directory", lambda _path, _source: output
+    )
+    monkeypatch.setattr(
+        experiment, "resolve_devices", lambda _device: (torch.device("cpu"),)
+    )
+    load_target_sscd = Mock(return_value=TARGET_SSCD)
+    monkeypatch.setattr(
+        experiment,
+        "_load_target_sscd_lookup",
+        load_target_sscd,
+    )
+
+    def gaussian(**kwargs: object) -> tuple[list[dict[str, object]], int]:
+        seen_progress.append(kwargs["progress"])
+        kwargs["progress"].update(6)
+        return _gaussian_rows(tmp_path), 0
+
+    def trajectory(
+        _prompts: Any, **kwargs: object
+    ) -> tuple[list[dict[str, object]], int]:
+        seen_progress.append(kwargs["progress"])
+        kwargs["progress"].update(12)
+        return _rows(tmp_path), 0
+
+    monkeypatch.setattr(experiment, "_compute_gaussian_rows", gaussian)
+    monkeypatch.setattr(experiment, "_compute_rows", trajectory)
+
+    def write(_path: Path, rows: Any, columns: Any) -> None:
+        written["sources"] = [row["evaluation_source"] for row in rows]
+        written["target_sscd"] = [row["target_sscd"] for row in rows]
+        written["columns"] = tuple(columns)
+
+    monkeypatch.setattr(experiment, "atomic_write_csv", write)
+    monkeypatch.setattr(
+        experiment, "plot_saved_results", lambda *_args, **_kwargs: None
+    )
+
+    result = experiment.run_experiment(
+        model_name="sdv1",
+        selection_strategy="gmm",
+        scheduler_name="ddim",
+        guidance_scale=7.5,
+        num_inference_steps=3,
+        num_seeds=2,
+        num_baseline_seeds=NUM_BASELINE_SEEDS,
+        output_dir=output,
+        evaluation_source="both",
+        device="cpu",
+        progress_factory=progress_factory,
+    )
+
+    assert result == 0
+    assert len(instances) == 1
+    assert instances[0].options["total"] == 18
+    assert instances[0].n == 18
+    assert seen_progress == [instances[0], instances[0]]
+    assert written["sources"] == ["gaussian"] * 6 + ["trajectory"] * 12
+    assert all(math.isnan(score) for score in written["target_sscd"][:6])
+    assert written["target_sscd"][6:] == [
+        score for score in TARGET_SSCD.values() for _step in range(3)
+    ]
+    load_target_sscd.assert_called_once()
+    assert written["columns"] == EXPECTED_COLUMNS
+
+
 @pytest.mark.parametrize("use_mu", (False, True))
 def test_plot_only_never_loads_schedule_trajectory_or_device(
     use_mu: bool,
@@ -1227,8 +1960,12 @@ def test_plot_only_never_loads_schedule_trajectory_or_device(
         return baseline
 
     monkeypatch.setattr(experiment, "_load_baseline_contract", load_baseline)
-    monkeypatch.setattr(experiment, "_prepare_output_directory", lambda _path: output)
-    monkeypatch.setattr(experiment, "_remove_figure_outputs", lambda _path: None)
+    monkeypatch.setattr(
+        experiment, "_prepare_output_directory", lambda _path, _source: output
+    )
+    monkeypatch.setattr(
+        experiment, "_remove_figure_outputs", lambda _path, _source: None
+    )
     monkeypatch.setattr(
         experiment, "plot_saved_results", lambda *_args, **_kwargs: None
     )
@@ -1236,6 +1973,11 @@ def test_plot_only_never_loads_schedule_trajectory_or_device(
         experiment,
         "_load_generation_contract",
         lambda *_args, **_kwargs: pytest.fail("plot mode loaded schedule.pt"),
+    )
+    monkeypatch.setattr(
+        experiment,
+        "_build_gaussian_runtime",
+        lambda *_args, **_kwargs: pytest.fail("plot mode loaded a model"),
     )
     monkeypatch.setattr(
         experiment,
@@ -1257,6 +1999,7 @@ def test_plot_only_never_loads_schedule_trajectory_or_device(
         selection_strategy="gmm",
         output_dir=output,
         use_mu=use_mu,
+        evaluation_source="both",
     )
 
     assert experiment._plot_only(arguments) == 0
@@ -1265,7 +2008,7 @@ def test_plot_only_never_loads_schedule_trajectory_or_device(
     )
 
 
-def test_figure_keeps_three_bands_and_median_without_scatter_or_legend(
+def test_trajectory_figure_has_sscd_colored_curves_bands_and_marker_free_median(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     frame = pd.DataFrame(_rows(tmp_path), columns=EXPECTED_COLUMNS)
@@ -1287,18 +2030,217 @@ def test_figure_keeps_three_bands_and_median_without_scatter_or_legend(
 
     assert figure.get_size_inches().tolist() == [4.0, 4.0]
     assert axis.get_xscale() == "log"
+    assert isinstance(axis.xaxis.get_major_locator(), LogLocator)
+    assert isinstance(axis.xaxis.get_major_formatter(), LogFormatterMathtext)
+    assert isinstance(axis.xaxis.get_minor_formatter(), NullFormatter)
+    major_ticks = axis.xaxis.get_major_locator().tick_values(0.0058, 585.862)
+    assert np.isclose(major_ticks, 1e-2).any()
     assert axis.get_xlabel() == r"$\alpha_t^2/\sigma_t^2$"
     assert r"\widehat{\boldsymbol{\mu}}" in axis.get_ylabel()
+    assert r"\|" in axis.get_ylabel()
+    assert r"\|_2" not in axis.get_ylabel()
     assert axis.get_title() == ""
     assert axis.get_legend() is None
+    assert len(figure.axes) == 2
     assert (
         len([item for item in axis.collections if isinstance(item, PolyCollection)])
         == 3
     )
     assert not any(isinstance(item, PathCollection) for item in axis.collections)
+    observations = [
+        item for item in axis.collections if isinstance(item, LineCollection)
+    ]
+    assert len(observations) == 1
+    assert len(observations[0].get_segments()) == 4
+    assert all(
+        np.all(np.diff(segment[:, 0]) >= 0.0)
+        for segment in observations[0].get_segments()
+    )
+    np.testing.assert_allclose(observations[0].get_array(), tuple(TARGET_SSCD.values()))
+    assert observations[0].get_cmap().name == "viridis"
+    assert observations[0].norm.vmin == 0.0
+    assert observations[0].norm.vmax == 1.0
+    assert observations[0].get_alpha() == experiment.OBSERVATION_LINE_ALPHA
     assert len(axis.lines) == 1
     assert axis.lines[0].get_color() == "black"
+    assert axis.lines[0].get_marker() == "None"
+    assert axis.xaxis.label.get_fontsize() == 15
+    assert axis.yaxis.label.get_fontsize() == 15
+    assert all(tick.get_fontsize() == 12 for tick in axis.get_xticklabels())
+    colorbar_axis = figure.axes[1]
+    assert colorbar_axis.get_ylabel() == "SSCD"
+    assert colorbar_axis.yaxis.label.get_fontsize() == 15
+    colorbar_mesh = [
+        item for item in colorbar_axis.collections if isinstance(item, QuadMesh)
+    ]
+    assert len(colorbar_mesh) == 1
+    assert colorbar_mesh[0].get_alpha() == 1.0
+    assert experiment.PLOT_STYLE["legend.fontsize"] == 10
     assert captured["destinations"] == destinations
+
+
+def test_gaussian_figure_has_one_neutral_curve_per_seed_and_no_colorbar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        experiment,
+        "_atomic_save_figures",
+        lambda figure, _destinations: captured.setdefault("figure", figure),
+    )
+    experiment._render_figure(
+        frame=pd.DataFrame(_gaussian_rows(tmp_path), columns=EXPECTED_COLUMNS),
+        destinations=(tmp_path / "gaussian.png", tmp_path / "gaussian.pdf"),
+        centering_mode=experiment.CENTERING_ZERO,
+    )
+
+    figure = captured["figure"]
+    axis = figure.axes[0]
+    observations = [
+        item for item in axis.collections if isinstance(item, LineCollection)
+    ]
+    assert len(figure.axes) == 1
+    assert len(observations) == 1
+    assert len(observations[0].get_segments()) == 2
+    assert observations[0].get_array() is None
+    assert len(axis.lines) == 1
+    assert axis.lines[0].get_marker() == "None"
+    assert axis.get_legend() is None
+
+
+def test_plot_saved_results_writes_primary_gaussian_and_trajectory_suffixes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame(_both_rows(tmp_path), columns=EXPECTED_COLUMNS).to_csv(
+        csv_path, index=False
+    )
+    monkeypatch.setattr(
+        experiment,
+        "_validate_generation_prompt",
+        lambda prompt, **_kwargs: _marker(str(prompt["original_index"])),
+    )
+    rendered: list[tuple[str, tuple[str, ...]]] = []
+
+    def render(*, frame: pd.DataFrame, destinations: Any, **_kwargs: object) -> None:
+        rendered.append(
+            (
+                str(frame["evaluation_source"].iloc[0]),
+                tuple(path.name for path in destinations),
+            )
+        )
+
+    monkeypatch.setattr(experiment, "_render_figure", render)
+    experiment.plot_saved_results(
+        csv_path,
+        tmp_path,
+        selection=_selection(tmp_path),
+        identity=_identity(tmp_path),
+        centering=_mu_centering_contract(None),
+        evaluation_source="both",
+    )
+
+    assert rendered == [
+        ("gaussian", experiment.FIGURE_FILENAMES),
+        ("trajectory", experiment.TRAJECTORY_FIGURE_FILENAMES),
+    ]
+    assert tuple(path.name for path in experiment._figure_paths(tmp_path, "both")) == (
+        *experiment.FIGURE_FILENAMES,
+        *experiment.TRAJECTORY_FIGURE_FILENAMES,
+    )
+
+
+def test_plot_reader_preserves_sscd_across_mixed_type_chunk_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gaussian = dict(_gaussian_rows(tmp_path)[0])
+    filler = dict(_rows(tmp_path)[0])
+    crossing = dict(filler)
+    score_text = "0.06689324975013733"
+    crossing.update(record_id="crossing-record", generation_seed=15)
+    rows = (
+        [gaussian] * 1_000
+        + [filler] * 31_750
+        + [{**crossing, "target_sscd": score_text}] * 50
+        + [filler] * 32_737
+    )
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame(rows, columns=EXPECTED_COLUMNS).to_csv(csv_path, index=False)
+    captured: dict[str, pd.DataFrame] = {}
+
+    def validate(frame: pd.DataFrame, **_kwargs: object) -> pd.DataFrame:
+        captured["frame"] = frame
+        return frame
+
+    monkeypatch.setattr(experiment, "_validated_plot_frame", validate)
+    monkeypatch.setattr(experiment, "_render_figure", lambda **_kwargs: None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", pd.errors.DtypeWarning)
+        experiment.plot_saved_results(
+            csv_path,
+            tmp_path,
+            selection=_selection(tmp_path),
+            identity=_identity(tmp_path),
+            centering=_mu_centering_contract(None),
+            evaluation_source="both",
+        )
+
+    parsed = captured["frame"]
+    assert parsed["target_sscd"].dtype == np.dtype(np.float64)
+    assert parsed.loc[:999, "target_sscd"].isna().all()
+    crossing_scores = parsed.loc[
+        parsed["record_id"].eq("crossing-record"), "target_sscd"
+    ]
+    assert crossing_scores.nunique(dropna=False) == 1
+    assert crossing_scores.iloc[0].hex() == float(score_text).hex()
+
+
+def test_plot_saved_results_requires_current_csv_without_cache_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    incomplete = pd.DataFrame(_both_rows(tmp_path), columns=EXPECTED_COLUMNS).drop(
+        columns="target_sscd"
+    )
+    csv_path = tmp_path / experiment.CSV_NAME
+    incomplete.to_csv(csv_path, index=False)
+    original = csv_path.read_bytes()
+    for forbidden in (
+        "_load_target_sscd_lookup",
+        "load_model_components",
+        "_build_gaussian_runtime",
+        "_load_cached_trajectory",
+        "_render_figure",
+    ):
+        monkeypatch.setattr(
+            experiment,
+            forbidden,
+            lambda *_args, _name=forbidden, **_kwargs: pytest.fail(
+                f"invalid CSV invoked {_name}"
+            ),
+        )
+    with pytest.raises(experiment.ExperimentError, match="columns.*schema"):
+        experiment.plot_saved_results(
+            csv_path,
+            tmp_path,
+            selection=_selection(tmp_path),
+            identity=_identity(tmp_path),
+            centering=_mu_centering_contract(None),
+            evaluation_source="both",
+        )
+    assert csv_path.read_bytes() == original
+
+
+def test_output_directory_allows_only_requested_source_figures(tmp_path: Path) -> None:
+    output = tmp_path / "evaluation_gaussian"
+    output.mkdir()
+    (output / experiment.CSV_NAME).touch()
+    for filename in experiment.FIGURE_FILENAMES:
+        (output / filename).touch()
+    assert experiment._prepare_output_directory(output, "gaussian") == output.resolve()
+
+    (output / experiment.TRAJECTORY_FIGURE_FILENAMES[0]).touch()
+    with pytest.raises(experiment.ExperimentError, match="unexpected artifacts"):
+        experiment._prepare_output_directory(output, "gaussian")
 
 
 def test_default_outputs_separate_zero_and_mu_namespaces(
@@ -1329,9 +2271,13 @@ def test_default_outputs_separate_zero_and_mu_namespaces(
     )
     base = tmp_path / "outputs" / "sdv1_ddim_g7.5_T3_N2" / "lemma2_mean_convergence"
 
-    assert zero_output == base / "centering_zero" / "gmm" / SELECTION_HASH
+    assert zero_output == (base / "centering_zero" / SELECTION_HASH / "evaluation_both")
     assert mu_output == (
-        base / "centering_mu_hat" / "baseline_S2_N3" / "gmm" / SELECTION_HASH
+        base
+        / "centering_mu_hat"
+        / "baseline_S2_N3"
+        / SELECTION_HASH
+        / "evaluation_both"
     )
 
 
@@ -1498,7 +2444,7 @@ def test_zero_mode_figure_ylabel_is_the_uncentered_norm(
     )
     ylabel = captured["figure"].axes[0].get_ylabel()
 
-    assert ylabel == (r"$\|\widehat{\mathbf{x}}_{0\mid t,\emptyset}\|_2" r"/\sqrt{d}$")
+    assert ylabel == (r"$\|\widehat{\mathbf{x}}_{0\mid t,\emptyset}\|" r"/\sqrt{d}$")
     assert r"\boldsymbol{\mu}" not in ylabel
 
 

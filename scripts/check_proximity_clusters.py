@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check whether two scatter-point clusters match prompt-level proximity behavior."""
+"""Compare two proximity clusters with prompt-level behavior in line figures."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 import numpy as np
 import pandas as pd
 
@@ -19,6 +20,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.common.io import atomic_write_frame_csv  # noqa: E402
+from utils.experiments.plotting import (  # noqa: E402
+    AXIS_NUMBER_FONT_SIZE,
+    CATEGORY_LINESTYLES,
+    FIGURE_SIZE,
+    LEGEND_FONT_SIZE,
+    PLOT_STYLE,
+    TEXT_FONT_SIZE,
+    X_AXIS_LABEL,
+    Y_AXIS_LABEL,
+    _publish_figures,
+    add_prompt_curves,
+    add_sscd_colorbar,
+    category_legend_label,
+)
 
 REQUIRED_COLUMNS = {
     "model_name",
@@ -50,22 +65,18 @@ AUDIT_COLUMNS = [
     "prompt_low_cluster_fraction",
     "prompt_majority_cluster",
 ]
-KIND_ORDER = ("MV", "TV", "RV", "N", "Other")
-KIND_COLORS = {
-    "MV": "#D55E00",
-    "TV": "#0072B2",
-    "RV": "#009E73",
-    "N": "#CC79A7",
-    "Other": "#7F7F7F",
+KIND_ORDER = ("MV", "RV", "TV", "N", "Other")
+# Preserve category encodings when changing only the legend display order.
+KIND_LINESTYLES = {
+    "MV": CATEGORY_LINESTYLES[0],
+    "RV": CATEGORY_LINESTYLES[2],
+    "TV": CATEGORY_LINESTYLES[1],
+    "N": CATEGORY_LINESTYLES[3],
+    "Other": CATEGORY_LINESTYLES[4],
 }
 CLUSTER_COLORS = {
     "low_sscd_mode": "#7B3294",
     "high_sscd_mode": "#008837",
-}
-RULE_COLORS = {
-    "rho < 0": "#0072B2",
-    "rho >= 0": "#D55E00",
-    "rho undefined": "#7F7F7F",
 }
 
 
@@ -87,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         required=True,
         type=Path,
-        help="Directory for one assignment CSV and one comparison figure.",
+        help="Directory for one assignment CSV and three single-panel PNG/PDF views.",
     )
     parser.add_argument(
         "--plotted-only",
@@ -318,53 +329,81 @@ def print_report(
 
 
 def plot_assignments(
-    frame: pd.DataFrame, destination: Path, *, cutoff: float, title: str
-) -> None:
+    frame: pd.DataFrame, destination: Path, *, cutoff: float
+) -> tuple[Path, ...]:
+    """Save separate membership, Spearman-sign, and kind proximity profiles.
+
+    SSCD controls color. Line style records the category of each segment's
+    right endpoint after L2 ordering; curves never join different prompts.
+    """
     plotted = frame.copy()
     plotted["plot_kind"] = normalized_kind(plotted["kind"])
-    panels = (
-        (
-            "kmeans_cluster",
-            CLUSTER_COLORS,
-            ("low_sscd_mode", "high_sscd_mode"),
-            "K-means, k=2",
-        ),
-        (
-            "prompt_rule",
-            RULE_COLORS,
-            ("rho < 0", "rho >= 0", "rho undefined"),
-            "Within-prompt Spearman sign",
-        ),
-        ("plot_kind", KIND_COLORS, KIND_ORDER, "Prompt kind"),
+    views = (
+        ("kmeans_cluster", ("low_sscd_mode", "high_sscd_mode"), ""),
+        ("prompt_rule", ("rho < 0", "rho >= 0", "rho undefined"), "_spearman"),
+        ("plot_kind", KIND_ORDER, "_kind"),
     )
-    figure, axes = plt.subplots(1, 3, figsize=(12.0, 4.0), sharex=True, sharey=True)
-    for axis, (column, colors, order, panel_title) in zip(axes, panels, strict=True):
-        for label in order:
-            subset = plotted.loc[plotted[column].eq(label)]
-            if subset.empty:
-                continue
-            axis.scatter(
-                subset["l2_norm"],
-                subset["sscd"],
-                s=7,
-                alpha=0.32,
-                color=colors[label],
-                edgecolors="none",
-                label=label,
-                rasterized=True,
-            )
-        axis.axhline(cutoff, color="0.35", linestyle="--", linewidth=0.8)
-        axis.set_title(panel_title)
-        axis.set_xlabel(r"$\|\mathbf{x}_0-\mathbf{x}^{\star}\|_2$")
-        axis.grid(True, linewidth=0.5, alpha=0.15)
-        axis.legend(frameon=False, fontsize=8, markerscale=1.5)
-    axes[0].set_ylabel("SSCD")
-    figure.suptitle(title, fontsize=11)
-    figure.tight_layout()
-    try:
-        figure.savefig(destination, dpi=220, bbox_inches="tight")
-    finally:
-        plt.close(figure)
+    styles = CATEGORY_LINESTYLES
+    figures = []
+    destinations: list[Path] = []
+    with matplotlib.rc_context(PLOT_STYLE):
+        try:
+            for column, order, suffix in views:
+                figure, axis = plt.subplots(figsize=FIGURE_SIZE)
+                filenames = {
+                    extension: f"{destination.stem}{suffix}.{extension}"
+                    for extension in ("png", "pdf")
+                }
+                figures.append((figure, filenames))
+                destinations.extend(
+                    destination.parent / name for name in filenames.values()
+                )
+                category_styles = (
+                    KIND_LINESTYLES
+                    if column == "plot_kind"
+                    else dict(zip(order, styles))
+                )
+                add_prompt_curves(
+                    axis,
+                    plotted,
+                    category_column=column,
+                    category_styles=category_styles,
+                )
+                add_sscd_colorbar(figure, axis, plotted["sscd"])
+                handles = [
+                    Line2D(
+                        [],
+                        [],
+                        color="black",
+                        linestyle=category_styles[label],
+                        linewidth=1.0,
+                        alpha=1.0,
+                        label=(
+                            category_legend_label(label)
+                            if column == "plot_kind"
+                            else label.replace("_", " ")
+                        ),
+                    )
+                    for label in order
+                    if plotted[column].eq(label).any()
+                ]
+                axis.axhline(cutoff, color="0.35", linestyle="--", linewidth=0.8)
+                axis.set_xlabel(X_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
+                axis.set_ylabel(Y_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
+                axis.tick_params(
+                    axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE
+                )
+                axis.grid(True, linewidth=0.6, alpha=0.18)
+                if handles:
+                    axis.legend(
+                        handles=handles, frameon=False, fontsize=LEGEND_FONT_SIZE
+                    )
+                figure.tight_layout()
+            _publish_figures(destination.parent, figures)
+        finally:
+            for figure, _filenames in figures:
+                plt.close(figure)
+    return tuple(destinations)
 
 
 def main() -> int:
@@ -405,17 +444,15 @@ def main() -> int:
             inertia=inertia,
             features=features,
         )
-        plot_assignments(
-            saved,
-            figure_path,
-            cutoff=arguments.sscd_cutoff,
-            title=f"{saved['model_name'].iloc[0]}: clusters vs prompt behavior ({scope})",
+        figure_paths = plot_assignments(
+            saved, figure_path, cutoff=arguments.sscd_cutoff
         )
     except (OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))
 
     print(f"Assignments: {assignments_path}")
-    print(f"Figure: {figure_path}")
+    for path in figure_paths:
+        print(f"Figure: {path}")
     return 0
 
 

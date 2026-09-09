@@ -54,7 +54,7 @@ from utils.models.sampling import (
     predict_conditional_epsilon,
     validate_latent_shape,
 )
-from utils.models.schedulers import build_scheduler
+from utils.models.schedulers import SCHEDULER_NAMES, build_scheduler
 
 
 BASELINE_SCHEMA_VERSION = 2
@@ -66,6 +66,10 @@ BASELINE_METADATA_NAME = "metadata.json"
 DEFAULT_NUM_BASELINE_SEEDS = 1000
 DEFAULT_SAMPLE_BATCH_SIZE = 8
 PROGRESS_DESCRIPTION = "[Unconditional baseline] Gaussian seeds"
+_SCHEDULER_CLASSES = {
+    "ddim": "DDIMScheduler",
+    "ddpm": "DDPMScheduler",
+}
 
 
 class UnconditionalBaselineError(RuntimeError):
@@ -83,25 +87,13 @@ class UnconditionalBaselineArtifact:
     tensor_path: Path
     source_scientific_config_hash: str
     source_schedule_sha256: str
-    source_seed_start: int
-    source_seeds: tuple[int, ...]
+    baseline_seed_start: int
+    baseline_seeds: tuple[int, ...]
     num_baseline_seeds: int
     timestep: int
     alpha_t: float
     sigma_t: float
     latent_shape: tuple[int, int, int]
-
-    @property
-    def baseline_seed_start(self) -> int:
-        """Return the first dedicated baseline seed."""
-
-        return self.source_seed_start
-
-    @property
-    def baseline_seeds(self) -> tuple[int, ...]:
-        """Return the dedicated baseline seed pool."""
-
-        return self.source_seeds
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +103,8 @@ class _ReferenceIdentity:
     science: Mapping[str, Any]
     scientific_hash: str
     schedule_sha256: str
+    scheduler_name: str
+    scheduler_class: str
     reference_seeds: tuple[int, ...]
     latent_shape: tuple[int, int, int]
     stored_dtype: torch.dtype
@@ -271,7 +265,7 @@ def compute_unconditional_baseline(
         "model_revision": contract.science.get("model_revision"),
         "vae_id": contract.science.get("vae_id"),
         "vae_revision": contract.science.get("vae_revision"),
-        "scheduler_name": scheduler_name,
+        "scheduler_name": contract.identity.scheduler_name,
         "guidance_scale": float(guidance_scale),
         "num_inference_steps": num_inference_steps,
         "source_run_directory": _relative(contract.paths.run_directory, contract.root),
@@ -419,9 +413,10 @@ def _load_reference_identity(
     num_seeds: int,
 ) -> _ReferenceIdentity:
     root = Path(project_root).expanduser().resolve()
-    if scheduler_name != "ddim":
+    if scheduler_name not in SCHEDULER_NAMES:
         raise UnconditionalBaselineError(
-            "unconditional baseline requires --scheduler ddim"
+            "unsupported unconditional-baseline scheduler: "
+            f"{scheduler_name!r}; expected one of {', '.join(SCHEDULER_NAMES)}"
         )
     try:
         reference_seed_start, reference_count = validate_seed_block(
@@ -466,7 +461,12 @@ def _load_reference_identity(
     }
     wrong = [key for key, value in expected.items() if science.get(key) != value]
     scheduler = science.get("scheduler")
-    if not isinstance(scheduler, Mapping) or scheduler.get("name") != "ddim":
+    expected_scheduler_class = _SCHEDULER_CLASSES[scheduler_name]
+    if (
+        not isinstance(scheduler, Mapping)
+        or scheduler.get("name") != scheduler_name
+        or scheduler.get("class") != expected_scheduler_class
+    ):
         wrong.append("scheduler")
     for key in ("model_revision", "vae_id", "vae_revision", "inference_dtype"):
         if not isinstance(science.get(key), str) or not str(science.get(key)):
@@ -510,6 +510,8 @@ def _load_reference_identity(
         science=science,
         scientific_hash=str(science_hash),
         schedule_sha256=file_sha256(paths.schedule),
+        scheduler_name=scheduler_name,
+        scheduler_class=expected_scheduler_class,
         reference_seeds=reference_seeds,
         latent_shape=latent_shape,
         stored_dtype=stored_dtype,
@@ -539,6 +541,10 @@ def _load_source_contract(
         schedule = safe_torch_load(identity.paths.schedule)
     except CacheIOError as error:
         raise UnconditionalBaselineError(str(error)) from error
+    if file_sha256(identity.paths.schedule) != identity.schedule_sha256:
+        raise UnconditionalBaselineError(
+            "saved generation schedule changed while loading"
+        )
     if not isinstance(schedule, Mapping):
         raise UnconditionalBaselineError("saved generation schedule must be a mapping")
     timesteps = _schedule_tensor(
@@ -551,7 +557,9 @@ def _load_source_contract(
     )
     if (
         bool((timesteps < 0).any())
-        or len(set(timesteps.tolist())) != num_inference_steps
+        or (
+            num_inference_steps > 1 and not bool((timesteps[:-1] > timesteps[1:]).all())
+        )
         or bool((alphas <= 0).any())
         or bool((sigmas <= 0).any())
         or not torch.allclose(alphas.square(), cumulative, rtol=1e-5, atol=1e-6)
@@ -562,8 +570,8 @@ def _load_source_contract(
     if not isinstance(scheduler_metadata, Mapping):
         raise UnconditionalBaselineError("generation scheduler metadata is invalid")
     schedule_expected = {
-        "scheduler_name": "ddim",
-        "scheduler_class": scheduler_metadata.get("class"),
+        "scheduler_name": identity.scheduler_name,
+        "scheduler_class": identity.scheduler_class,
         "native_prediction_type": identity.science.get("native_prediction_type"),
         "stored_prediction_type": "epsilon",
         "trajectory_order": "noise_to_image",
@@ -584,7 +592,9 @@ def _load_source_contract(
         schedule.get("init_noise_sigma"), "scheduler initial-noise scale"
     )
     if not math.isclose(init_noise_sigma, 1.0, rel_tol=0.0, abs_tol=1e-12):
-        raise UnconditionalBaselineError("DDIM init_noise_sigma must equal 1")
+        raise UnconditionalBaselineError(
+            f"{identity.scheduler_name.upper()} init_noise_sigma must equal 1"
+        )
     return _SourceContract(
         identity=identity,
         schedule_payload=schedule,
@@ -623,12 +633,20 @@ def _revision_resolver(contract: _SourceContract) -> Callable[[str], str]:
 
 
 def _validate_active_scheduler(components: Any, contract: _SourceContract) -> Any:
-    result = build_scheduler(components.original_scheduler, "ddim")
+    scheduler_name = contract.identity.scheduler_name
+    result = build_scheduler(components.original_scheduler, scheduler_name)
+    if (
+        result.name != scheduler_name
+        or result.class_name != contract.identity.scheduler_class
+    ):
+        raise UnconditionalBaselineError(
+            "active scheduler identity differs from the reference cache"
+        )
     scheduler = result.scheduler
     setter = getattr(scheduler, "set_timesteps", None)
     if not callable(setter):
         raise UnconditionalBaselineError(
-            "active DDIM scheduler has no timestep interface"
+            f"active {scheduler_name.upper()} scheduler has no timestep interface"
         )
     setter(
         int(contract.science["num_inference_steps"]),
@@ -646,7 +664,7 @@ def _validate_active_scheduler(components: Any, contract: _SourceContract) -> An
     )
     if not torch.equal(active_timesteps, saved_timesteps):
         raise UnconditionalBaselineError(
-            "active DDIM timesteps differ from the reference cache"
+            f"active {scheduler_name.upper()} timesteps differ from the reference cache"
         )
     active_coefficients = schedule_alpha_sigma(
         scheduler, active_timesteps, dtype=torch.float32
@@ -665,23 +683,23 @@ def _validate_active_scheduler(components: Any, contract: _SourceContract) -> An
         for active, cached in zip(active_coefficients, saved_coefficients, strict=True)
     ):
         raise UnconditionalBaselineError(
-            "active DDIM coefficients differ from the reference cache"
+            f"active {scheduler_name.upper()} coefficients differ from the reference cache"
         )
     if canonical_hash(_normalized_scheduler_config(result.config)) != canonical_hash(
         contract.scheduler_config
     ):
         raise UnconditionalBaselineError(
-            "active DDIM configuration differs from the reference cache"
+            f"active {scheduler_name.upper()} configuration differs from the reference cache"
         )
     active_sigma = _positive_finite_float(
         getattr(scheduler, "init_noise_sigma", None),
-        "active DDIM initial-noise scale",
+        f"active {scheduler_name.upper()} initial-noise scale",
     )
     if not math.isclose(
         active_sigma, contract.init_noise_sigma, rel_tol=0.0, abs_tol=1e-12
     ):
         raise UnconditionalBaselineError(
-            "active DDIM initial-noise scale differs from the reference cache"
+            f"active {scheduler_name.upper()} initial-noise scale differs from the reference cache"
         )
     return scheduler
 
@@ -1054,7 +1072,7 @@ def _validate_metadata(
         "model_revision": contract.science.get("model_revision"),
         "vae_id": contract.science.get("vae_id"),
         "vae_revision": contract.science.get("vae_revision"),
-        "scheduler_name": "ddim",
+        "scheduler_name": contract.identity.scheduler_name,
         "guidance_scale": contract.science.get("guidance_scale"),
         "num_inference_steps": contract.science.get("num_inference_steps"),
         "source_run_directory": _relative(contract.paths.run_directory, contract.root),
@@ -1080,23 +1098,21 @@ def _validate_metadata(
         "accumulation_dtype": "float64",
         "weighting": "one unit per baseline seed in ascending seed order",
     }
+    expected_keys = set(expected) | {
+        "runtime",
+        "mu_hat_norm_rmse",
+        "coordinate_artifacts",
+        "created_at_utc",
+        "baseline_estimate_value_sha256",
+    }
+    if set(metadata) != expected_keys:
+        raise UnconditionalBaselineError(
+            "unconditional baseline metadata has an invalid schema"
+        )
     wrong = [key for key, value in expected.items() if metadata.get(key) != value]
     if wrong:
         raise UnconditionalBaselineError(
             "unconditional baseline metadata differs at: " + ", ".join(wrong)
-        )
-    legacy = {
-        "number_of_prompts",
-        "number_of_prompt_seed_entries",
-        "number_of_unique_initial_latents",
-        "duplicate_initial_latent_entries",
-        "unique_initial_latent_value_sha256",
-    }
-    present_legacy = sorted(legacy.intersection(metadata))
-    if present_legacy:
-        raise UnconditionalBaselineError(
-            "unconditional baseline contains obsolete prompt metadata: "
-            + ", ".join(present_legacy)
         )
     if not _is_sha256(metadata.get("baseline_estimate_value_sha256")):
         raise UnconditionalBaselineError(
@@ -1181,8 +1197,8 @@ def _artifact_from_validated(
         tensor_path=tensor_path,
         source_scientific_config_hash=contract.scientific_hash,
         source_schedule_sha256=contract.schedule_sha256,
-        source_seed_start=contract.baseline_seeds[0],
-        source_seeds=contract.baseline_seeds,
+        baseline_seed_start=contract.baseline_seeds[0],
+        baseline_seeds=contract.baseline_seeds,
         num_baseline_seeds=len(contract.baseline_seeds),
         timestep=contract.timestep,
         alpha_t=contract.alpha_t,

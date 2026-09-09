@@ -7,8 +7,10 @@ import inspect
 from pathlib import Path
 from unittest.mock import Mock
 import sys
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection, PathCollection
 import numpy as np
 import pandas as pd
 import pytest
@@ -64,8 +66,8 @@ def _baseline(
         tensor_path=root / "mu_hat.pt",
         source_scientific_config_hash=BASELINE_SCIENTIFIC_HASH,
         source_schedule_sha256=BASELINE_SCHEDULE_HASH,
-        source_seed_start=len(contract.seeds),
-        source_seeds=tuple(
+        baseline_seed_start=len(contract.seeds),
+        baseline_seeds=tuple(
             range(len(contract.seeds), len(contract.seeds) + NUM_BASELINE_SEEDS)
         ),
         num_baseline_seeds=NUM_BASELINE_SEEDS,
@@ -76,7 +78,9 @@ def _baseline(
     )
 
 
-def _selection(root: Path, prompt_count: int = 2) -> TargetPairSelection:
+def _selection(
+    root: Path, prompt_count: int = 2, scheduler_name: str = "ddim"
+) -> TargetPairSelection:
     rows: list[dict[str, object]] = []
     for position in range(prompt_count):
         for selection_seed in (20, 21):
@@ -96,7 +100,7 @@ def _selection(root: Path, prompt_count: int = 2) -> TargetPairSelection:
     return TargetPairSelection(
         root=root,
         model_name="sdv1",
-        scheduler_name="ddim",
+        scheduler_name=scheduler_name,
         guidance_scale=7.5,
         num_inference_steps=3,
         num_seeds=2,
@@ -107,7 +111,9 @@ def _selection(root: Path, prompt_count: int = 2) -> TargetPairSelection:
     )
 
 
-def _record(root: Path, position: int) -> CompletedGenerationRecord:
+def _record(
+    root: Path, position: int, scheduler_name: str = "ddim"
+) -> CompletedGenerationRecord:
     index = str(10 + position)
     metadata = {
         "original_index": index,
@@ -116,7 +122,13 @@ def _record(root: Path, position: int) -> CompletedGenerationRecord:
         "prompt_raw": f"prompt {position}",
         "target_image_sha256": str(position + 1) * 64,
         "model_cli_name": "sdv1",
-        "scheduler_name": "ddim",
+        "dataset_model": "synthetic-dataset",
+        "model_id": "model",
+        "model_revision": "model-revision",
+        "native_prediction_type": "epsilon",
+        "target_preprocessing": {"synthetic": True},
+        "scientific_config_hash": SCIENTIFIC_HASH,
+        "scheduler_name": scheduler_name,
         "guidance_scale": 7.5,
         "num_inference_steps": 3,
         "num_seeds": 2,
@@ -138,19 +150,31 @@ def _record(root: Path, position: int) -> CompletedGenerationRecord:
     )
 
 
-def _contract(root: Path, prompt_count: int = 2) -> experiment.GenerationContract:
-    run = root / "logs" / "synthetic" / "experiment_S0_N2"
-    records = {str(10 + i): _record(run, i) for i in range(prompt_count)}
+def _contract(
+    root: Path, prompt_count: int = 2, scheduler_name: str = "ddim"
+) -> experiment.GenerationContract:
+    run = root / "logs" / f"synthetic_{scheduler_name}" / "experiment_S0_N2"
+    records = {
+        str(10 + i): _record(run, i, scheduler_name) for i in range(prompt_count)
+    }
     return experiment.GenerationContract(
         paths=GenerationPaths(run),
         sscd_paths=SSCDPaths(run),
+        scheduler_name=scheduler_name,
         science={
             "model_cli_name": "sdv1",
             "model_id": "model",
+            "dataset_model": "synthetic-dataset",
             "model_revision": "model-revision",
             "vae_id": "vae",
             "vae_revision": "vae-revision",
             "num_inference_steps": 3,
+            "scheduler": {
+                "name": scheduler_name,
+                "config": {"num_train_timesteps": 10},
+            },
+            "native_prediction_type": "epsilon",
+            "target_preprocessing": {"synthetic": True},
         },
         scientific_hash=SCIENTIFIC_HASH,
         schedule_sha256=BASELINE_SCHEDULE_HASH,
@@ -159,10 +183,14 @@ def _contract(root: Path, prompt_count: int = 2) -> experiment.GenerationContrac
         latent_dimension=2,
         stored_dtype=torch.float32,
         init_noise_sigma=1.0,
-        timestep=9,
-        alpha_t=0.5,
-        sigma_t=float(np.sqrt(0.75)),
-        snr_t=1.0 / 3.0,
+        timesteps=torch.tensor([9, 5, 1], dtype=torch.int64),
+        alpha_values=torch.tensor([0.5, 0.7, 0.9], dtype=torch.float64),
+        sigma_values=torch.tensor(
+            [np.sqrt(0.75), np.sqrt(0.51), np.sqrt(0.19)], dtype=torch.float64
+        ),
+        snr_values=torch.tensor(
+            [1.0 / 3.0, 0.49 / 0.51, 0.81 / 0.19], dtype=torch.float64
+        ),
         records_by_index=records,
         sscd_configuration={"seeds": [0, 1]},
         sscd_configuration_hash=SSCD_HASH,
@@ -173,14 +201,23 @@ def _row(selection: TargetPairSelection, position: int = 0) -> dict[str, object]
     return dict(selection.prompt_frame.iloc[position])
 
 
-def _values(position: int = 0) -> np.ndarray:
-    return np.asarray(
+def _values(
+    position: int = 0,
+    source: str = experiment.EVALUATION_GAUSSIAN,
+) -> np.ndarray:
+    base = np.asarray(
         [
             [7.0 + position, 0.10, 0.20, 0.30, 0.40, 0.15],
             [7.2 + position, 0.11, 0.21, 0.31, 0.41, 0.85],
         ],
         dtype=np.float64,
     )
+    values = np.repeat(base[:, None, :], 3, axis=1)
+    values[:, :, 0] += np.arange(3, dtype=np.float64)[None, :] * 0.05
+    values[:, :, 1:5] += np.arange(3, dtype=np.float64)[None, :, None] * 0.01
+    if source == experiment.EVALUATION_TRAJECTORY:
+        values[:, :, :5] += 0.02
+    return values
 
 
 def _centering(
@@ -217,23 +254,31 @@ def _csv_rows(
     contract: experiment.GenerationContract,
     *,
     use_mu: bool = True,
+    evaluation_source: str = experiment.EVALUATION_BOTH,
 ) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for position, prompt in enumerate(experiment._included_prompt_rows(selection)):
-        measurement = experiment._PromptMeasurement(
+    sources = experiment._evaluation_sources(evaluation_source)
+    prompts = experiment._included_prompt_rows(selection)
+    measurements = tuple(
+        experiment._PromptMeasurement(
             position=position,
             original_index=str(prompt["original_index"]),
-            values=_values(position),
-            error="",
+            values_by_source={source: _values(position, source) for source in sources},
+            errors_by_source={source: "" for source in sources},
         )
-        rows.extend(
-            experiment._rows_for_measurement(
-                measurement,
-                prompt,
-                contract,
-                _centering(contract, use_mu=use_mu),
+        for position, prompt in enumerate(prompts)
+    )
+    rows: list[dict[str, object]] = []
+    for source in sources:
+        for position, prompt in enumerate(prompts):
+            rows.extend(
+                experiment._rows_for_measurement(
+                    measurements[position],
+                    prompt,
+                    contract,
+                    _centering(contract, use_mu=use_mu),
+                    source,
+                )
             )
-        )
     return rows
 
 
@@ -246,17 +291,26 @@ def test_cli_and_schema_are_exact() -> None:
     assert defaults.num_inference_steps == 50
     assert defaults.num_seeds == 20
     assert defaults.num_baseline_seeds == 1000
-    assert defaults.selection_strategy == "spearman"
+    assert defaults.selection_strategy == "gmm"
+    assert (
+        parser.parse_args(["--selection-strategy", "gmm"]).selection_strategy == "gmm"
+    )
+    for unsupported in ("spearman", "gmm-evidence", "all"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--selection-strategy", unsupported])
     assert defaults.use_mu is False
+    assert defaults.evaluation_source == "both"
     assert custom.num_seeds == 7
     assert custom.num_baseline_seeds == 13
     assert custom.use_mu is True
     assert defaults.device == "auto"
     assert defaults.plot is False
-    assert "(default: spearman)" in parser.format_help()
+    assert "(default: gmm)" in parser.format_help()
     assert experiment.CSV_COLUMNS == (
         "record_id",
         "generation_seed",
+        "evaluation_source",
+        "step_index",
         "timestep",
         "alpha_t",
         "sigma_t",
@@ -282,17 +336,29 @@ def test_cli_and_schema_are_exact() -> None:
 
 @pytest.mark.parametrize(
     ("scheduler", "guidance"),
-    [("ddpm", 7.5), ("ddim", 7.5000001), ("ddim", 1.0)],
+    [("euler", 7.5), ("ddim", 7.5000001), ("ddpm", 1.0)],
 )
-def test_scientific_request_requires_ddim_and_exact_g(
+def test_scientific_request_requires_supported_scheduler_and_exact_g(
     scheduler: str, guidance: float
 ) -> None:
     with pytest.raises(experiment.ExperimentError):
         experiment._validate_scientific_request(scheduler, guidance)
 
 
+@pytest.mark.parametrize("scheduler", ("ddim", "ddpm"))
+def test_scientific_request_accepts_both_cached_schedulers(scheduler: str) -> None:
+    experiment._validate_scientific_request(scheduler, 7.5)
+
+
+@pytest.mark.parametrize(
+    ("scheduler_name", "scheduler_class"),
+    (("ddim", "DDIMScheduler"), ("ddpm", "DDPMScheduler")),
+)
 def test_generation_contract_loader_pins_physical_schedule_hash(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    scheduler_name: str,
+    scheduler_class: str,
 ) -> None:
     spec = experiment.get_model_spec("sdv1")
     scheduler_config = {"num_train_timesteps": 1000}
@@ -320,8 +386,8 @@ def test_generation_contract_loader_pins_physical_schedule_hash(
             "layout": "contiguous",
         },
         "scheduler": {
-            "name": "ddim",
-            "class": "DDIMScheduler",
+            "name": scheduler_name,
+            "class": scheduler_class,
             "config": scheduler_config,
         },
     }
@@ -336,8 +402,8 @@ def test_generation_contract_loader_pins_physical_schedule_hash(
         "sigma_t": (1.0 - alpha.square()).sqrt().contiguous(),
         "alphas_cumprod_t": alpha.square().contiguous(),
         "init_noise_sigma": 1.0,
-        "scheduler_name": "ddim",
-        "scheduler_class": "DDIMScheduler",
+        "scheduler_name": scheduler_name,
+        "scheduler_class": scheduler_class,
         "native_prediction_type": "epsilon",
         "stored_prediction_type": "epsilon",
         "trajectory_order": "noise_to_image",
@@ -359,7 +425,9 @@ def test_generation_contract_loader_pins_physical_schedule_hash(
     )
     monkeypatch.setattr(experiment, "safe_torch_load", Mock(return_value=schedule))
     monkeypatch.setattr(
-        experiment, "list_completed_records", Mock(return_value=[_record(run, 0)])
+        experiment,
+        "list_completed_records",
+        Mock(return_value=[_record(run, 0, scheduler_name)]),
     )
     sscd_loader = Mock(return_value=({}, SSCD_HASH))
     monkeypatch.setattr(experiment, "_load_sscd_configuration", sscd_loader)
@@ -367,7 +435,7 @@ def test_generation_contract_loader_pins_physical_schedule_hash(
     contract = experiment._load_generation_contract(
         tmp_path,
         model_name="sdv1",
-        scheduler_name="ddim",
+        scheduler_name=scheduler_name,
         guidance_scale=7.5,
         num_inference_steps=3,
         num_seeds=2,
@@ -375,6 +443,7 @@ def test_generation_contract_loader_pins_physical_schedule_hash(
 
     assert contract.schedule_sha256 == BASELINE_SCHEDULE_HASH
     assert contract.timestep == 999
+    assert contract.scheduler_name == scheduler_name
     sscd_loader.assert_called_once_with(
         SSCDPaths(run),
         science=science,
@@ -511,6 +580,58 @@ def test_generation_contract_rejects_schedule_hash_changed_while_loading(
         )
 
 
+@pytest.mark.parametrize("scheduler_name", ("ddim", "ddpm"))
+def test_active_scheduler_rejects_changed_saved_coefficients(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scheduler_name: str
+) -> None:
+    contract = _contract(tmp_path, scheduler_name=scheduler_name)
+    scheduler_config = {"num_train_timesteps": 10}
+    contract = replace(
+        contract,
+        science={**contract.science, "scheduler": {"config": scheduler_config}},
+    )
+    scheduler = SimpleNamespace(
+        timesteps=contract.timesteps.clone(),
+        init_noise_sigma=1.0,
+        set_timesteps=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        experiment,
+        "build_scheduler",
+        Mock(
+            return_value=SimpleNamespace(
+                scheduler=scheduler,
+                config=scheduler_config,
+            )
+        ),
+    )
+    active = (
+        contract.alpha_values.clone(),
+        contract.sigma_values.clone(),
+        contract.alpha_values.float().square(),
+    )
+    coefficients = Mock(return_value=active)
+    monkeypatch.setattr(experiment, "schedule_alpha_sigma", coefficients)
+    components = SimpleNamespace(original_scheduler=object(), device="cpu")
+
+    assert experiment._validate_active_scheduler(components, contract) is scheduler
+    experiment.build_scheduler.assert_called_once_with(
+        components.original_scheduler, scheduler_name
+    )
+    coefficient_call = coefficients.call_args
+    assert coefficient_call.args[0] is scheduler
+    assert torch.equal(coefficient_call.args[1], contract.timesteps)
+    assert coefficient_call.kwargs == {"dtype": torch.float32}
+
+    changed_alpha = active[0].clone()
+    changed_alpha[1] = torch.nextafter(
+        changed_alpha[1], torch.tensor(float("inf"), dtype=changed_alpha.dtype)
+    )
+    coefficients.return_value = (changed_alpha, active[1], active[2])
+    with pytest.raises(experiment.ExperimentError, match="coefficients"):
+        experiment._validate_active_scheduler(components, contract)
+
+
 def test_shared_baseline_loader_uses_reference_seeds_and_metadata_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -541,13 +662,13 @@ def test_shared_baseline_loader_uses_reference_seeds_and_metadata_only(
         num_baseline_seeds=NUM_BASELINE_SEEDS,
         load_tensor=False,
     )
-    assert observed.source_seed_start == 2
+    assert observed.baseline_seed_start == 2
     assert observed.num_baseline_seeds == NUM_BASELINE_SEEDS
-    assert observed.source_seeds == (2, 3, 4)
+    assert observed.baseline_seeds == (2, 3, 4)
     assert observed.mu_hat is None
 
-    loader.return_value = replace(expected, source_seed_start=0)
-    with pytest.raises(experiment.ExperimentError, match="source_seed_start"):
+    loader.return_value = replace(expected, baseline_seed_start=0)
+    with pytest.raises(experiment.ExperimentError, match="baseline_seed_start"):
         experiment._load_shared_baseline(
             model_name="sdv1",
             scheduler_name="ddim",
@@ -634,6 +755,176 @@ def test_zero_centering_is_exact_float64_and_never_loads_baseline(
     assert plot.mode == experiment.CENTERING_ZERO
     assert plot.value is None
     baseline_loader.assert_not_called()
+
+
+def test_no_intercept_lstsq_solves_all_seed_responses_jointly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_direction = torch.tensor(
+        [[[1.0, 2.0], [-1.0, 0.5]]],
+        dtype=torch.float64,
+    )
+    target_vector = target_direction.flatten()
+    coefficients = torch.tensor([2.0, -1.25, 4.5], dtype=torch.float64)
+    raw_residuals = torch.tensor(
+        [
+            [1.0, -0.5, 0.25, 2.0],
+            [-1.5, 0.75, 2.0, -0.5],
+            [0.5, 1.5, -2.5, 1.0],
+        ],
+        dtype=torch.float64,
+    )
+    residuals = (
+        raw_residuals
+        - ((raw_residuals @ target_vector) / target_vector.square().sum())[:, None]
+        * target_vector
+    )
+    guided_direction = (coefficients[:, None] * target_vector + residuals).reshape(
+        3, *target_direction.shape
+    )
+    real_lstsq = torch.linalg.lstsq
+    calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def tracked_lstsq(
+        design_matrix: torch.Tensor,
+        response_matrix: torch.Tensor,
+    ) -> object:
+        calls.append((design_matrix.clone(), response_matrix.clone()))
+        return real_lstsq(design_matrix, response_matrix)
+
+    monkeypatch.setattr(experiment.torch.linalg, "lstsq", tracked_lstsq)
+
+    fitted = experiment._solve_no_intercept_lstsq(
+        target_direction,
+        guided_direction,
+    )
+
+    assert len(calls) == 1
+    design_matrix, response_matrix = calls[0]
+    assert design_matrix.dtype == response_matrix.dtype == torch.float64
+    assert design_matrix.shape == (target_vector.numel(), 1)
+    assert response_matrix.shape == (target_vector.numel(), len(coefficients))
+    torch.testing.assert_close(design_matrix, target_vector[:, None])
+    torch.testing.assert_close(response_matrix, guided_direction.flatten(1).T)
+    torch.testing.assert_close(fitted, coefficients, rtol=1e-13, atol=1e-13)
+    solved_residuals = guided_direction.flatten(1) - fitted[:, None] * target_vector
+    assert bool((solved_residuals.norm(dim=1) > 0.0).all())
+    assert not torch.allclose(fitted, torch.full_like(fitted, 7.5))
+
+
+def test_no_intercept_lstsq_rejects_nonfinite_rhs_before_solver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_direction = torch.ones((1, 2, 2), dtype=torch.float64)
+    guided_direction = torch.zeros((2, 1, 2, 2), dtype=torch.float64)
+    guided_direction[1, 0, 0, 0] = torch.nan
+    solver = Mock(side_effect=AssertionError("non-finite RHS reached solver"))
+    monkeypatch.setattr(experiment.torch.linalg, "lstsq", solver)
+
+    with pytest.raises(
+        experiment.ExperimentError,
+        match="response matrix contains non-finite values",
+    ):
+        experiment._solve_no_intercept_lstsq(
+            target_direction,
+            guided_direction,
+        )
+
+    solver.assert_not_called()
+
+
+@pytest.mark.parametrize("target_magnitude", (1.0, 10.0))
+def test_measurement_lstsq_guard_is_stable_at_realistic_latent_dimension(
+    tmp_path: Path,
+    target_magnitude: float,
+) -> None:
+    latent_shape = (4, 64, 64)
+    contract = replace(
+        _contract(tmp_path),
+        latent_shape=latent_shape,
+        latent_dimension=int(np.prod(latent_shape)),
+    )
+    generator = torch.Generator().manual_seed(123)
+    target = target_magnitude * torch.randn(
+        latent_shape,
+        generator=generator,
+        dtype=torch.float64,
+    )
+    raw_residual = torch.randn(
+        latent_shape,
+        generator=generator,
+        dtype=torch.float64,
+    )
+    target_vector = target.flatten()
+    orthogonal_residual = (
+        raw_residual
+        - ((raw_residual.flatten() @ target_vector) / target_vector.square().sum())
+        * target
+    )
+    xhat_c = torch.stack(
+        (
+            target,
+            target + 1e-12 * orthogonal_residual,
+        )
+    )
+    xhat_empty = torch.zeros_like(xhat_c)
+    x_t = torch.zeros_like(xhat_c)
+    epsilon_c = (x_t - contract.alpha_t * xhat_c) / contract.sigma_t
+    epsilon_empty = (x_t - contract.alpha_t * xhat_empty) / contract.sigma_t
+
+    result = experiment._measure_values(
+        x_t,
+        epsilon_empty,
+        epsilon_c,
+        target,
+        torch.zeros(latent_shape, dtype=torch.float64),
+        torch.tensor([0.2, 0.8], dtype=torch.float64),
+        contract=contract,
+        device="cpu",
+        centering_mode=experiment.CENTERING_ZERO,
+    )
+
+    assert np.isfinite(result).all()
+    np.testing.assert_allclose(result[:, 0], 7.5, rtol=0.0, atol=2e-13)
+    assert 0.0 <= result[0, 1] < 1e-12
+    assert 0.0 < result[1, 1] < 1e-10
+
+
+def test_measurement_rejects_obviously_wrong_lstsq_solution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    contract = _contract(tmp_path)
+    target = torch.tensor([[[1.0, -0.5]]], dtype=torch.float64)
+    xhat_c = target.unsqueeze(0).expand(len(contract.seeds), -1, -1, -1)
+    xhat_empty = torch.zeros_like(xhat_c)
+    x_t = torch.zeros_like(xhat_c)
+    epsilon_c = (x_t - contract.alpha_t * xhat_c) / contract.sigma_t
+    epsilon_empty = (x_t - contract.alpha_t * xhat_empty) / contract.sigma_t
+    solver = Mock(
+        return_value=SimpleNamespace(
+            solution=torch.zeros((1, len(contract.seeds)), dtype=torch.float64)
+        )
+    )
+    monkeypatch.setattr(experiment.torch.linalg, "lstsq", solver)
+
+    with pytest.raises(
+        experiment.ExperimentError,
+        match="projection residual is not orthogonal",
+    ):
+        experiment._measure_values(
+            x_t,
+            epsilon_empty,
+            epsilon_c,
+            target,
+            torch.zeros(contract.latent_shape, dtype=torch.float64),
+            torch.tensor([0.2, 0.8], dtype=torch.float64),
+            contract=contract,
+            device="cpu",
+            centering_mode=experiment.CENTERING_ZERO,
+        )
+
+    solver.assert_called_once()
 
 
 def test_measurement_uses_requested_no_intercept_projection_and_four_rmses(
@@ -743,6 +1034,58 @@ def test_measurement_uses_xstar_and_origin_in_default_zero_mode(
     )
 
 
+@pytest.mark.parametrize("scheduler_name", ("ddim", "ddpm"))
+@pytest.mark.parametrize(
+    ("use_mu", "centering_mode"),
+    [
+        (False, experiment.CENTERING_ZERO),
+        (True, experiment.CENTERING_MU_HAT),
+    ],
+)
+def test_all_timestep_gaussian_limit_recovers_exact_corollary(
+    tmp_path: Path,
+    use_mu: bool,
+    centering_mode: str,
+    scheduler_name: str,
+) -> None:
+    contract = _contract(tmp_path, scheduler_name=scheduler_name)
+    center = _mu_hat() if use_mu else torch.zeros_like(_mu_hat())
+    target = torch.tensor([[[1.25, -0.75]]], dtype=torch.float64)
+    probes = torch.tensor(
+        [[[[0.3, -0.9]]], [[[-1.1, 0.7]]]],
+        dtype=torch.float64,
+    )
+    samples = probes[:, None].expand(
+        len(contract.seeds),
+        contract.num_inference_steps,
+        *contract.latent_shape,
+    )
+    alpha = contract.alpha_values.view(1, -1, 1, 1, 1)
+    sigma = contract.sigma_values.view(1, -1, 1, 1, 1)
+    epsilon_empty = (samples - alpha * center) / sigma
+    epsilon_c = (samples - alpha * target) / sigma
+    scores = torch.tensor([0.2, 0.8], dtype=torch.float64)
+
+    values = experiment._measure_all_steps(
+        probes,
+        epsilon_empty,
+        epsilon_c,
+        target,
+        center,
+        scores,
+        contract=contract,
+        device="cpu",
+        centering_mode=centering_mode,
+    )
+
+    assert values.shape == (2, 3, 6)
+    np.testing.assert_allclose(values[:, :, 0], 7.5, rtol=0.0, atol=1e-13)
+    assert np.max(values[:, :, 1:5]) < 1e-13
+    np.testing.assert_array_equal(
+        values[:, :, 5], np.broadcast_to(scores.numpy()[:, None], (2, 3))
+    )
+
+
 def test_measurement_rejects_zero_target_direction_from_mu_hat(
     tmp_path: Path,
 ) -> None:
@@ -801,15 +1144,54 @@ def test_source_never_fits_tautological_cfg_branch_difference() -> None:
     source = inspect.getsource(experiment)
     assert "xhat_g - xhat_empty" not in source
     assert "xhat_c - xhat_empty" not in source
-    assert "flat_guided_direction @ flat_target_direction" in source
-    assert "target_squared" in source
-    forbidden = (
+    assert "torch.linalg.lstsq(design_matrix, response_matrix)" in source
+    assert "target_direction.flatten()[:, None]" in source
+    assert "guided_direction.flatten(start_dim=1).T" in source
+    required_gaussian_probe_symbols = (
         "load_model_components",
         "build_scheduler",
         "predict_conditional_epsilon",
         "encode_prompt_condition",
+        "make_initial_noise",
     )
-    assert all(name not in source for name in forbidden)
+    assert all(name in source for name in required_gaussian_probe_symbols)
+
+
+@pytest.mark.parametrize("scheduler_name", ("ddim", "ddpm"))
+def test_generation_marker_pins_contract_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    scheduler_name: str,
+) -> None:
+    selection = _selection(tmp_path, scheduler_name=scheduler_name)
+    contract = _contract(tmp_path, scheduler_name=scheduler_name)
+    metadata = contract.records_by_index["10"].metadata
+    validator = Mock(
+        return_value=SimpleNamespace(valid=True, metadata=metadata, errors=())
+    )
+    monkeypatch.setattr(experiment, "validate_generation_record", validator)
+
+    observed = experiment._validate_generation_prompt(
+        _row(selection),
+        contract=contract,
+        tensor_names=("latent",),
+    )
+
+    assert observed["scheduler_name"] == scheduler_name
+    assert validator.call_args.kwargs["expected_scientific_hash"] == SCIENTIFIC_HASH
+    assert validator.call_args.kwargs["tensor_names"] == ("latent",)
+
+    wrong = dict(metadata)
+    wrong["scheduler_name"] = "ddpm" if scheduler_name == "ddim" else "ddim"
+    validator.return_value = SimpleNamespace(
+        valid=True,
+        metadata=wrong,
+        errors=(),
+    )
+    with pytest.raises(experiment.ExperimentError, match="scheduler_name"):
+        experiment._validate_generation_prompt(
+            _row(selection), contract=contract, tensor_names=("latent",)
+        )
 
 
 def test_initial_latent_sentinel_is_bitwise_and_checks_only_one_bundle(
@@ -838,28 +1220,31 @@ def test_initial_latent_sentinel_is_bitwise_and_checks_only_one_bundle(
         experiment._validate_initial_latent_sentinel(_row(selection), contract)
 
 
-def test_prediction_loader_uses_tuple_zero_empty_and_tuple_one_conditional(
+def test_trajectory_loader_uses_every_latent_and_both_prediction_branches(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     contract = _contract(tmp_path)
     prompt = _row(_selection(tmp_path))
+    latents = torch.arange(16, dtype=torch.float32).reshape(2, 4, 1, 1, 2)
     empty = torch.full((2, 3, 1, 1, 2), 1.0)
     conditional = torch.full_like(empty, 2.0)
-    target = torch.full((1, 1, 2), 3.0)
-    marker = contract.records_by_index["10"].metadata
+    validate = Mock(return_value=contract.records_by_index["10"].metadata)
+    monkeypatch.setattr(experiment, "_validate_generation_prompt", validate)
     monkeypatch.setattr(
-        experiment, "_validate_generation_prompt", Mock(return_value=marker)
+        experiment,
+        "safe_torch_load",
+        Mock(side_effect=[latents, (empty, conditional)]),
     )
-    monkeypatch.setattr(
-        experiment, "safe_torch_load", Mock(side_effect=[(empty, conditional), target])
+    loaded_latents, loaded_empty, loaded_conditional = (
+        experiment._load_cached_trajectory(prompt, contract)
     )
-    loaded_empty, loaded_conditional, loaded_target, loaded_marker = (
-        experiment._load_prediction_and_target(prompt, contract)
+    assert torch.equal(loaded_latents, latents)
+    assert torch.equal(loaded_empty, empty)
+    assert torch.equal(loaded_conditional, conditional)
+    assert validate.call_args.kwargs["tensor_names"] == (
+        "latent",
+        "noise_prediction",
     )
-    assert torch.equal(loaded_empty, empty[:, 0])
-    assert torch.equal(loaded_conditional, conditional[:, 0])
-    assert torch.equal(loaded_target, target)
-    assert loaded_marker is marker
 
 
 def test_same_seed_target_sscd_is_not_averaged(
@@ -931,21 +1316,27 @@ def test_cpu_compute_has_one_accurate_progress_and_complete_error_grid(
     selection = _selection(tmp_path)
     prompts = experiment._included_prompt_rows(selection)
     contract = _contract(tmp_path)
-    monkeypatch.setattr(
-        experiment,
-        "_reconstruct_initial_latents",
-        Mock(return_value=torch.zeros((2, 1, 1, 2))),
-    )
 
     def measure(
         position: int, prompt: dict[str, object], **_kwargs: object
     ) -> experiment._PromptMeasurement:
         if position == 1:
             return experiment._PromptMeasurement(
-                position, str(prompt["original_index"]), None, "synthetic failure"
+                position,
+                str(prompt["original_index"]),
+                {experiment.EVALUATION_TRAJECTORY: None},
+                {experiment.EVALUATION_TRAJECTORY: "synthetic failure"},
             )
         return experiment._PromptMeasurement(
-            position, str(prompt["original_index"]), _values(position), ""
+            position,
+            str(prompt["original_index"]),
+            {
+                experiment.EVALUATION_TRAJECTORY: _values(
+                    position,
+                    experiment.EVALUATION_TRAJECTORY,
+                )
+            },
+            {experiment.EVALUATION_TRAJECTORY: ""},
         )
 
     monkeypatch.setattr(experiment, "_measure_prompt_safely", measure)
@@ -954,23 +1345,34 @@ def test_cpu_compute_has_one_accurate_progress_and_complete_error_grid(
         prompts,
         contract=contract,
         centering=_centering(contract),
+        evaluation_source=experiment.EVALUATION_TRAJECTORY,
         devices=(torch.device("cpu"),),
         progress_factory=_Progress,
     )
     assert len(_Progress.instances) == 1
-    assert _Progress.instances[0].options["total"] == 4
-    assert _Progress.instances[0].count == 4
-    assert len(rows) == 4
+    assert _Progress.instances[0].options["total"] == 12
+    assert _Progress.instances[0].count == 12
+    assert len(rows) == 12
     assert failed == 1
     assert {row["centering_mode"] for row in rows} == {"mu_hat"}
     assert {row["num_baseline_seeds"] for row in rows} == {NUM_BASELINE_SEEDS}
-    assert [row["status"] for row in rows] == ["ok", "ok", "error", "error"]
+    assert [row["status"] for row in rows] == ["ok"] * 6 + ["error"] * 6
     assert all(tuple(row) == experiment.CSV_COLUMNS for row in rows)
 
 
 def test_compact_results_restore_source_order() -> None:
-    first = experiment._PromptMeasurement(1, "11", _values(1), "")
-    second = experiment._PromptMeasurement(0, "10", _values(0), "")
+    first = experiment._PromptMeasurement(
+        1,
+        "11",
+        {experiment.EVALUATION_GAUSSIAN: _values(1)},
+        {experiment.EVALUATION_GAUSSIAN: ""},
+    )
+    second = experiment._PromptMeasurement(
+        0,
+        "10",
+        {experiment.EVALUATION_GAUSSIAN: _values(0)},
+        {experiment.EVALUATION_GAUSSIAN: ""},
+    )
     assert experiment._canonical_measurements((first, second), 2) == (second, first)
     with pytest.raises(experiment.ExperimentError, match="duplicate"):
         experiment._canonical_measurements((second, second), 2)
@@ -1020,7 +1422,15 @@ def test_multi_cuda_uses_whole_prompt_device_shards_and_parent_progress(
         position: int, prompt: dict[str, object], **_kwargs: object
     ) -> experiment._PromptMeasurement:
         return experiment._PromptMeasurement(
-            position, str(prompt["original_index"]), _values(position), ""
+            position,
+            str(prompt["original_index"]),
+            {
+                experiment.EVALUATION_TRAJECTORY: _values(
+                    position,
+                    experiment.EVALUATION_TRAJECTORY,
+                )
+            },
+            {experiment.EVALUATION_TRAJECTORY: ""},
         )
 
     monkeypatch.setattr(experiment, "_measure_prompt_safely", measure)
@@ -1029,20 +1439,17 @@ def test_multi_cuda_uses_whole_prompt_device_shards_and_parent_progress(
         prompts,
         contract=contract,
         centering=_centering(contract),
+        evaluation_source=experiment.EVALUATION_TRAJECTORY,
         devices=(torch.device("cuda:0"), torch.device("cuda:1")),
         progress_factory=_Progress,
     )
     assert calls == [(0, "cuda:0"), (2, "cuda:0"), (1, "cuda:1")]
-    assert [row["record_id"] for row in rows] == [
-        "record-0",
-        "record-0",
-        "record-1",
-        "record-1",
-        "record-2",
-        "record-2",
-    ]
+    assert [row["record_id"] for row in rows] == (
+        ["record-0"] * 6 + ["record-1"] * 6 + ["record-2"] * 6
+    )
     assert failed == 0
-    assert _Progress.instances[0].count == 6
+    assert _Progress.instances[0].options["total"] == 18
+    assert _Progress.instances[0].count == 18
 
 
 def test_csv_validation_requires_exact_canonical_prompt_seed_grid_and_provenance(
@@ -1057,10 +1464,16 @@ def test_csv_validation_requires_exact_canonical_prompt_seed_grid_and_provenance
         contract=contract,
         centering=_centering(contract, load_tensor=False),
     )
-    assert len(validated) == 4
-    for mutate in ("generation_seed", "timestep", "guidance_scale"):
+    assert len(validated) == 24
+    for mutate in (
+        "evaluation_source",
+        "generation_seed",
+        "step_index",
+        "timestep",
+        "guidance_scale",
+    ):
         broken = frame.copy()
-        broken.loc[0, mutate] = 99
+        broken.loc[0, mutate] = "wrong" if mutate == "evaluation_source" else 99
         with pytest.raises(experiment.ExperimentError):
             experiment._validated_plot_frame(
                 broken,
@@ -1069,7 +1482,7 @@ def test_csv_validation_requires_exact_canonical_prompt_seed_grid_and_provenance
                 centering=_centering(contract, load_tensor=False),
             )
     missing = frame.iloc[:-1]
-    with pytest.raises(experiment.ExperimentError, match="prompt-seed rows"):
+    with pytest.raises(experiment.ExperimentError, match="source-prompt-seed-timestep"):
         experiment._validated_plot_frame(
             missing,
             selection=selection,
@@ -1121,66 +1534,170 @@ def test_csv_validation_requires_exact_canonical_prompt_seed_grid_and_provenance
         )
 
 
-def test_figure_uses_viridis_fixed_sscd_opaque_colorbar_and_g_reference(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("scheduler_name", ("ddim", "ddpm"))
+@pytest.mark.parametrize(
+    ("metric", "ylabel_fragment", "expected_line_count"),
+    (
+        (experiment.COEFFICIENT_METRIC, r"\widehat{g}_t", 2),
+        (experiment.RESIDUAL_METRIC, r"\mathbf{r}_t", 1),
+    ),
+)
+def test_figure_uses_log_snr_bands_viridis_and_opaque_colorbar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    scheduler_name: str,
+    metric: str,
+    ylabel_fragment: str,
+    expected_line_count: int,
 ) -> None:
-    selection = _selection(tmp_path)
-    contract = _contract(tmp_path)
-    frame = pd.DataFrame(_csv_rows(selection, contract), columns=experiment.CSV_COLUMNS)
+    selection = _selection(tmp_path, scheduler_name=scheduler_name)
+    contract = _contract(tmp_path, scheduler_name=scheduler_name)
+    frame = pd.DataFrame(
+        _csv_rows(
+            selection,
+            contract,
+            evaluation_source=experiment.EVALUATION_GAUSSIAN,
+        ),
+        columns=experiment.CSV_COLUMNS,
+    )
+    # Distinguish all three quantities so plotting the direct error cannot pass.
+    frame["fitted_guidance_scale"] = 2.0 + np.arange(len(frame), dtype=float)
+    frame["residual_rmse"] = 0.25 + 0.125 * np.arange(len(frame), dtype=float)
+    frame["guided_target_rmse"] = 1000.0
     captured: dict[str, object] = {}
 
     def save(figure: object, destinations: object) -> None:
         captured["figure"] = figure
         captured["destinations"] = destinations
-        axis = figure.axes[0]
         assert tuple(figure.get_size_inches()) == pytest.approx((4.0, 4.0))
-        assert axis.get_xlabel() == r"$\widehat{g}$"
-        assert r"\mathbf{x}" in axis.get_ylabel()
+        assert len(figure.axes) == 2
+        axis, colorbar_axis = figure.axes
+        assert axis.get_xlabel() == r"$\alpha_t^2/\sigma_t^2$"
+        assert axis.get_xscale() == "log"
         assert axis.get_title() == ""
+        assert ylabel_fragment in axis.get_ylabel()
+        assert r"\|_2" not in axis.get_ylabel()
         assert r"\boldsymbol{\mu}" in axis.get_ylabel()
-        assert r"\star" in axis.get_ylabel()
-        assert axis.get_legend() is None
-        reference = [line for line in axis.lines if len(line.get_xdata()) == 2]
-        assert len(reference) == 1
-        assert np.asarray(reference[0].get_xdata()) == pytest.approx([7.5, 7.5])
-        scatter = axis.collections[0]
-        assert scatter.get_alpha() == pytest.approx(0.68)
-        assert scatter.norm.vmin == 0.0
-        assert scatter.norm.vmax == 1.0
-        colorbar_axis = figure.axes[1]
+        assert axis.xaxis.label.get_fontsize() == 15
+        assert axis.yaxis.label.get_fontsize() == 15
+        assert isinstance(axis.xaxis.get_major_locator(), experiment.LogLocator)
+        assert all(label.get_fontsize() == 12 for label in axis.get_xticklabels())
+        assert all(label.get_fontsize() == 12 for label in axis.get_yticklabels())
+
+        expected = frame.groupby("snr_t", sort=True)[metric]
+        assert len(axis.lines) == expected_line_count
+        median = axis.lines[0]
+        np.testing.assert_allclose(median.get_xdata(), expected.median().index)
+        np.testing.assert_allclose(median.get_ydata(), expected.median())
+        assert median.get_marker() in (None, "None", "")
+
+        observations = [
+            item for item in axis.collections if isinstance(item, LineCollection)
+        ]
+        assert len(observations) == 1
+        observation = observations[0]
+        assert not any(isinstance(item, PathCollection) for item in axis.collections)
+        assert observation.get_alpha() == pytest.approx(
+            experiment.OBSERVATION_LINE_ALPHA
+        )
+        np.testing.assert_allclose(
+            observation.get_linewidths(), experiment.OBSERVATION_LINE_WIDTH
+        )
+        assert observation.norm.vmin == 0.0
+        assert observation.norm.vmax == 1.0
+        assert observation.norm.clip is True
+        assert observation.get_cmap().name == "viridis"
+        expected_segments = []
+        expected_colors = []
+        for (_record_id, _seed), group in frame.groupby(
+            ["record_id", "generation_seed"], sort=False
+        ):
+            ordered = group.sort_values("snr_t", kind="stable")
+            expected_segments.append(ordered[["snr_t", metric]].to_numpy(dtype=float))
+            expected_colors.append(float(ordered["target_sscd"].iloc[0]))
+        assert len(observation.get_segments()) == 4
+        for actual, expected_segment in zip(
+            observation.get_segments(), expected_segments, strict=True
+        ):
+            np.testing.assert_allclose(actual, expected_segment)
+            assert np.all(np.diff(actual[:, 0]) > 0.0)
+        np.testing.assert_allclose(observation.get_array(), expected_colors)
+
+        bands = [
+            item for item in axis.collections if not isinstance(item, LineCollection)
+        ]
+        assert len(bands) == 3
+        for band, (lower_q, upper_q, alpha) in zip(
+            bands, experiment.PERCENTILE_BANDS, strict=True
+        ):
+            assert band.get_alpha() == pytest.approx(alpha)
+            vertices = band.get_paths()[0].vertices
+            for quantile in (lower_q, upper_q):
+                for x, y in expected.quantile(quantile).items():
+                    assert np.any(np.all(np.isclose(vertices, (x, y)), axis=1))
+
+        if metric == experiment.COEFFICIENT_METRIC:
+            np.testing.assert_allclose(
+                axis.lines[1].get_ydata(), experiment.REQUIRED_GUIDANCE_SCALE
+            )
+            assert axis.lines[1].get_linestyle() == "--"
+            assert axis.get_legend().get_texts()[0].get_text() == "$g=7.5$"
+            assert axis.get_legend().get_texts()[0].get_fontsize() == 10
+        else:
+            assert axis.get_legend() is None
         assert colorbar_axis.get_ylabel() == "SSCD"
+        assert colorbar_axis.get_ylim() == pytest.approx((0.0, 1.0))
+        assert colorbar_axis.collections[-1].get_alpha() == 1.0
 
     monkeypatch.setattr(experiment, "_atomic_save_figures", save)
     experiment._render_figure(
         frame,
         (tmp_path / "a.png", tmp_path / "a.pdf"),
         centering_mode=experiment.CENTERING_MU_HAT,
+        evaluation_source=experiment.EVALUATION_GAUSSIAN,
+        metric=metric,
     )
     assert captured["destinations"] == (tmp_path / "a.png", tmp_path / "a.pdf")
     plt.close(captured["figure"])
 
 
+@pytest.mark.parametrize(
+    ("metric", "ylabel"),
+    (
+        (experiment.COEFFICIENT_METRIC, r"$\widehat{g}_t$"),
+        (experiment.RESIDUAL_METRIC, r"$\|\mathbf{r}_t\|/\sqrt{d}$"),
+    ),
+)
 def test_zero_centered_figure_ylabel_omits_mu(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, metric: str, ylabel: str
 ) -> None:
     selection = _selection(tmp_path)
     contract = _contract(tmp_path)
     frame = pd.DataFrame(
-        _csv_rows(selection, contract, use_mu=False), columns=experiment.CSV_COLUMNS
+        _csv_rows(
+            selection,
+            contract,
+            use_mu=False,
+            evaluation_source=experiment.EVALUATION_TRAJECTORY,
+        ),
+        columns=experiment.CSV_COLUMNS,
     )
     captured: dict[str, object] = {}
 
     def save(figure: object, _destinations: object) -> None:
         captured["figure"] = figure
-        label = figure.axes[0].get_ylabel()
-        assert r"\boldsymbol{\mu}" not in label
-        assert r"\widehat{g}\mathbf{x}^{\star}" in label
+        assert len(figure.axes) == 2
+        axis, _colorbar_axis = figure.axes
+        assert axis.get_ylabel() == ylabel
+        assert all(r"\boldsymbol{\mu}" not in axis.get_ylabel() for axis in figure.axes)
 
     monkeypatch.setattr(experiment, "_atomic_save_figures", save)
     experiment._render_figure(
         frame,
         (tmp_path / "a.png", tmp_path / "a.pdf"),
         centering_mode=experiment.CENTERING_ZERO,
+        evaluation_source=experiment.EVALUATION_TRAJECTORY,
+        metric=metric,
     )
     plt.close(captured["figure"])
 
@@ -1201,10 +1718,10 @@ def test_default_output_is_baseline_count_and_selection_hash_scoped() -> None:
         "corollary3_cfg_amplification",
         "centering_mu_hat",
         "baseline_S20_N3",
-        "gmm",
         SELECTION_HASH,
+        "evaluation_both",
     )
-    assert result.name == SELECTION_HASH
+    assert result.name == "evaluation_both"
     assert result != experiment._default_output_directory(
         "sdv1",
         "ddim",
@@ -1230,8 +1747,8 @@ def test_default_output_is_baseline_count_and_selection_hash_scoped() -> None:
     assert zero.parts[-4:] == (
         "corollary3_cfg_amplification",
         "centering_zero",
-        "gmm",
         SELECTION_HASH,
+        "evaluation_both",
     )
     assert zero == experiment._default_output_directory(
         "sdv1",

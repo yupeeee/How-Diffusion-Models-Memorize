@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import math
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -10,11 +13,13 @@ from typing import Any
 
 import pandas as pd
 import torch
+from PIL import Image
 from tqdm import tqdm
 
 from utils.common.cli import generation_run_name, stable_float
 from utils.common.io import (
     CacheIOError,
+    atomic_write_bytes,
     atomic_write_frame_csv,
     atomic_write_json,
     canonical_json,
@@ -25,6 +30,8 @@ from utils.common.io import (
 )
 from utils.data.selection import (
     DEFAULT_SELECTION_STRATEGY,
+    DISCARDED_PROXIMITY_RULE,
+    INCLUDED_PROXIMITY_RULE,
     TargetPairSelectionError,
     normalize_selection_strategy,
     reference_completion_fingerprint,
@@ -39,6 +46,7 @@ from .cache import (
     generation_paths,
     list_completed_records,
     require_generation_run,
+    validate_generation_record,
 )
 from .plotting import (
     AnalysisStatistics,
@@ -54,8 +62,8 @@ OBSERVATION_COLUMNS = tuple(
     "l2_norm sscd observation_status observation_error".split()
 )
 ANALYSIS_COLUMNS = OBSERVATION_COLUMNS + tuple(
-    "selection_strategy prompt_spearman prompt_gmm_evidence_seed_count "
-    "include_prompt selection_status selection_reason".split()
+    "selection_strategy prompt_spearman include_prompt selection_status "
+    "selection_reason".split()
 )
 FAILED_COLUMNS = tuple(
     "original_index record_id source_row_number issue_type reason "
@@ -97,8 +105,8 @@ class ProximityPaths:
                     "output_run_name is required outside the logs directory"
                 ) from error
         namespace = f"{role}_S{seed_start}_N{num_seeds}"
-        strategy = normalize_selection_strategy(selection_strategy)
-        output = root / "outputs" / output_run_name / "proximity" / strategy / namespace
+        normalize_selection_strategy(selection_strategy)
+        output = root / "outputs" / output_run_name / "proximity" / namespace
         return cls(root, generation, output)
 
     @classmethod
@@ -445,6 +453,11 @@ def run_proximity(
     else:
         _remove_optional(paths.failed_csv)
         statistics = write_analysis_outputs(paths.output_directory, analysis=analysis)
+        _write_examples(
+            paths,
+            table_path=paths.output_directory / "proximity.csv",
+            num_seeds=num_seeds,
+        )
         values = _summary(
             paths,
             run_name,
@@ -542,6 +555,7 @@ def _frozen_reference_result(
     if summary.get("selection_hash") != selection.sha256:
         raise ProximityError("frozen selection summary hash differs")
     write_selection_figure(directory)
+    _write_examples(paths, table_path=directory / "selection.csv", num_seeds=num_seeds)
     return ProximitySummary(paths, summary)
 
 
@@ -864,7 +878,6 @@ def _annotate_selection(
     decisions = (
         "selection_strategy",
         "prompt_spearman",
-        "prompt_gmm_evidence_seed_count",
         "include_prompt",
         "selection_status",
         "selection_reason",
@@ -1032,6 +1045,311 @@ def _summary(
     return values
 
 
+def _example_prompts(
+    analysis: pd.DataFrame, *, num_seeds: int
+) -> list[dict[str, object]]:
+    """Choose actual prompt medians and extremes by mean terminal L2."""
+    if isinstance(num_seeds, bool) or not isinstance(num_seeds, int) or num_seeds <= 0:
+        raise ProximityError("example num_seeds must be a positive integer")
+    required = {
+        "original_index",
+        "record_id",
+        "source_row_number",
+        "prompt",
+        "seed",
+        "l2_norm",
+        "sscd",
+        "include_prompt",
+        "selection_status",
+        "observation_status",
+    }
+    missing = sorted(required - set(analysis))
+    if missing:
+        raise ProximityError("example table is missing: " + ", ".join(missing))
+    if not analysis.empty and not pd.api.types.is_bool_dtype(
+        analysis["include_prompt"]
+    ):
+        raise ProximityError("example include_prompt must contain booleans")
+    prompts: dict[str, list[dict[str, object]]] = {"retained": [], "discarded": []}
+    for index, rows in analysis.groupby("original_index", sort=False):
+        if (
+            len(rows) != num_seeds
+            or not rows["observation_status"].eq("complete").all()
+        ):
+            continue
+        identity = (
+            "record_id",
+            "source_row_number",
+            "prompt",
+            "include_prompt",
+            "selection_status",
+        )
+        if any(rows[column].nunique(dropna=False) != 1 for column in identity):
+            raise ProximityError(
+                f"example prompt identity differs across seeds: {index}"
+            )
+        first = rows.iloc[0]
+        included = bool(first["include_prompt"])
+        expected_status = (
+            INCLUDED_PROXIMITY_RULE if included else DISCARDED_PROXIMITY_RULE
+        )
+        if first["selection_status"] != expected_status:
+            continue
+        l2 = pd.to_numeric(rows["l2_norm"], errors="coerce").tolist()
+        seeds = pd.to_numeric(rows["seed"], errors="coerce").tolist()
+        if (
+            any(not math.isfinite(value) or value < 0 for value in l2)
+            or any(
+                not math.isfinite(value) or value < 0 or value != int(value)
+                for value in seeds
+            )
+            or len(set(seeds)) != num_seeds
+        ):
+            continue
+        scores = pd.to_numeric(rows["sscd"], errors="coerce").tolist()
+        if any(not math.isfinite(value) for value in scores):
+            raise ProximityError(f"example SSCD scores are invalid: {index}")
+        group = "retained" if included else "discarded"
+        prompts[group].append(
+            {
+                "group": group,
+                "original_index": str(index),
+                "record_id": str(first["record_id"]),
+                "source_row_number": int(first["source_row_number"]),
+                "prompt": str(first["prompt"]),
+                "mean_l2_norm": math.fsum(l2) / num_seeds,
+                "mean_sscd": math.fsum(scores) / num_seeds,
+                "l2_norms": [
+                    float(value) for _, value in sorted(zip(seeds, l2, strict=True))
+                ],
+                "seeds": sorted(int(seed) for seed in seeds),
+            }
+        )
+    chosen: list[dict[str, object]] = []
+    for candidates in prompts.values():
+        candidates.sort(
+            key=lambda row: (
+                row["mean_l2_norm"],
+                row["source_row_number"],
+                row["original_index"],
+            )
+        )
+        count = len(candidates)
+        if not count:
+            continue
+        ranks = (
+            [("median", 0)]
+            if count == 1
+            else [("highest", count - 1), ("lowest", 0)]
+            if count == 2
+            else [("highest", count - 1), ("median", (count - 1) // 2), ("lowest", 0)]
+        )
+        chosen.extend(
+            {**candidates[position], "rank": rank} for rank, position in ranks
+        )
+    return chosen
+
+
+def _example_output_files(output_directory: Path) -> list[Path]:
+    """Find only files owned by this example export, never unrelated files."""
+    directory = output_directory / "examples"
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise ProximityError(f"unsafe example directory: {directory}")
+    owned = [directory / "manifest.json"]
+    for group in ("retained", "discarded"):
+        folder = directory / group
+        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+            raise ProximityError(f"unsafe example directory: {folder}")
+        for rank in ("highest", "median", "lowest"):
+            owned.append(folder / f"{rank}_l2_generated.png")
+            owned.append(folder / f"{rank}_l2_training.png")
+    for path in owned:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ProximityError(f"unsafe example output: {path}")
+    return owned
+
+
+_EXAMPLE_GENERATED_SCALE = 0.75
+_EXAMPLE_TRAINING_MAX_EDGE = 256
+
+
+def _example_png(
+    content: bytes, *, scale: float, max_edge: int | None = None
+) -> tuple[bytes, tuple[int, int], tuple[int, int]]:
+    """Downscale a display-only copy without cropping or upsampling."""
+    try:
+        with Image.open(io.BytesIO(content)) as original:
+            source_size = original.size
+            factor = min(1.0, scale)
+            if max_edge is not None:
+                factor = min(factor, max_edge / max(source_size))
+            size = tuple(max(1, round(edge * factor)) for edge in source_size)
+            with original.resize(size, Image.Resampling.LANCZOS) as preview:
+                buffer = io.BytesIO()
+                preview.save(buffer, format="PNG", optimize=True)
+        return buffer.getvalue(), source_size, size
+    except (OSError, ValueError) as error:
+        raise ProximityError(f"cannot encode proximity example PNG: {error}") from error
+
+
+def _write_examples(paths: ProximityPaths, *, table_path: Path, num_seeds: int) -> None:
+    """Export compact cached montages and their paired targets, without inference."""
+    try:
+        analysis = pd.read_csv(
+            table_path,
+            dtype={"original_index": str},
+            keep_default_na=False,
+            float_precision="round_trip",
+        )
+    except (OSError, ValueError) as error:
+        raise ProximityError(
+            f"cannot read example table {table_path}: {error}"
+        ) from error
+    examples = _example_prompts(analysis, num_seeds=num_seeds)
+    output = paths.output_directory / "examples"
+    previous = _example_output_files(paths.output_directory)
+    cache = GenerationPaths(paths.generation_run)
+    payloads: list[tuple[Path, bytes]] = []
+    entries: list[dict[str, object]] = []
+    if examples:
+        generation = require_generation_run(cache)
+        science = generation["scientific_config"]
+        if science.get("num_seeds") != num_seeds:
+            raise ProximityError("example seed count differs from generation")
+    for example in examples:
+        index = str(example["original_index"])
+        rows = analysis.loc[analysis["original_index"].eq(index)].sort_values("seed")
+        for field in ("generated_image_path", "target_image_sha256"):
+            if field not in rows or rows[field].nunique(dropna=False) != 1:
+                raise ProximityError(f"example {field} differs across seeds: {index}")
+        if (
+            example["seeds"] != science.get("seeds")
+            or "generated_image_tile_index" not in rows
+            or rows["generated_image_tile_index"].tolist() != list(range(num_seeds))
+        ):
+            raise ProximityError(f"example seeds or montage tile order differ: {index}")
+        first = rows.iloc[0]
+        generated = cache.image_path(index)
+        recorded = Path(str(first["generated_image_path"]))
+        if not recorded.is_absolute():
+            recorded = paths.project_root / recorded
+        if recorded.resolve() != generated.resolve():
+            raise ProximityError(
+                f"example montage path differs from generation: {index}"
+            )
+        validation = validate_generation_record(
+            cache,
+            index,
+            expected_scientific_hash=generation["scientific_config_hash"],
+            expected_record_identity={
+                "record_id": example["record_id"],
+                "source_row_number": example["source_row_number"],
+                "prompt_raw": example["prompt"],
+                "target_image_sha256": first["target_image_sha256"],
+            },
+            load_tensors=False,
+            tensor_names=(),
+            require_preview=True,
+            verify_file_hashes=True,
+        )
+        if not validation.valid or validation.metadata is None:
+            raise ProximityError(
+                f"example generation cache is invalid for {index}: "
+                + "; ".join(validation.errors)
+            )
+        metadata = validation.metadata
+        if (
+            metadata.get("seeds") != example["seeds"]
+            or metadata.get("num_seeds") != num_seeds
+        ):
+            raise ProximityError(f"example marker seeds differ: {index}")
+        target_value = metadata.get("target_image_path")
+        if not isinstance(target_value, str) or not target_value:
+            raise ProximityError(f"example paired training path is missing: {index}")
+        target = Path(target_value)
+        if not target.is_absolute():
+            target = paths.project_root / target
+        if target.suffix.lower() != ".png":
+            raise ProximityError(
+                f"example paired training image must be the cached normalized PNG: {index}"
+            )
+        _require_cached_file(
+            target, first["target_image_sha256"], "paired training image"
+        )
+        prefix = Path(str(example["group"])) / f"{example['rank']}_l2"
+        generated_relative = Path(f"{prefix}_generated.png")
+        training_relative = Path(f"{prefix}_training.png")
+        # Read only images; the cached montage already contains every generation seed.
+        generated_bytes, training_bytes = generated.read_bytes(), target.read_bytes()
+        if (
+            hashlib.sha256(generated_bytes).hexdigest()
+            != metadata["preview_image_sha256"]
+            or hashlib.sha256(training_bytes).hexdigest()
+            != first["target_image_sha256"]
+        ):
+            raise ProximityError(f"example image changed during export: {index}")
+        generated_png, generated_source_size, generated_size = _example_png(
+            generated_bytes, scale=_EXAMPLE_GENERATED_SCALE
+        )
+        training_png, training_source_size, training_size = _example_png(
+            training_bytes, scale=1.0, max_edge=_EXAMPLE_TRAINING_MAX_EDGE
+        )
+        if training_size == training_source_size and len(training_png) >= len(
+            training_bytes
+        ):
+            # Keep already-small targets from growing through PNG re-encoding.
+            training_png = training_bytes
+        payloads.extend(
+            [
+                (output / generated_relative, generated_png),
+                (output / training_relative, training_png),
+            ]
+        )
+        entries.append(
+            {
+                **example,
+                "generated_source_path": _display_path(generated, paths.project_root),
+                "training_source_path": _display_path(target, paths.project_root),
+                "generated_image_path": generated_relative.as_posix(),
+                "training_image_path": training_relative.as_posix(),
+                "target_image_sha256": first["target_image_sha256"],
+                "generated_source_sha256": metadata["preview_image_sha256"],
+                "training_source_sha256": first["target_image_sha256"],
+                "generated_image_sha256": hashlib.sha256(generated_png).hexdigest(),
+                "training_image_sha256": hashlib.sha256(training_png).hexdigest(),
+                "generated_source_size": list(generated_source_size),
+                "training_source_size": list(training_source_size),
+                "generated_image_size": list(generated_size),
+                "training_image_size": list(training_size),
+            }
+        )
+    # Validate every image pair before publication; a failed write must not leave
+    # an old manifest describing a partially replaced set of example images.
+    _remove_optional(output / "manifest.json")
+    for destination, content in payloads:
+        atomic_write_bytes(destination, content)
+    current = {destination for destination, _ in payloads}
+    for stale in previous:
+        if stale != output / "manifest.json" and stale not in current:
+            _remove_optional(stale)
+    atomic_write_json(
+        output / "manifest.json",
+        {
+            "ranking": "mean_terminal_l2_across_seeds",
+            "median_rule": "lower_middle_prompt",
+            "image_export": {
+                "generated_scale": _EXAMPLE_GENERATED_SCALE,
+                "training_max_edge": _EXAMPLE_TRAINING_MAX_EDGE,
+                "resampling": "lanczos",
+                "png_optimize": True,
+            },
+            "num_seeds": num_seeds,
+            "source_csv": _display_path(table_path, paths.project_root),
+            "examples": entries,
+        },
+    )
+
+
 def _canonical_score_path(root: Path, run: Path, value: object, expected: Path) -> Path:
     if not isinstance(value, str) or not value:
         raise ProximityError("cached score path is invalid")
@@ -1085,6 +1403,8 @@ def _remove_figure_outputs(output_directory: Path) -> None:
 
     for filename in PROXIMITY_FIGURE_FILENAMES:
         _remove_optional(output_directory / filename)
+    for path in _example_output_files(output_directory):
+        _remove_optional(path)
 
 
 def _latent_shape(value: object) -> tuple[int, int, int]:

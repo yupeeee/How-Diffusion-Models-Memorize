@@ -2144,35 +2144,34 @@ def test_download_cli_rejects_per_host_limit_above_worker_count(
     assert "cannot exceed" in result.stderr
 
 
-def test_run_all_orders_reference_and_experiment_seed_pools(tmp_path: Path) -> None:
+def _run_all_stub(
+    tmp_path: Path,
+    arguments: tuple[str, ...] = (),
+    **environment: str,
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
     project = tmp_path / "pipeline"
     project.mkdir()
-    run_all = project / "run_all.sh"
-    run_all.write_bytes((ROOT / "run_all.sh").read_bytes())
-    run_all.chmod(0o755)
-
-    fake_wrapper = """#!/usr/bin/env bash
+    runner = project / "run_all.sh"
+    runner.write_bytes((ROOT / "run_all.sh").read_bytes())
+    runner.chmod(0o755)
+    fake = """#!/usr/bin/env bash
 set -Eeuo pipefail
 wrapper_name="$(basename -- "$0")"
 {
     printf '%s' "$wrapper_name"
-    if (($# > 0)); then
-        printf '\t%s' "$@"
-    fi
-    printf '\n'
+    printf '\\t%s' "$@"
+    printf '\\n'
 } >> "$RUN_ALL_LOG"
 if [[ "$wrapper_name" == "download_webster.sh" ]]; then
-    printf 'download progress marker\n' >&2
-    exit "${DOWNLOAD_EXIT_CODE:-0}"
+    printf 'download progress marker\\n' >&2
+    exit "$DOWNLOAD_EXIT_CODE"
 fi
-if [[ -n "${FAIL_WRAPPER:-}" \
-    && "$wrapper_name" == "$FAIL_WRAPPER" \
-    && " $* " == *" --model ${FAIL_MODEL:-} "* ]]; then
-    printf 'injected failure for %s\n' "${FAIL_MODEL:-}" >&2
-    exit "${FAIL_EXIT_CODE:-17}"
+if [[ -n "$FAIL_WRAPPER" && "$wrapper_name" == "$FAIL_WRAPPER" \
+    && " $* " == *" --model $FAIL_MODEL "* ]]; then
+    exit "$FAIL_EXIT_CODE"
 fi
 """
-    wrappers = (
+    for name in (
         "download_webster.sh",
         "generate.sh",
         "sscd.sh",
@@ -2181,806 +2180,414 @@ fi
         "unconditional_baseline.sh",
         "lemma2_mean_convergence.sh",
         "corollary3_cfg_amplification.sh",
-    )
-    for wrapper in wrappers:
-        path = project / wrapper
-        path.write_text(fake_wrapper, encoding="utf-8")
-        path.chmod(0o755)
-
-    log = tmp_path / "run-all.log"
-    environment = dict(
-        os.environ,
-        RUN_ALL_LOG=str(log),
-        DOWNLOAD_EXIT_CODE="2",
-    )
+    ):
+        wrapper = project / name
+        wrapper.write_text(fake, encoding="utf-8")
+        wrapper.chmod(0o755)
+    log = tmp_path / "calls.log"
     result = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--download",
-            "--model=sdv2",
+        ["bash", str(runner), *arguments],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "RUN_ALL_LOG": str(log),
+            "DOWNLOAD_EXIT_CODE": "0",
+            "FAIL_WRAPPER": "",
+            "FAIL_MODEL": "",
+            "FAIL_EXIT_CODE": "17",
+            **environment,
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    calls = (
+        [line.split("\t") for line in log.read_text().splitlines()]
+        if log.exists()
+        else []
+    )
+    return result, calls
+
+
+def _pipeline_option(call: list[str], option: str) -> str:
+    return call[call.index(option) + 1]
+
+
+@pytest.mark.parametrize("mode", ("normal", "plot", "overwrite", "download"))
+def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> None:
+    arguments = [] if mode == "normal" else [f"--{mode}"]
+    result, calls = _run_all_stub(tmp_path, arguments, DOWNLOAD_EXIT_CODE="2")
+    assert result.returncode == 0, result.stderr
+    assert "12 configurations" in result.stdout
+    models, schedulers, selections = (
+        ("sdv1", "sdv2", "realvis"),
+        ("ddim", "ddpm"),
+        ("gmm",),
+    )
+    pairs = {(m, s) for m in models for s in schedulers}
+    names = [call[0] for call in calls]
+    for wrapper in ("lemma2_mean_convergence.sh", "corollary3_cfg_amplification.sh"):
+        subset = [call for call in calls if call[0] == wrapper]
+        assert len(subset) == 12
+        assert {
+            (
+                _pipeline_option(c, "--model"),
+                _pipeline_option(c, "--scheduler"),
+                _pipeline_option(c, "--selection-strategy"),
+                "--use-mu" in c,
+            )
+            for c in subset
+        } == {
+            (m, s, strategy, mu)
+            for m, s in pairs
+            for strategy in selections
+            for mu in (False, True)
+        }
+        for call in subset:
+            assert ("--plot" in call) is (mode == "plot")
+            assert "--overwrite" not in call and "--no-mu" not in call
+            assert ("--num-baseline-seeds" in call) is ("--use-mu" in call)
+            if "--use-mu" in call:
+                assert _pipeline_option(call, "--num-baseline-seeds") == "1000"
+    theorem = [c for c in calls if c[0] == "theorem1_loss_recovery.sh"]
+    assert len(theorem) == 6
+    assert [
+        (
+            _pipeline_option(c, "--model"),
+            _pipeline_option(c, "--scheduler"),
+            _pipeline_option(c, "--selection-strategy"),
+        )
+        for c in theorem
+    ] == [
+        (m, s, strategy) for m in models for s in schedulers for strategy in selections
+    ]
+    for call in theorem:
+        assert not {"--use-mu", "--num-baseline-seeds"}.intersection(call)
+        assert ("--overwrite" in call) is (mode == "overwrite")
+        assert ("--plot" in call) is (mode == "plot")
+    if mode == "plot":
+        assert len(calls) == 30
+        assert set(names) == {
+            "theorem1_loss_recovery.sh",
+            "lemma2_mean_convergence.sh",
+            "corollary3_cfg_amplification.sh",
+        }
+        total = 5
+    else:
+        assert len(calls) == 72 + int(mode == "download")
+        assert names.count("download_webster.sh") == int(mode == "download")
+        if mode == "download":
+            assert calls[0][0] == "download_webster.sh"
+            assert "download progress marker" in result.stderr
+        for wrapper in ("generate.sh", "sscd.sh"):
+            subset = [c for c in calls if c[0] == wrapper]
+            assert len(subset) == 12
+            assert {
+                (
+                    _pipeline_option(c, "--model"),
+                    _pipeline_option(c, "--scheduler"),
+                    _pipeline_option(c, "--seed-start"),
+                )
+                for c in subset
+            } == {(m, s, seed) for m, s in pairs for seed in ("0", "20")}
+            assert all(("--overwrite" in c) is (mode == "overwrite") for c in subset)
+        baselines = [c for c in calls if c[0] == "unconditional_baseline.sh"]
+        assert len(baselines) == 6
+        assert {
+            (_pipeline_option(c, "--model"), _pipeline_option(c, "--scheduler"))
+            for c in baselines
+        } == pairs
+        assert all("--selection-strategy" not in c for c in baselines)
+        assert all(("--overwrite" in c) is (mode == "overwrite") for c in baselines)
+        proximity = [c for c in calls if c[0] == "compute_proximity.sh"]
+        assert len(proximity) == 12
+        assert all(c[-1] == "--overwrite" for c in proximity)
+        assert {
+            (
+                _pipeline_option(c, "--model"),
+                _pipeline_option(c, "--scheduler"),
+                _pipeline_option(c, "--selection-strategy"),
+                _pipeline_option(c, "--seed-start"),
+            )
+            for c in proximity
+        } == {
+            (m, s, strategy, seed)
+            for m, s in pairs
+            for strategy in selections
+            for seed in ("0", "20")
+        }
+        total = 12
+    labels = [
+        line.split("]", 1)[0] + "]"
+        for line in result.stdout.splitlines()
+        if line.startswith("[") and line[1:2].isdigit()
+    ]
+    assert labels == [
+        f"[{stage}/{total}]" for _pair in range(6) for stage in range(1, total + 1)
+    ]
+
+
+@pytest.mark.parametrize("scheduler", ("ddim", "ddpm"))
+@pytest.mark.parametrize("centering", (None, "--use-mu", "--no-mu"))
+def test_run_all_explicit_axes_and_seed_forwarding(
+    tmp_path: Path,
+    scheduler: str,
+    centering: str | None,
+) -> None:
+    result, calls = _run_all_stub(
+        tmp_path,
+        (
+            "--model=realvis",
             "--scheduler",
-            "ddpm",
-            "--g=3.25",
+            scheduler,
+            "--selection-strategy",
+            "gmm",
+            "--g=7.500",
             "--T",
-            "12",
-            "--N=4",
-            "--num-loss-seeds=7",
-            "--selection-strategy=spearman",
+            "0012",
+            "--N=0004",
+            "--num-baseline-seeds",
+            "7",
+            "--device= CUDA:2 ",
+            "--num-loss-seeds=0007",
             "--loss-seed",
-            "11",
+            "00011",
             "--downscale",
             "8",
+            *(() if centering is None else (centering,)),
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    centers = [False, True] if centering is None else [centering == "--use-mu"]
+    for call in calls:
+        for option, value in (
+            ("--model", "realvis"),
+            ("--scheduler", scheduler),
+            ("--g", "7.5"),
+            ("--T", "12"),
+            ("--N", "4"),
+        ):
+            assert _pipeline_option(call, option) == value
+        if "--device" in call:
+            assert _pipeline_option(call, "--device") == "cuda:2"
+        if "--selection-strategy" in call:
+            assert _pipeline_option(call, "--selection-strategy") == "gmm"
+    names = [c[0] for c in calls]
+    assert names[:4] == (
+        ["generate.sh", "unconditional_baseline.sh", "sscd.sh", "generate.sh"]
+        if True in centers
+        else ["generate.sh", "sscd.sh", "generate.sh", "sscd.sh"]
+    )
+    assert names.count("unconditional_baseline.sh") == int(True in centers)
+    for wrapper in ("generate.sh", "sscd.sh", "compute_proximity.sh"):
+        assert [
+            _pipeline_option(c, "--seed-start") for c in calls if c[0] == wrapper
+        ] == ["4", "0"]
+    for wrapper in ("lemma2_mean_convergence.sh", "corollary3_cfg_amplification.sh"):
+        subset = [c for c in calls if c[0] == wrapper]
+        assert ["--use-mu" in c for c in subset] == centers
+        assert all(
+            _pipeline_option(c, "--num-baseline-seeds") == "7"
+            for c in subset
+            if "--use-mu" in c
+        )
+    assert names.count("theorem1_loss_recovery.sh") == 1
+    theorem = next(c for c in calls if c[0] == "theorem1_loss_recovery.sh")
+    assert _pipeline_option(theorem, "--num-loss-seeds") == "7"
+    assert _pipeline_option(theorem, "--loss-seed") == "11"
+    assert all("--num-loss-seeds" not in c for c in calls if c is not theorem)
+    assert (
+        names.index("compute_proximity.sh")
+        < names.index("theorem1_loss_recovery.sh")
+        < names.index("lemma2_mean_convergence.sh")
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "models", "schedulers", "selections", "centers"),
+    (
+        (
+            ("--model", "sdv2"),
+            {"sdv2"},
+            {"ddim", "ddpm"},
+            {"gmm"},
+            {False, True},
+        ),
+        (
+            ("--scheduler=ddpm",),
+            {"sdv1", "sdv2", "realvis"},
+            {"ddpm"},
+            {"gmm"},
+            {False, True},
+        ),
+        (
+            ("--selection-strategy=gmm",),
+            {"sdv1", "sdv2", "realvis"},
+            {"ddim", "ddpm"},
+            {"gmm"},
+            {False, True},
+        ),
+        (
+            ("--use-mu",),
+            {"sdv1", "sdv2", "realvis"},
+            {"ddim", "ddpm"},
+            {"gmm"},
+            {True},
+        ),
+        (
+            ("--no-mu",),
+            {"sdv1", "sdv2", "realvis"},
+            {"ddim", "ddpm"},
+            {"gmm"},
+            {False},
+        ),
+    ),
+)
+def test_run_all_filters_only_requested_axes(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+    models: set[str],
+    schedulers: set[str],
+    selections: set[str],
+    centers: set[bool],
+) -> None:
+    result, calls = _run_all_stub(tmp_path, ("--plot", *arguments))
+    assert result.returncode == 0, result.stderr
+    for wrapper in ("lemma2_mean_convergence.sh", "corollary3_cfg_amplification.sh"):
+        subset = [c for c in calls if c[0] == wrapper]
+        expected = {
+            (m, s, strategy, center)
+            for m in models
+            for s in schedulers
+            for strategy in selections
+            for center in centers
+        }
+        assert len(subset) == len(expected)
+        assert {
+            (
+                _pipeline_option(c, "--model"),
+                _pipeline_option(c, "--scheduler"),
+                _pipeline_option(c, "--selection-strategy"),
+                "--use-mu" in c,
+            )
+            for c in subset
+        } == expected
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    ("generate.sh", "lemma2_mean_convergence.sh", "corollary3_cfg_amplification.sh"),
+)
+def test_run_all_stops_matrix_on_failed_stage(tmp_path: Path, wrapper: str) -> None:
+    result, calls = _run_all_stub(
+        tmp_path, ("--N", "1"), FAIL_WRAPPER=wrapper, FAIL_MODEL="sdv2"
+    )
+    assert result.returncode == 17
+    assert calls[-1][0] == wrapper and _pipeline_option(calls[-1], "--model") == "sdv2"
+    assert _pipeline_option(calls[-1], "--scheduler") == "ddim"
+    assert all(_pipeline_option(c, "--model") != "realvis" for c in calls)
+    assert "pipeline failed for model sdv2 / scheduler ddim" in result.stderr
+    assert "(exit 17)" in result.stderr
+
+
+@pytest.mark.parametrize("exit_code", ("1", "17"))
+def test_run_all_stops_after_failed_download(tmp_path: Path, exit_code: str) -> None:
+    result, calls = _run_all_stub(
+        tmp_path,
+        (
+            "--download",
             "--direct-workers=12",
+            "--direct-attempts=1",
+            "--per-host-concurrency=3",
+        ),
+        DOWNLOAD_EXIT_CODE=exit_code,
+    )
+    assert result.returncode == int(exit_code)
+    assert calls == [
+        [
+            "download_webster.sh",
+            "--direct-workers",
+            "12",
             "--direct-attempts",
             "1",
-            "--per-host-concurrency=3",
-            "--device=cuda:2",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+            "--per-host-concurrency",
+            "3",
+        ]
+    ]
 
-    reference = (
-        "\t--model\tsdv2\t--scheduler\tddpm\t--g\t3.25"
-        "\t--T\t12\t--N\t4\t--seed-start\t4"
+
+@pytest.mark.parametrize("plot", (False, True))
+def test_run_all_only_skips_corollary_for_nonstandard_guidance(
+    tmp_path: Path, plot: bool
+) -> None:
+    result, calls = _run_all_stub(
+        tmp_path,
+        (
+            "--model",
+            "sdv2",
+            "--scheduler=ddpm",
+            "--selection-strategy=gmm",
+            "--g=3.25",
+            "--no-mu",
+            *(("--plot",) if plot else ()),
+        ),
     )
-    experiment = (
-        "\t--model\tsdv2\t--scheduler\tddpm\t--g\t3.25"
-        "\t--T\t12\t--N\t4\t--seed-start\t0"
-    )
-    default_selection = "\t--selection-strategy\tspearman"
-    spearman_selection = "\t--selection-strategy\tspearman"
-    proximity_overwrite = "\t--overwrite"
     assert result.returncode == 0, result.stderr
-    assert log.read_text(encoding="utf-8").splitlines() == [
-        (
-            "download_webster.sh\t--direct-workers\t12"
-            "\t--direct-attempts\t1\t--per-host-concurrency\t3"
-        ),
-        f"generate.sh{reference}\t--device\tcuda:2\t--downscale\t8",
-        f"sscd.sh{reference}\t--device\tcuda:2",
-        (f"compute_proximity.sh{reference}{spearman_selection}{proximity_overwrite}"),
-        f"generate.sh{experiment}\t--device\tcuda:2\t--downscale\t8",
-        f"sscd.sh{experiment}\t--device\tcuda:2",
-        (f"compute_proximity.sh{experiment}{spearman_selection}{proximity_overwrite}"),
-        (
-            "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddpm"
-            "\t--g\t3.25\t--T\t12\t--N\t4"
-            "\t--selection-strategy\tspearman\t--num-loss-seeds\t7"
-            "\t--loss-seed\t11\t--device\tcuda:2"
-        ),
-    ]
-    stage_offsets = [result.stdout.index(f"[{stage}/11]") for stage in range(1, 12)]
-    assert stage_offsets == sorted(stage_offsets)
-    assert "retryable records" not in result.stderr
-    assert "download progress marker" in result.stderr
-    assert "reference (seeds 4-7)" in result.stdout
-    assert "[3/11] Skipping shared unconditional baseline" in result.stdout
-    assert "[10/11] Skipping Lemma 2" in result.stdout
-    assert "[11/11] Skipping Corollary 3" in result.stdout
-
-    log.unlink()
-    environment["DOWNLOAD_EXIT_CODE"] = "1"
-    failed = subprocess.run(
-        ["bash", str(run_all), "--download"],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert failed.returncode == 1
-    assert log.read_text(encoding="utf-8").splitlines() == [
-        (
-            "download_webster.sh\t--direct-workers\t24"
-            "\t--direct-attempts\t2\t--per-host-concurrency\t4"
-        )
-    ]
-
-    log.unlink()
-    skipped = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--scheduler",
-            "ddpm",
-            "--g",
-            "3.25",
-            "--T",
-            "12",
-            "--N",
-            "1",
-            "--downscale",
-            "8",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    skipped_lines = log.read_text(encoding="utf-8").splitlines()
-    assert skipped.returncode == 0, skipped.stderr
-    expected_compatible_stage_wrappers = [
-        "generate.sh",
-        "sscd.sh",
-        "compute_proximity.sh",
-        "generate.sh",
-        "sscd.sh",
-        "compute_proximity.sh",
-        "theorem1_loss_recovery.sh",
-        "lemma2_mean_convergence.sh",
-        "corollary3_cfg_amplification.sh",
-    ]
-    expected_skipped_lines = []
-    for model in ("sdv1", "sdv2", "realvis"):
-        model_reference = (
-            f"\t--model\t{model}\t--scheduler\tddpm\t--g\t3.25"
-            "\t--T\t12\t--N\t1\t--seed-start\t1"
-        )
-        model_experiment = (
-            f"\t--model\t{model}\t--scheduler\tddpm\t--g\t3.25"
-            "\t--T\t12\t--N\t1\t--seed-start\t0"
-        )
-        expected_skipped_lines.extend(
-            [
-                f"generate.sh{model_reference}\t--device\tauto\t--downscale\t8",
-                f"sscd.sh{model_reference}\t--device\tauto",
-                (
-                    f"compute_proximity.sh{model_reference}{default_selection}"
-                    f"{proximity_overwrite}"
-                ),
-                f"generate.sh{model_experiment}\t--device\tauto\t--downscale\t8",
-                f"sscd.sh{model_experiment}\t--device\tauto",
-                (
-                    f"compute_proximity.sh{model_experiment}{default_selection}"
-                    f"{proximity_overwrite}"
-                ),
-                (
-                    f"theorem1_loss_recovery.sh\t--model\t{model}"
-                    "\t--scheduler\tddpm\t--g\t3.25\t--T\t12\t--N\t1"
-                    "\t--selection-strategy\tspearman\t--num-loss-seeds\t20"
-                    "\t--loss-seed\t0"
-                    "\t--device\tauto"
-                ),
-            ]
-        )
-    assert skipped_lines == expected_skipped_lines
-    assert all(not line.startswith("download_webster.sh") for line in skipped_lines)
-    assert all(skipped.stdout.count(f"[{stage}/10]") == 3 for stage in range(1, 11))
-    assert skipped.stdout.count("Webster data preparation skipped") == 3
-    assert "download progress marker" not in skipped.stderr
-    assert skipped.stdout.count("Running Theorem 1 loss–recovery experiment") == 3
-    assert skipped.stdout.count("[2/10] Skipping shared unconditional baseline") == 3
-    assert skipped.stdout.count("[9/10] Skipping Lemma 2") == 3
-    assert skipped.stdout.count("[10/10] Skipping Corollary 3") == 3
-    assert "All-model pipeline complete." in skipped.stdout
-
-    log.unlink()
-    default_run = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--model",
-            "realvis",
-            "--num-baseline-seeds",
-            "7",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    default_lines = log.read_text(encoding="utf-8").splitlines()
-    assert default_run.returncode == 0, default_run.stderr
-    assert [line.split("\t", 1)[0] for line in default_lines] == [
-        "generate.sh",
-        "sscd.sh",
-        "compute_proximity.sh",
-        "generate.sh",
-        "sscd.sh",
-        "compute_proximity.sh",
-        "theorem1_loss_recovery.sh",
-        "lemma2_mean_convergence.sh",
-        "corollary3_cfg_amplification.sh",
-    ]
+    assert sum(c[0] == "lemma2_mean_convergence.sh" for c in calls) == 1
     assert all(
-        not line.startswith("unconditional_baseline.sh\t") for line in default_lines
+        c[0] not in {"corollary3_cfg_amplification.sh", "unconditional_baseline.sh"}
+        for c in calls
     )
-    assert all("\t--use-mu" not in line for line in default_lines)
-    assert [
-        line.split("\t", 1)[0]
-        for line in default_lines
-        if line.endswith(proximity_overwrite)
-    ] == ["compute_proximity.sh", "compute_proximity.sh"]
-    assert default_lines[-3] == (
-        "theorem1_loss_recovery.sh\t--model\trealvis\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
-        "\t--num-loss-seeds\t20"
-        "\t--loss-seed\t0\t--device\tauto"
-    )
-    assert default_lines[-2] == (
-        "lemma2_mean_convergence.sh\t--model\trealvis\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
-        "\t--device\tauto"
-    )
-    assert default_lines[-1] == (
-        "corollary3_cfg_amplification.sh\t--model\trealvis\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
-        "\t--device\tauto"
-    )
-    stage_offsets = [
-        default_run.stdout.index(f"[{stage}/10]") for stage in range(1, 11)
-    ]
-    assert stage_offsets == sorted(stage_offsets)
-    assert "[2/10] Skipping shared unconditional baseline" in default_run.stdout
-    assert (
-        "[9/10] Computing zero-centered Lemma 2 from cached prompt trajectories"
-        in default_run.stdout
-    )
-    assert "fresh Gaussian evaluations" not in default_run.stdout
+    assert "Skipping Corollary 3: requires --g 7.5" in result.stdout
+    assert "Skipping Lemma 2" not in result.stdout
 
-    log.unlink()
-    custom_normal = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--use-mu",
-            "--model",
-            "sdv2",
-            "--scheduler",
-            "ddim",
-            "--g",
-            "7.5",
-            "--T",
-            "12",
-            "--N",
-            "4",
-            "--num-baseline-seeds",
-            "7",
-            "--selection-strategy",
-            "spearman",
-            "--device",
-            "cuda:2",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert custom_normal.returncode == 0, custom_normal.stderr
-    custom_normal_lines = log.read_text(encoding="utf-8").splitlines()
-    assert (
-        "unconditional_baseline.sh\t--model\tsdv2\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t12\t--N\t4\t--num-baseline-seeds\t7"
-        "\t--device\tcuda:2" in custom_normal_lines
-    )
-    assert (
-        "lemma2_mean_convergence.sh\t--model\tsdv2\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t12\t--N\t4"
-        "\t--selection-strategy\tspearman\t--use-mu"
-        "\t--num-baseline-seeds\t7\t--device\tcuda:2" in custom_normal_lines
-    )
-    assert (
-        "corollary3_cfg_amplification.sh\t--model\tsdv2\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t12\t--N\t4"
-        "\t--selection-strategy\tspearman\t--use-mu"
-        "\t--num-baseline-seeds\t7\t--device\tcuda:2" in custom_normal_lines
-    )
-    assert (
-        "[2/10] Computing/reusing shared unconditional baseline" in custom_normal.stdout
-    )
-    assert "[9/10] Computing mu-centered Lemma 2" in custom_normal.stdout
 
-    log.unlink()
-    custom_plot = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--plot",
-            "--use-mu",
-            "--model",
-            "sdv2",
-            "--scheduler",
-            "ddim",
-            "--g",
-            "7.5",
-            "--T",
-            "12",
-            "--N",
-            "4",
-            "--num-baseline-seeds",
-            "7",
-            "--selection-strategy",
-            "spearman",
-            "--device",
-            "cuda:2",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert custom_plot.returncode == 0, custom_plot.stderr
-    custom_plot_lines = log.read_text(encoding="utf-8").splitlines()
-    lemma_plot_lines = [
-        line
-        for line in custom_plot_lines
-        if line.startswith("lemma2_mean_convergence.sh\t")
-    ]
-    assert lemma_plot_lines == [
-        "lemma2_mean_convergence.sh\t--model\tsdv2\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t12\t--N\t4\t--selection-strategy\tspearman"
-        "\t--use-mu\t--num-baseline-seeds\t7\t--plot"
-    ]
-    corollary_plot_lines = [
-        line
-        for line in custom_plot_lines
-        if line.startswith("corollary3_cfg_amplification.sh\t")
-    ]
-    assert corollary_plot_lines == [
-        "corollary3_cfg_amplification.sh\t--model\tsdv2\t--scheduler\tddim"
-        "\t--g\t7.5\t--T\t12\t--N\t4\t--selection-strategy\tspearman"
-        "\t--use-mu\t--num-baseline-seeds\t7\t--plot"
-    ]
-    assert all(
-        "\t--device\t" not in line for line in lemma_plot_lines + corollary_plot_lines
-    )
-    assert all(
-        not line.startswith("unconditional_baseline.sh\t") for line in custom_plot_lines
-    )
-
-    frozen = project / (
-        "data/webster/selection/realisticvision/"
-        "realvis_ddpm_g3.25_T12_N4/spearman/reference_S4_N4"
-    )
-    frozen.mkdir(parents=True)
-    log.unlink()
-    reused = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--model",
-            "realvis",
-            "--scheduler",
-            "ddpm",
-            "--g",
-            "+3.250e0",
-            "--T",
-            "12",
-            "--N",
-            "4",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    reused_lines = log.read_text(encoding="utf-8").splitlines()
-    assert reused.returncode == 0, reused.stderr
-    normalized_reference = (
-        "\t--model\trealvis\t--scheduler\tddpm\t--g\t3.25"
-        "\t--T\t12\t--N\t4\t--seed-start\t4"
-    )
-    normalized_experiment = (
-        "\t--model\trealvis\t--scheduler\tddpm\t--g\t3.25"
-        "\t--T\t12\t--N\t4\t--seed-start\t0"
-    )
-    assert reused_lines == [
-        f"generate.sh{normalized_reference}\t--device\tauto\t--downscale\t4",
-        f"sscd.sh{normalized_reference}\t--device\tauto",
-        (
-            f"compute_proximity.sh{normalized_reference}{default_selection}"
-            f"{proximity_overwrite}"
-        ),
-        f"generate.sh{normalized_experiment}\t--device\tauto\t--downscale\t4",
-        f"sscd.sh{normalized_experiment}\t--device\tauto",
-        (
-            f"compute_proximity.sh{normalized_experiment}{default_selection}"
-            f"{proximity_overwrite}"
-        ),
-        (
-            "theorem1_loss_recovery.sh\t--model\trealvis"
-            "\t--scheduler\tddpm\t--g\t3.25\t--T\t12\t--N\t4"
-            "\t--selection-strategy\tspearman\t--num-loss-seeds\t20"
-            "\t--loss-seed\t0"
-            "\t--device\tauto"
-        ),
-    ]
-    stage_offsets = [reused.stdout.index(f"[{stage}/10]") for stage in range(1, 11)]
-    assert stage_offsets == sorted(stage_offsets)
-    assert "Checking/resuming proximity-selection reference" in reused.stdout
-    assert "Checking/resuming proximity-selection SSCD" in reused.stdout
-    assert "[2/10] Skipping shared unconditional baseline" in reused.stdout
-    assert "[9/10] Skipping Lemma 2" in reused.stdout
-    assert "[10/10] Skipping Corollary 3" in reused.stdout
-    frozen.rmdir()
-
-    log.unlink()
-    plot_only = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--plot",
-            "--model",
-            "sdv2",
-            "--scheduler",
-            "ddpm",
-            "--g",
-            "+3.250e0",
-            "--T",
-            "12",
-            "--N",
-            "4",
-            "--selection-strategy",
-            "gmm-evidence",
-            "--num-loss-seeds",
-            "6",
-            "--loss-seed=13",
-            "--device",
-            "  CUDA:2  ",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert plot_only.returncode == 0, plot_only.stderr
-    assert log.read_text(encoding="utf-8").splitlines() == [
-        "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddpm"
-        "\t--g\t3.25\t--T\t12\t--N\t4\t--selection-strategy\tgmm-evidence"
-        "\t--num-loss-seeds\t6"
-        "\t--loss-seed\t13\t--device\tcuda:2\t--plot",
-    ]
-    assert "[1/3]" in plot_only.stdout
-    assert "[2/3] Skipping Lemma 2" in plot_only.stdout
-    assert "[3/3] Skipping Corollary 3" in plot_only.stdout
-    assert "unconditional_baseline.sh" not in log.read_text(encoding="utf-8")
-
-    log.unlink()
-    all_plots = subprocess.run(
-        ["bash", str(run_all), "--plot"],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert all_plots.returncode == 0, all_plots.stderr
-    assert log.read_text(encoding="utf-8").splitlines() == [
-        (
-            "theorem1_loss_recovery.sh\t--model\tsdv1\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
-            "\t--num-loss-seeds\t20"
-            "\t--loss-seed\t0\t--device\tauto\t--plot"
-        ),
-        (
-            "lemma2_mean_convergence.sh\t--model\tsdv1\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20"
-            "\t--selection-strategy\tspearman\t--plot"
-        ),
-        (
-            "corollary3_cfg_amplification.sh\t--model\tsdv1\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20"
-            "\t--selection-strategy\tspearman\t--plot"
-        ),
-        (
-            "theorem1_loss_recovery.sh\t--model\tsdv2\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
-            "\t--num-loss-seeds\t20"
-            "\t--loss-seed\t0\t--device\tauto\t--plot"
-        ),
-        (
-            "lemma2_mean_convergence.sh\t--model\tsdv2\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20"
-            "\t--selection-strategy\tspearman\t--plot"
-        ),
-        (
-            "corollary3_cfg_amplification.sh\t--model\tsdv2\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20"
-            "\t--selection-strategy\tspearman\t--plot"
-        ),
-        (
-            "theorem1_loss_recovery.sh\t--model\trealvis\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20\t--selection-strategy\tspearman"
-            "\t--num-loss-seeds\t20"
-            "\t--loss-seed\t0\t--device\tauto\t--plot"
-        ),
-        (
-            "lemma2_mean_convergence.sh\t--model\trealvis\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20"
-            "\t--selection-strategy\tspearman\t--plot"
-        ),
-        (
-            "corollary3_cfg_amplification.sh\t--model\trealvis\t--scheduler\tddim"
-            "\t--g\t7.5\t--T\t50\t--N\t20"
-            "\t--selection-strategy\tspearman\t--plot"
-        ),
-    ]
-    assert all_plots.stdout.count("[1/3]") == 3
-    assert all_plots.stdout.count("[2/3]") == 3
-    assert all_plots.stdout.count("[3/3]") == 3
-    assert "All-model pipeline complete." in all_plots.stdout
-
-    log.unlink()
-    all_defaults = subprocess.run(
-        ["bash", str(run_all)],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert all_defaults.returncode == 0, all_defaults.stderr
-    all_default_lines = log.read_text(encoding="utf-8").splitlines()
-    expected_default_wrappers = expected_compatible_stage_wrappers
-    assert [line.split("\t", 1)[0] for line in all_default_lines] == (
-        expected_default_wrappers * 3
-    )
-    assert [line.split("\t")[2] for line in all_default_lines] == (
-        ["sdv1"] * 9 + ["sdv2"] * 9 + ["realvis"] * 9
-    )
-
-    log.unlink()
-    failure_environment = dict(
-        environment,
-        FAIL_WRAPPER="generate.sh",
-        FAIL_MODEL="sdv2",
-        FAIL_EXIT_CODE="17",
-    )
-    failed_model = subprocess.run(
-        ["bash", str(run_all), "--N", "1"],
-        cwd=tmp_path,
-        env=failure_environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    failed_model_lines = log.read_text(encoding="utf-8").splitlines()
-    assert failed_model.returncode == 17
-    assert [line.split("\t", 1)[0] for line in failed_model_lines] == [
-        *expected_compatible_stage_wrappers,
-        "generate.sh",
-    ]
-    assert [line.split("\t")[2] for line in failed_model_lines] == (
-        ["sdv1"] * 9 + ["sdv2"]
-    )
-    assert "pipeline failed for model sdv2 (exit 17)" in failed_model.stderr
-    assert "\t--model\trealvis\t" not in log.read_text(encoding="utf-8")
-
-    log.unlink()
-    environment["DOWNLOAD_EXIT_CODE"] = "0"
-    downloaded = subprocess.run(
-        ["bash", str(run_all), "--download", "--N", "1"],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    downloaded_lines = log.read_text(encoding="utf-8").splitlines()
-    assert downloaded.returncode == 0, downloaded.stderr
-    assert [line.split("\t", 1)[0] for line in downloaded_lines].count(
-        "download_webster.sh"
-    ) == 1
-    assert [line.split("\t")[2] for line in downloaded_lines[1:]] == (
-        ["sdv1"] * 9 + ["sdv2"] * 9 + ["realvis"] * 9
-    )
-
-    log.unlink()
-    large_seed_count = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--model",
-            "sdv1",
-            "--scheduler",
-            "ddpm",
-            "--N",
-            "21",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert large_seed_count.returncode == 0, large_seed_count.stderr
-    large_seed_count_lines = log.read_text(encoding="utf-8").splitlines()
-    assert "\t--N\t21\t--seed-start\t21" in large_seed_count_lines[0]
-    assert "\t--N\t21\t--seed-start\t0" in large_seed_count_lines[3]
-    assert large_seed_count_lines[-1] == (
-        "theorem1_loss_recovery.sh\t--model\tsdv1\t--scheduler\tddpm"
-        "\t--g\t7.5\t--T\t50\t--N\t21\t--selection-strategy\tspearman"
-        "\t--num-loss-seeds\t20"
-        "\t--loss-seed\t0\t--device\tauto"
-    )
-    assert "[2/10] Skipping shared unconditional baseline" in large_seed_count.stdout
-    assert "[9/10] Skipping Lemma 2" in large_seed_count.stdout
-    assert "[10/10] Skipping Corollary 3" in large_seed_count.stdout
-
-    log.unlink()
-    overwritten = subprocess.run(
-        [
-            "bash",
-            str(run_all),
-            "--overwrite",
-            "--model",
-            "sdv1",
-            "--N",
-            "1",
-        ],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    overwritten_lines = log.read_text(encoding="utf-8").splitlines()
-    assert overwritten.returncode == 0, overwritten.stderr
-    assert [line.split("\t", 1)[0] for line in overwritten_lines] == (
-        expected_compatible_stage_wrappers
-    )
-    for line in overwritten_lines[:6]:
-        assert line.endswith("\t--overwrite")
-    assert all("--overwrite" not in line for line in overwritten_lines[6:])
-    assert all(
-        not line.startswith("unconditional_baseline.sh\t") for line in overwritten_lines
-    )
-    assert "Regenerating proximity-selection reference" in overwritten.stdout
-    assert "Regenerating experiment trajectories" in overwritten.stdout
-
-    log.unlink()
-    all_overwritten = subprocess.run(
-        ["bash", str(run_all), "--overwrite", "--N", "1"],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    all_overwritten_lines = log.read_text(encoding="utf-8").splitlines()
-    assert all_overwritten.returncode == 0, all_overwritten.stderr
-    assert len(all_overwritten_lines) == 27
-    assert sum(line.endswith("\t--overwrite") for line in all_overwritten_lines) == 18
-    assert all(
-        "--overwrite" not in line
-        for line in all_overwritten_lines
-        if line.startswith(
-            (
-                "theorem1_loss_recovery.sh",
-                "lemma2_mean_convergence.sh",
-                "corollary3_cfg_amplification.sh",
-            )
-        )
-    )
-
-    log.unlink()
-    incompatible_plot = subprocess.run(
-        ["bash", str(run_all), "--plot", "--overwrite", "--model", "sdv1"],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert incompatible_plot.returncode == 2
-    assert not log.exists()
-    assert "cannot be combined with --overwrite" in incompatible_plot.stderr
-
-    invalid_device = subprocess.run(
-        ["bash", str(run_all), "--device", "cuda:all"],
-        cwd=tmp_path,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert invalid_device.returncode == 2
-    assert not log.exists(), "invalid device must fail before any stage"
-    assert "invalid --device" in invalid_device.stderr
-
-    for invalid_n in ("0", "not-an-integer", "4611686018427387905"):
-        invalid = subprocess.run(
-            ["bash", str(run_all), "--N", invalid_n],
-            cwd=tmp_path,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        assert invalid.returncode == 2
-        assert not log.exists(), "invalid N must fail before any stage"
-        assert "invalid --N" in invalid.stderr
-
-    for invalid_baseline_seeds in (
-        "0",
-        "not-an-integer",
-        "9223372036854775789",
-    ):
-        invalid = subprocess.run(
-            [
-                "bash",
-                str(run_all),
-                "--N",
-                "20",
-                "--num-baseline-seeds",
-                invalid_baseline_seeds,
-            ],
-            cwd=tmp_path,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        assert invalid.returncode == 2
-        assert not log.exists(), (
-            "invalid baseline seed count must fail before any stage"
-        )
-        assert "invalid --num-baseline-seeds" in invalid.stderr
-
-    for invalid_guidance in ("nan", "inf", "1e999999"):
-        invalid = subprocess.run(
-            ["bash", str(run_all), "--g", invalid_guidance],
-            cwd=tmp_path,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        assert invalid.returncode == 2
-        assert not log.exists(), "invalid guidance must fail before any stage"
-        assert "invalid --g" in invalid.stderr
-
-    invalid_theory_values = (
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("--N", "0"),
+        ("--N", "not-an-integer"),
+        ("--N", "4611686018427387905"),
+        ("--num-baseline-seeds", "0"),
+        ("--num-baseline-seeds", "not-an-integer"),
+        ("--num-baseline-seeds", "9223372036854775789"),
         ("--num-loss-seeds", "0"),
         ("--num-loss-seeds", "not-an-integer"),
         ("--loss-seed", "-1"),
         ("--loss-seed", "not-an-integer"),
         ("--loss-seed", "9223372036854775808"),
-    )
-    for option, value in invalid_theory_values:
-        invalid = subprocess.run(
-            ["bash", str(run_all), option, value],
-            cwd=tmp_path,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        assert invalid.returncode == 2
-        assert not log.exists(), f"invalid {option} must fail before any stage"
-        assert f"invalid {option}" in invalid.stderr
+        ("--g", "nan"),
+        ("--g", "inf"),
+        ("--g", "1e999999"),
+        ("--T", "0"),
+        ("--T", "not-an-integer"),
+        ("--device", "cuda:all"),
+        ("--model", "unknown"),
+        ("--scheduler", "unknown"),
+        ("--selection-strategy", "kmeans"),
+        ("--evaluation-source", "unsupported"),
+        ("--plot", "--overwrite"),
+        ("--plot", "--download"),
+        ("--use-mu", "--no-mu"),
+        ("--no-mu", "--use-mu"),
+        ("--download", "--direct-workers", "65"),
+        ("--download", "--direct-attempts", "6"),
+        ("--download", "--per-host-concurrency", "9"),
+        ("--download", "--direct-workers", "1", "--per-host-concurrency", "2"),
+        ("--N",),
+        ("--N=",),
+        ("--plot=true",),
+        ("--unknown",),
+    ),
+)
+def test_run_all_rejects_invalid_matrix_before_any_stage(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+) -> None:
+    result, calls = _run_all_stub(tmp_path, arguments)
+    assert result.returncode == 2 and calls == []
+    assert "run_all.sh:" in result.stderr
 
 
 def test_plain_run_all_rebuilds_stale_cache_only_proximity(tmp_path: Path) -> None:
@@ -3031,7 +2638,19 @@ fi
 
     log = tmp_path / "run-all.log"
     result = subprocess.run(
-        ["bash", str(run_all), "--model", "sdv1", "--N", "1"],
+        [
+            "bash",
+            str(run_all),
+            "--model",
+            "sdv1",
+            "--N",
+            "1",
+            "--scheduler",
+            "ddim",
+            "--selection-strategy",
+            "gmm",
+            "--no-mu",
+        ],
         cwd=tmp_path,
         env=dict(os.environ, RUN_ALL_LOG=str(log)),
         capture_output=True,
@@ -3045,9 +2664,9 @@ fi
     assert [line.split("\t", 1)[0] for line in lines] == [
         "generate.sh",
         "sscd.sh",
-        "compute_proximity.sh",
         "generate.sh",
         "sscd.sh",
+        "compute_proximity.sh",
         "compute_proximity.sh",
         "theorem1_loss_recovery.sh",
         "lemma2_mean_convergence.sh",
@@ -3074,49 +2693,71 @@ def test_run_all_documents_default_selection_strategy(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "--selection-strategy NAME" in result.stdout
-    assert "gmm, gmm-evidence, or spearman (default: spearman)" in result.stdout
-    assert "--overwrite" in result.stdout
-    assert "only option that forces their regeneration" in result.stdout
-    assert "shared baseline when --use-mu is passed" in result.stdout
-    assert "--num-baseline-seeds B" in result.stdout
-    assert "Baseline Gaussian seeds N..N+B-1 used with --use-mu" in result.stdout
-    assert "(default: 1000)" in result.stdout
-    assert "--use-mu" in result.stdout
-    assert "use zero as their center by default" in result.stdout
-    assert "With --use-mu, the shared baseline" in result.stdout
-    assert "B independent Gaussian" in result.stdout
-    assert "seeds N..N+B-1" in result.stdout
-    assert "empty-condition model branch directly" in result.stdout
-    assert "never traverses prompts" in result.stdout
-    assert "SSCD, categories, memorization labels" in result.stdout
-    assert "exact frozen selection" in result.stdout
-    assert "every included prompt" in result.stdout
-    assert "experiment seed" in result.stdout
-    assert "0..N-1, and cached DDIM timestep" in result.stdout
-    assert "P*N*T measurements relative to" in result.stdout
-    assert "cached x_t and unconditional epsilon" in result.stdout
-    assert (
-        "without drawing fresh Gaussian latents or running model inference"
-        in result.stdout
-    )
-    assert "cache-only workers shard whole selected prompts" in result.stdout
-    assert "fresh Gaussian evaluations" not in result.stdout
-    assert "reuses the same Gaussian latent across" not in result.stdout
-    assert "--num-timesteps" not in result.stdout
-    assert "actual initial DDIM timestep" in result.stdout
-    assert "guidance scale 7.5" in result.stdout
-    assert "both cached prediction" in result.stdout
-    assert "same-seed target SSCD" in result.stdout
-    assert "optional baseline retains a numbered stage" in result.stdout
-    assert "numbered Corollary 3 skip" in result.stdout
-    assert "--num-lemma2-seeds" not in result.stdout
-    assert "--lemma2-seed-start" not in result.stdout
+    help_text = " ".join(result.stdout.split())
+    for snippet in (
+        "default: all three",
+        "default: both schedulers",
+        "--selection-strategy NAME",
+        "gmm only (default: gmm)",
+        "12 configurations",
+        "--use-mu",
+        "--no-mu",
+        "mutually exclusive",
+        "--num-baseline-seeds B",
+        "Baseline Gaussian seeds N..N+B-1 (default: 1000)",
+        "only option that forces their regeneration",
+        "once per model/scheduler",
+        "Theorem 1 runs once per model/scheduler",
+        "actual initial cached scheduler timestep",
+        "B independent Gaussian",
+        "empty-condition model branch directly",
+        "never traverses prompts",
+        "SSCD, categories, memorization labels",
+        "exact frozen selection",
+        "every included prompt",
+        "experiment seed 0..N-1, and cached timestep",
+        "--evaluation-source SOURCE",
+        "gaussian, trajectory, or both (default: both)",
+        "same independent initial noises at every saved timestep",
+        "N*T observations",
+        "P*N*T observations per source",
+        "trajectory reductions reuse cached predictions",
+        "guidance scale 7.5",
+        "same-seed target SSCD",
+        "numbered Corollary 3 skip",
+        "Both DDIM and DDPM are supported",
+        "Any failed stage stops the matrix",
+    ):
+        assert snippet in help_text
+    for obsolete in (
+        "--num-timesteps",
+        "--num-lemma2-seeds",
+        "--lemma2-seed-start",
+        "spearman",
+        "gmm-evidence",
+        "24 configurations",
+    ):
+        assert obsolete not in help_text
 
 
-def test_run_all_rejects_unknown_selection_strategy(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("--selection-strategy", "spearman"),
+        ("--selection-strategy=spearman",),
+        ("--selection-strategy", "gmm-evidence"),
+        ("--selection-strategy=gmm-evidence",),
+        ("--selection-strategy", "all"),
+        ("--selection-strategy=all",),
+        ("--selection-strategy", "kmeans"),
+        ("--selection-strategy=kmeans",),
+    ),
+)
+def test_run_all_rejects_non_gmm_selection_strategy(
+    tmp_path: Path, arguments: tuple[str, ...]
+) -> None:
     result = subprocess.run(
-        ["bash", str(ROOT / "run_all.sh"), "--selection-strategy", "kmeans"],
+        ["bash", str(ROOT / "run_all.sh"), *arguments],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -3126,6 +2767,95 @@ def test_run_all_rejects_unknown_selection_strategy(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "invalid --selection-strategy" in result.stderr
+
+
+@pytest.mark.parametrize("source", ("gaussian", "trajectory", "both"))
+@pytest.mark.parametrize("plot_only", (False, True))
+def test_run_all_routes_noise_evaluation_to_all_theory_stages(
+    tmp_path: Path, source: str, plot_only: bool
+) -> None:
+    project = tmp_path / "pipeline"
+    project.mkdir()
+    runner = project / "run_all.sh"
+    runner.write_bytes((ROOT / "run_all.sh").read_bytes())
+    runner.chmod(0o755)
+    theory = {
+        "theorem1_loss_recovery.sh",
+        "lemma2_mean_convergence.sh",
+        "corollary3_cfg_amplification.sh",
+    }
+    wrappers = theory | {
+        "generate.sh",
+        "sscd.sh",
+        "compute_proximity.sh",
+        "unconditional_baseline.sh",
+    }
+    fake = """#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s' "$(basename -- "$0")" >> "$RUN_ALL_LOG"
+printf '\\t%s' "$@" >> "$RUN_ALL_LOG"
+printf '\\n' >> "$RUN_ALL_LOG"
+"""
+    for name in wrappers:
+        wrapper = project / name
+        wrapper.write_text(fake, encoding="utf-8")
+        wrapper.chmod(0o755)
+    log = tmp_path / "calls.log"
+    arguments = [
+        "bash",
+        str(runner),
+        "--model",
+        "sdv1",
+        f"--evaluation-source={source}",
+        "--use-mu",
+    ]
+    if plot_only:
+        arguments.append("--plot")
+    result = subprocess.run(
+        arguments,
+        cwd=tmp_path,
+        env={**os.environ, "RUN_ALL_LOG": str(log)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [line.split("\t") for line in log.read_text(encoding="utf-8").splitlines()]
+    assert {call[0] for call in calls if call[0] in theory} == theory
+    for call in calls:
+        if call[0] in theory:
+            actual = (
+                call[call.index("--evaluation-source") + 1]
+                if "--evaluation-source" in call
+                else "both"
+            )
+            assert actual == source
+            assert ("--plot" in call) is plot_only
+        else:
+            assert "--evaluation-source" not in call
+    if plot_only:
+        assert {call[0] for call in calls} == theory
+
+
+def test_run_all_rejects_unknown_noise_evaluation_source(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "run_all.sh"),
+            "--model",
+            "sdv1",
+            "--evaluation-source",
+            "unsupported",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "invalid --evaluation-source" in result.stderr
 
 
 def _imports(tree: ast.AST) -> set[str]:
@@ -3138,21 +2868,21 @@ def _imports(tree: ast.AST) -> set[str]:
     return values
 
 
-def test_lemma2_source_is_cached_prompt_major_without_model_inference() -> None:
+def test_lemma2_trajectory_reducers_do_not_run_model_inference() -> None:
     path = ROOT / "scripts/lemma2_mean_convergence.py"
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
-    imports = _imports(tree)
-    assert imports.isdisjoint(
-        {
-            "utils.models.loading",
-            "utils.models.sampling",
-            "utils.models.schedulers",
-        }
-    )
+    reducers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_load_cached_trajectory", "_centered_trajectory_distances"}
+    ]
+    assert len(reducers) == 2
     calls = {
         node.func.id if isinstance(node.func, ast.Name) else node.func.attr
-        for node in ast.walk(tree)
+        for reducer in reducers
+        for node in ast.walk(reducer)
         if isinstance(node, ast.Call)
         and isinstance(node.func, (ast.Name, ast.Attribute))
     }
@@ -3169,21 +2899,12 @@ def test_lemma2_source_is_cached_prompt_major_without_model_inference() -> None:
             "randn_like",
         }
     )
-    assert {
-        "_schedule_file_sha256",
-        "file_sha256",
-        "resolve_devices",
-        "round_robin_shard",
-        "safe_torch_load",
-        "validate_generation_record",
-    } <= calls
     for snippet in (
         "selection.prompt_frame",
         'tensor_names=("latent", "noise_prediction")',
         "prediction_value[0]",
         "latents[:, step_index]",
         "unconditional_epsilon[:, step_index]",
-        "total=len(prompt_rows) * cells_per_prompt",
         "canonical prompt-major, seed-major, timestep-major CSV grid",
         '"evaluation_schedule_sha256": contract.identity.schedule_sha256',
         '"evaluation_schedule_sha256": identity.schedule_sha256',
@@ -3193,27 +2914,15 @@ def test_lemma2_source_is_cached_prompt_major_without_model_inference() -> None:
         assert snippet in source
 
 
-def test_readme_documents_exact_cached_lemma2_schema_and_provenance() -> None:
+def test_readme_documents_noise_sweep_schemas_and_provenance() -> None:
+    from scripts import corollary3_cfg_amplification, lemma2_mean_convergence
+
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    schema = (
-        "selection_strategy,selection_hash,model_name,scheduler_name,"
-        "guidance_scale,num_inference_steps,centering_mode,num_baseline_seeds,"
-        "evaluation_generation_scientific_config_hash,"
-        "evaluation_schedule_sha256,"
-        "baseline_generation_scientific_config_hash,baseline_mu_hat_sha256,"
-        "record_id,original_index,generation_seed,step_index,timestep,alpha_t,"
-        "sigma_t,snr_t,latent_dimension,centered_distance_rmse,trajectory_sha256,"
-        "is_actual_ddim_initial_timestep,status,error"
-    )
-    corollary_schema = (
-        "record_id,generation_seed,timestep,alpha_t,sigma_t,snr_t,guidance_scale,"
-        "centering_mode,baseline_generation_scientific_config_hash,"
-        "baseline_schedule_sha256,baseline_mu_hat_sha256,num_baseline_seeds,"
-        "fitted_guidance_scale,residual_rmse,guided_target_rmse,"
-        "conditional_recovery_rmse,unconditional_rmse,target_sscd,status,error"
-    )
-    assert schema in readme
-    assert corollary_schema in readme
+    assert ",".join(lemma2_mean_convergence.CSV_COLUMNS) in readme
+    assert ",".join(corollary3_cfg_amplification.CSV_COLUMNS) in readme
+    assert "--evaluation-source {gaussian,trajectory,both}" in readme
+    assert "evaluation_<source>" in readme
+    assert "not confidence intervals" in readme
     assert "one row per selected-prompt–generation-seed–timestep" in readme
     assert "P * N * T" in readme
     assert "physical SHA-256 of the experiment" in readme
@@ -3222,12 +2931,12 @@ def test_readme_documents_exact_cached_lemma2_schema_and_provenance() -> None:
     assert "without deserializing the schedule tensor" in readme
     assert 'canonical hash of\n`{"latent": latent_file_sha256' in readme
     assert "neither deserializes nor rehashes the tensor bytes" in readme
-    assert "centering_zero/<strategy>/<selection-hash>/" in readme
-    assert "centering_mu_hat/baseline_S<N>_N<B>/<strategy>/<selection-hash>/" in readme
+    assert "centering_zero/<selection-hash>/" in readme
+    assert "centering_mu_hat/baseline_S<N>_N<B>/<selection-hash>/" in readme
     assert "Zero-centered plot-only mode never loads or validates a baseline" in readme
     assert r"\widehat{\boldsymbol{\mu}}" in readme
-    assert "one row per evaluation-seed–timestep" not in readme
-    assert "runs fresh unconditional inference" not in readme
+    assert "one row per evaluation-seed–timestep" in readme
+    assert "runs fresh unconditional inference" in readme
     assert "distance_to_mu_rmse" not in readme
     assert "unconditional_baseline_rmse" not in readme
 
@@ -3363,6 +3072,65 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
                 and node.name == "__getattr__"
                 for node in ast.walk(tree)
             ), source_path
+
+
+def test_cluster_diagnostic_writes_three_single_panel_line_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+    import pandas as pd
+    from matplotlib.collections import LineCollection, PathCollection
+    from scripts import check_proximity_clusters as diagnostic
+
+    frame = pd.DataFrame(
+        [
+            {
+                "original_index": str(prompt),
+                "seed": seed,
+                "l2_norm": float(3 - seed + prompt * 4),
+                "sscd": (0.1, 0.8, 0.2)[seed],
+                "kind": ("MV", "N")[prompt],
+                "kmeans_cluster": ("low_sscd_mode", "high_sscd_mode", "low_sscd_mode")[
+                    seed
+                ],
+                "prompt_rule": ("rho < 0", "rho >= 0")[prompt],
+            }
+            for prompt in range(2)
+            for seed in range(3)
+        ]
+    )
+    captured = []
+    original_publish = diagnostic._publish_figures
+
+    def publish(output, figures):
+        captured.extend(figures)
+        original_publish(output, figures)
+
+    monkeypatch.setattr(diagnostic, "_publish_figures", publish)
+    paths = diagnostic.plot_assignments(frame, tmp_path / "kmeans_k2.png", cutoff=0.2)
+    assert {path.name for path in paths} == {
+        f"kmeans_k2{suffix}.{extension}"
+        for suffix in ("", "_spearman", "_kind")
+        for extension in ("png", "pdf")
+    }
+    assert all(path.is_file() and path.stat().st_size > 0 for path in paths)
+    assert len(captured) == 3
+    for figure, _filenames in captured:
+        np.testing.assert_allclose(figure.get_size_inches(), (4.0, 4.0))
+        assert len(figure.axes) == 2  # One data panel and its colorbar.
+        axis, colorbar_axis = figure.axes
+        assert not axis.get_title() and figure._suptitle is None
+        assert not any(isinstance(item, PathCollection) for item in axis.collections)
+        curves = [item for item in axis.collections if isinstance(item, LineCollection)]
+        assert len(curves) == 1 and len(curves[0].get_segments()) == 4
+        assert curves[0].cmap.name == "viridis"
+        assert (curves[0].norm.vmin, curves[0].norm.vmax) == (0.0, 1.0)
+        assert colorbar_axis.get_ylabel() == "SSCD"
+        assert colorbar_axis.collections[-1].get_alpha() == 1.0
+        assert axis.xaxis.label.get_fontsize() == 15
+        assert all(
+            handle.get_alpha() == 1.0 for handle in axis.get_legend().legend_handles
+        )
 
 
 def test_repository_hygiene_excludes_generated_and_macos_metadata() -> None:

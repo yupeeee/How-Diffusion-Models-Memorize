@@ -30,10 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-strategy",
         choices=SELECTION_STRATEGIES,
         default=DEFAULT_SELECTION_STRATEGY,
-        help=(
-            "prompt filter fitted to the reference observations: GMM posterior, "
-            "GMM evidence, or Spearman (default: spearman)"
-        ),
+        help="GMM-only prompt selection (default: gmm)",
     )
     parser.add_argument(
         "--overwrite",

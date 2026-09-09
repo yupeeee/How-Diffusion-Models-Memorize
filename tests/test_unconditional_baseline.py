@@ -32,6 +32,10 @@ NUM_BASELINE_SEEDS = 3
 NUM_STEPS = 3
 REFERENCE_SEEDS = (2, 3)
 BASELINE_SEEDS = (2, 3, 4)
+SCHEDULER_CLASSES = {
+    "ddim": "DDIMScheduler",
+    "ddpm": "DDPMScheduler",
+}
 
 
 class _Progress:
@@ -82,7 +86,7 @@ class _ImmediateExecutor:
         return _ImmediateFuture(function(*args))
 
 
-def _science() -> dict[str, object]:
+def _science(scheduler_name: str = "ddim") -> dict[str, object]:
     spec = get_model_spec("sdv1")
     scheduler_config = {"num_train_timesteps": 10, "prediction_type": "epsilon"}
     return {
@@ -93,8 +97,8 @@ def _science() -> dict[str, object]:
         "vae_id": spec.vae_id or spec.model_id,
         "vae_revision": "vae-revision",
         "scheduler": {
-            "name": "ddim",
-            "class": "DDIMScheduler",
+            "name": scheduler_name,
+            "class": SCHEDULER_CLASSES[scheduler_name],
             "config": scheduler_config,
         },
         "native_prediction_type": "epsilon",
@@ -121,7 +125,7 @@ def _science() -> dict[str, object]:
     }
 
 
-def _schedule() -> dict[str, object]:
+def _schedule(scheduler_name: str = "ddim") -> dict[str, object]:
     alpha = torch.tensor([0.1, 0.25, 0.5], dtype=torch.float32)
     sigma = torch.sqrt(1.0 - alpha.square()).contiguous()
     return {
@@ -130,8 +134,8 @@ def _schedule() -> dict[str, object]:
         "sigma_t": sigma,
         "alphas_cumprod_t": alpha.square().contiguous(),
         "init_noise_sigma": 1.0,
-        "scheduler_name": "ddim",
-        "scheduler_class": "DDIMScheduler",
+        "scheduler_name": scheduler_name,
+        "scheduler_class": SCHEDULER_CLASSES[scheduler_name],
         "native_prediction_type": "epsilon",
         "stored_prediction_type": "epsilon",
         "trajectory_order": "noise_to_image",
@@ -142,18 +146,18 @@ def _schedule() -> dict[str, object]:
     }
 
 
-def _create_reference_run(root: Path) -> GenerationPaths:
+def _create_reference_run(root: Path, scheduler_name: str = "ddim") -> GenerationPaths:
     paths = generation_paths(
         root,
         model_name="sdv1",
-        scheduler_name="ddim",
+        scheduler_name=scheduler_name,
         guidance_scale=7.5,
         num_inference_steps=NUM_STEPS,
         num_seeds=NUM_SEEDS,
         seed_start=NUM_SEEDS,
     )
     paths.run_directory.mkdir(parents=True)
-    science = _science()
+    science = _science(scheduler_name)
     atomic_write_json(
         paths.run_config,
         {
@@ -161,7 +165,7 @@ def _create_reference_run(root: Path) -> GenerationPaths:
             "scientific_config_hash": canonical_hash(science),
         },
     )
-    atomic_torch_save(_schedule(), paths.schedule)
+    atomic_torch_save(_schedule(scheduler_name), paths.schedule)
     return paths
 
 
@@ -209,13 +213,14 @@ def _install_fake_cpu_inference(monkeypatch: pytest.MonkeyPatch) -> None:
 def _compute(
     root: Path,
     *,
+    scheduler_name: str = "ddim",
     num_baseline_seeds: int = NUM_BASELINE_SEEDS,
     **kwargs: object,
 ) -> baseline.UnconditionalBaselineArtifact:
     return baseline.compute_unconditional_baseline(
         root,
         model_name="sdv1",
-        scheduler_name="ddim",
+        scheduler_name=scheduler_name,
         guidance_scale=7.5,
         num_inference_steps=NUM_STEPS,
         num_seeds=NUM_SEEDS,
@@ -227,13 +232,14 @@ def _compute(
 def _load(
     root: Path,
     *,
+    scheduler_name: str = "ddim",
     num_baseline_seeds: int = NUM_BASELINE_SEEDS,
     load_tensor: bool = True,
 ) -> baseline.UnconditionalBaselineArtifact:
     return baseline.load_unconditional_baseline(
         root,
         model_name="sdv1",
-        scheduler_name="ddim",
+        scheduler_name=scheduler_name,
         guidance_scale=7.5,
         num_inference_steps=NUM_STEPS,
         num_seeds=NUM_SEEDS,
@@ -254,9 +260,11 @@ def _load_cli_module() -> ModuleType:
 def test_cli_defaults_to_one_thousand_baseline_seeds_and_auto_device() -> None:
     script = _load_cli_module()
     arguments = script.build_parser().parse_args([])
+    assert arguments.scheduler == "ddim"
     assert arguments.N == 20
     assert arguments.num_baseline_seeds == 1000
     assert arguments.device == "auto"
+    assert script.build_parser().parse_args(["--scheduler", "ddpm"]).scheduler == "ddpm"
 
 
 def test_exact_empty_condition_formula(
@@ -340,8 +348,6 @@ def test_computation_weights_each_dedicated_seed_once_and_has_one_progress_bar(
         paths.run_directory / "unconditional_baseline" / "S2_N3" / "mu_hat.pt"
     )
     assert artifact.metadata_path == artifact.tensor_path.with_name("metadata.json")
-    assert artifact.source_seed_start == NUM_SEEDS
-    assert artifact.source_seeds == BASELINE_SEEDS
     assert artifact.num_baseline_seeds == NUM_BASELINE_SEEDS
     assert artifact.baseline_seed_start == NUM_SEEDS
     assert artifact.baseline_seeds == BASELINE_SEEDS
@@ -354,13 +360,6 @@ def test_computation_weights_each_dedicated_seed_once_and_has_one_progress_bar(
         "one unit per baseline seed in ascending seed order"
     )
     assert artifact.metadata["package_versions"] == _science()["package_versions"]
-    obsolete = {
-        "number_of_prompts",
-        "number_of_prompt_seed_entries",
-        "number_of_unique_initial_latents",
-        "duplicate_initial_latent_entries",
-    }
-    assert obsolete.isdisjoint(artifact.metadata)
     assert len(progresses) == 1
     assert progresses[0].total == NUM_BASELINE_SEEDS
     assert progresses[0].kwargs["desc"] == baseline.PROGRESS_DESCRIPTION
@@ -389,7 +388,7 @@ def test_full_and_metadata_only_loaders_validate_without_tensor_work(
     metadata_only = _load(tmp_path, load_tensor=False)
     assert metadata_only.mu_hat is None
     assert metadata_only.mu_hat_sha256 == computed.mu_hat_sha256
-    assert metadata_only.source_seeds == BASELINE_SEEDS
+    assert metadata_only.baseline_seeds == BASELINE_SEEDS
 
 
 def test_baseline_count_has_an_isolated_artifact_namespace(
@@ -404,8 +403,8 @@ def test_baseline_count_has_an_isolated_artifact_namespace(
     assert three.tensor_path != four.tensor_path
     assert three.tensor_path.is_file()
     assert four.tensor_path.is_file()
-    assert _load(tmp_path, num_baseline_seeds=3).source_seeds == (2, 3, 4)
-    assert _load(tmp_path, num_baseline_seeds=4).source_seeds == (2, 3, 4, 5)
+    assert _load(tmp_path, num_baseline_seeds=3).baseline_seeds == (2, 3, 4)
+    assert _load(tmp_path, num_baseline_seeds=4).baseline_seeds == (2, 3, 4, 5)
 
 
 def test_multi_cuda_auto_path_round_robin_shards_and_reports_B(
@@ -505,6 +504,7 @@ def test_cli_reuses_valid_cache_and_overwrite_recomputes(
     monkeypatch.setattr(script, "compute_unconditional_baseline", fake_compute)
     assert script.main(["--N", "7", "--num-baseline-seeds", "11"]) == 0
     assert len(load_calls) == 1
+    assert load_calls[0]["scheduler_name"] == "ddim"
     assert load_calls[0]["num_seeds"] == 7
     assert load_calls[0]["num_baseline_seeds"] == 11
     assert not compute_calls
@@ -518,6 +518,8 @@ def test_cli_reuses_valid_cache_and_overwrite_recomputes(
                 "7",
                 "--num-baseline-seeds",
                 "11",
+                "--scheduler",
+                "ddpm",
                 "--device",
                 "cpu",
                 "--overwrite",
@@ -527,6 +529,7 @@ def test_cli_reuses_valid_cache_and_overwrite_recomputes(
     )
     assert not load_calls
     assert len(compute_calls) == 1
+    assert compute_calls[0]["scheduler_name"] == "ddpm"
     assert compute_calls[0]["num_seeds"] == 7
     assert compute_calls[0]["num_baseline_seeds"] == 11
     assert compute_calls[0]["device"] == "cpu"
@@ -542,6 +545,27 @@ def test_mu_hat_file_tampering_is_rejected(
     atomic_torch_save(torch.zeros_like(artifact.mu_hat), artifact.tensor_path)
     with pytest.raises(baseline.UnconditionalBaselineError, match="SHA-256"):
         _load(tmp_path, load_tensor=False)
+
+
+@pytest.mark.parametrize("load_tensor", (False, True))
+@pytest.mark.parametrize("mutation", ("unexpected", "missing"))
+def test_metadata_requires_exact_current_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    load_tensor: bool,
+    mutation: str,
+) -> None:
+    _create_reference_run(tmp_path)
+    _install_fake_cpu_inference(monkeypatch)
+    artifact = _compute(tmp_path)
+    metadata = read_json(artifact.metadata_path)
+    if mutation == "unexpected":
+        metadata["unexpected_field"] = "not part of the current schema"
+    else:
+        metadata.pop("created_at_utc")
+    atomic_write_json(artifact.metadata_path, metadata)
+    with pytest.raises(baseline.UnconditionalBaselineError, match="invalid schema"):
+        _load(tmp_path, load_tensor=load_tensor)
 
 
 def test_metadata_seed_tampering_is_rejected(
@@ -583,14 +607,15 @@ def test_stale_model_revision_and_schedule_are_rejected(
         _load(tmp_path / "schedule-case", load_tensor=False)
 
 
+@pytest.mark.parametrize("scheduler_name", ("ddim", "ddpm"))
 def test_active_scheduler_coefficients_are_cross_checked(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scheduler_name: str
 ) -> None:
-    _create_reference_run(tmp_path)
+    _create_reference_run(tmp_path, scheduler_name)
     contract = baseline._load_source_contract(
         tmp_path,
         model_name="sdv1",
-        scheduler_name="ddim",
+        scheduler_name=scheduler_name,
         guidance_scale=7.5,
         num_inference_steps=NUM_STEPS,
         num_seeds=NUM_SEEDS,
@@ -604,12 +629,22 @@ def test_active_scheduler_coefficients_are_cross_checked(
         active.timesteps = contract.schedule_payload["timesteps"].to(device)
 
     active.set_timesteps = set_timesteps
+
+    requested_schedulers: list[str] = []
+
+    def build_scheduler(_original: object, name: str) -> SimpleNamespace:
+        requested_schedulers.append(name)
+        return SimpleNamespace(
+            scheduler=active,
+            name=name,
+            class_name=SCHEDULER_CLASSES[name],
+            config=contract.scheduler_config,
+        )
+
     monkeypatch.setattr(
         baseline,
         "build_scheduler",
-        lambda _original, _name: SimpleNamespace(
-            scheduler=active, config=contract.scheduler_config
-        ),
+        build_scheduler,
     )
     saved = tuple(
         contract.schedule_payload[name].clone()
@@ -626,6 +661,7 @@ def test_active_scheduler_coefficients_are_cross_checked(
         original_scheduler=object(), device=torch.device("cpu")
     )
     assert baseline._validate_active_scheduler(components, contract) is active
+    assert requested_schedulers == [scheduler_name]
 
     changed = (saved[0] + 0.01, saved[1], saved[2])
     monkeypatch.setattr(
@@ -637,6 +673,37 @@ def test_active_scheduler_coefficients_are_cross_checked(
     )
     with pytest.raises(
         baseline.UnconditionalBaselineError, match="coefficients differ"
+    ):
+        baseline._validate_active_scheduler(components, contract)
+    assert requested_schedulers == [scheduler_name, scheduler_name]
+
+
+def test_active_ddpm_scheduler_identity_is_cross_checked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _create_reference_run(tmp_path, "ddpm")
+    contract = baseline._load_source_contract(
+        tmp_path,
+        model_name="sdv1",
+        scheduler_name="ddpm",
+        guidance_scale=7.5,
+        num_inference_steps=NUM_STEPS,
+        num_seeds=NUM_SEEDS,
+        num_baseline_seeds=NUM_BASELINE_SEEDS,
+    )
+    monkeypatch.setattr(
+        baseline,
+        "build_scheduler",
+        lambda _original, requested: SimpleNamespace(
+            scheduler=object(),
+            name="ddim",
+            class_name="DDIMScheduler",
+            config={"requested": requested},
+        ),
+    )
+    components = SimpleNamespace(original_scheduler=object())
+    with pytest.raises(
+        baseline.UnconditionalBaselineError, match="scheduler identity differs"
     ):
         baseline._validate_active_scheduler(components, contract)
 
@@ -666,7 +733,7 @@ def test_loaded_runtime_package_versions_must_match_reference(
         baseline._validate_loaded_components(components, contract)
 
 
-def test_reference_seed_namespace_and_ddim_are_mandatory(tmp_path: Path) -> None:
+def test_reference_seed_namespace_is_mandatory(tmp_path: Path) -> None:
     paths = _create_reference_run(tmp_path)
     experiment = paths.run_directory.parent / "experiment_S0_N2"
     paths.run_directory.rename(experiment)
@@ -674,16 +741,112 @@ def test_reference_seed_namespace_and_ddim_are_mandatory(tmp_path: Path) -> None
         baseline.UnconditionalBaselineError, match="generation run is missing"
     ):
         _load(tmp_path, load_tensor=False)
-    with pytest.raises(baseline.UnconditionalBaselineError, match="ddim"):
-        baseline.load_unconditional_baseline(
-            tmp_path,
-            model_name="sdv1",
-            scheduler_name="ddpm",
-            guidance_scale=7.5,
-            num_inference_steps=NUM_STEPS,
-            num_seeds=NUM_SEEDS,
-            num_baseline_seeds=NUM_BASELINE_SEEDS,
+
+
+def test_ddim_and_ddpm_artifacts_are_scheduler_isolated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    paths = {
+        scheduler_name: _create_reference_run(tmp_path, scheduler_name)
+        for scheduler_name in ("ddim", "ddpm")
+    }
+    _install_fake_cpu_inference(monkeypatch)
+    artifacts = {
+        scheduler_name: _compute(tmp_path, scheduler_name=scheduler_name)
+        for scheduler_name in ("ddim", "ddpm")
+    }
+
+    for scheduler_name, artifact in artifacts.items():
+        assert artifact.metadata["scheduler_name"] == scheduler_name
+        assert (
+            artifact.tensor_path.parent.parent.parent
+            == paths[scheduler_name].run_directory
         )
+        loaded = _load(tmp_path, scheduler_name=scheduler_name)
+        metadata_only = _load(
+            tmp_path, scheduler_name=scheduler_name, load_tensor=False
+        )
+        assert loaded.mu_hat is not None
+        assert metadata_only.mu_hat is None
+        torch.testing.assert_close(
+            loaded.mu_hat,
+            artifacts[scheduler_name].mu_hat,
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert metadata_only.mu_hat_sha256 == artifact.mu_hat_sha256
+
+    assert artifacts["ddim"].tensor_path != artifacts["ddpm"].tensor_path
+    assert (
+        artifacts["ddim"].source_scientific_config_hash
+        != artifacts["ddpm"].source_scientific_config_hash
+    )
+    assert (
+        artifacts["ddim"].source_schedule_sha256
+        != artifacts["ddpm"].source_schedule_sha256
+    )
+    assert (
+        artifacts["ddim"].metadata["input_identity_sha256"]
+        != artifacts["ddpm"].metadata["input_identity_sha256"]
+    )
+
+
+@pytest.mark.parametrize("damage", ("science", "schedule", "metadata"))
+def test_ddpm_scheduler_mismatches_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, damage: str
+) -> None:
+    paths = _create_reference_run(tmp_path, "ddpm")
+    if damage == "science":
+        configuration = read_json(paths.run_config)
+        science = configuration["scientific_config"]
+        assert isinstance(science, dict)
+        science["scheduler"] = {
+            "name": "ddim",
+            "class": "DDIMScheduler",
+            "config": {"num_train_timesteps": 10, "prediction_type": "epsilon"},
+        }
+        configuration["scientific_config_hash"] = canonical_hash(science)
+        atomic_write_json(paths.run_config, configuration)
+        with pytest.raises(
+            baseline.UnconditionalBaselineError, match="reference.*scheduler"
+        ):
+            _load(tmp_path, scheduler_name="ddpm")
+        return
+    if damage == "schedule":
+        schedule = _schedule("ddpm")
+        schedule["scheduler_name"] = "ddim"
+        atomic_torch_save(schedule, paths.schedule)
+        with pytest.raises(
+            baseline.UnconditionalBaselineError, match="saved generation schedule"
+        ):
+            _load(tmp_path, scheduler_name="ddpm")
+        return
+
+    _install_fake_cpu_inference(monkeypatch)
+    artifact = _compute(tmp_path, scheduler_name="ddpm")
+    metadata = read_json(artifact.metadata_path)
+    metadata["scheduler_name"] = "ddim"
+    atomic_write_json(artifact.metadata_path, metadata)
+    with pytest.raises(
+        baseline.UnconditionalBaselineError, match="metadata differs.*scheduler_name"
+    ):
+        _load(tmp_path, scheduler_name="ddpm", load_tensor=False)
+
+
+def test_ddpm_metadata_only_validation_names_the_actual_scheduler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _create_reference_run(tmp_path, "ddpm")
+    _install_fake_cpu_inference(monkeypatch)
+    artifact = _compute(tmp_path, scheduler_name="ddpm")
+    metadata = read_json(artifact.metadata_path)
+    metadata["init_noise_sigma"] = 2.0
+    atomic_write_json(artifact.metadata_path, metadata)
+    with pytest.raises(
+        baseline.UnconditionalBaselineError,
+        match="DDPM init_noise_sigma must equal 1",
+    ):
+        _load(tmp_path, scheduler_name="ddpm", load_tensor=False)
 
 
 def test_seed_block_bounds_and_public_namespace() -> None:

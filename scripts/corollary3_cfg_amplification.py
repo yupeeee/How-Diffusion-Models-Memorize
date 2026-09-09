@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from contextlib import ExitStack
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import math
 import multiprocessing
@@ -21,7 +21,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
+from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
+from matplotlib.ticker import LogLocator
 import numpy as np
 import pandas as pd
 import torch
@@ -88,40 +90,90 @@ from utils.models.latent import (  # noqa: E402
     TARGET_LATENT_DEFINITION,
     target_preprocessing_policy,
 )
+from utils.models.loading import (  # noqa: E402
+    compile_loaded_unet,
+    load_model_components,
+    preflight_model_components,
+    select_runtime,
+)
+from utils.models.prediction_conversion import schedule_alpha_sigma  # noqa: E402
 from utils.models.registry import get_model_spec, model_names  # noqa: E402
-from utils.models.sampling import make_initial_noise  # noqa: E402
+from utils.models.sampling import (  # noqa: E402
+    encode_prompt_condition,
+    make_initial_noise,
+    predict_conditional_epsilon,
+    validate_latent_shape,
+)
+from utils.models.schedulers import build_scheduler  # noqa: E402
 
 
 CSV_NAME = "corollary3_cfg_amplification.csv"
-FIGURE_FILENAMES = (
+GAUSSIAN_COEFFICIENT_FIGURE_FILENAMES = (
     "corollary3_cfg_amplification.png",
     "corollary3_cfg_amplification.pdf",
 )
+GAUSSIAN_RESIDUAL_FIGURE_FILENAMES = (
+    "corollary3_cfg_amplification_residual.png",
+    "corollary3_cfg_amplification_residual.pdf",
+)
+TRAJECTORY_COEFFICIENT_FIGURE_FILENAMES = (
+    "corollary3_cfg_amplification_trajectory.png",
+    "corollary3_cfg_amplification_trajectory.pdf",
+)
+TRAJECTORY_RESIDUAL_FIGURE_FILENAMES = (
+    "corollary3_cfg_amplification_trajectory_residual.png",
+    "corollary3_cfg_amplification_trajectory_residual.pdf",
+)
+FIGURE_FILENAMES = (
+    *GAUSSIAN_COEFFICIENT_FIGURE_FILENAMES,
+    *GAUSSIAN_RESIDUAL_FIGURE_FILENAMES,
+    *TRAJECTORY_COEFFICIENT_FIGURE_FILENAMES,
+    *TRAJECTORY_RESIDUAL_FIGURE_FILENAMES,
+)
 CSV_COLUMNS = tuple(
-    "record_id generation_seed timestep alpha_t sigma_t snr_t guidance_scale "
+    "record_id generation_seed evaluation_source step_index timestep alpha_t "
+    "sigma_t snr_t guidance_scale "
     "centering_mode baseline_generation_scientific_config_hash "
     "baseline_schedule_sha256 baseline_mu_hat_sha256 num_baseline_seeds "
     "fitted_guidance_scale residual_rmse guided_target_rmse "
     "conditional_recovery_rmse unconditional_rmse target_sscd status error".split()
 )
 
-REQUIRED_SCHEDULER = "ddim"
 REQUIRED_GUIDANCE_SCALE = 7.5
 DEFAULT_NUM_SEEDS = 20
 EXPERIMENT_DIRECTORY = "corollary3_cfg_amplification"
-PROGRESS_DESCRIPTION = "Corollary 3 cached prompt-seed observations"
+PROGRESS_DESCRIPTION = "Corollary 3 prompt-seed-timestep observations"
 CENTERING_ZERO = "zero"
 CENTERING_MU_HAT = "mu_hat"
 CENTERING_MODES = (CENTERING_ZERO, CENTERING_MU_HAT)
+EVALUATION_GAUSSIAN = "gaussian"
+EVALUATION_TRAJECTORY = "trajectory"
+EVALUATION_BOTH = "both"
+EVALUATION_SOURCE_CHOICES = (
+    EVALUATION_GAUSSIAN,
+    EVALUATION_TRAJECTORY,
+    EVALUATION_BOTH,
+)
+PREDICTION_BATCH_SIZE = 8
+COEFFICIENT_METRIC = "fitted_guidance_scale"
+RESIDUAL_METRIC = "residual_rmse"
+PLOT_METRICS = (COEFFICIENT_METRIC, RESIDUAL_METRIC)
 
 FIGURE_SIZE = (4.0, 4.0)
 TEXT_FONT_SIZE = 15
 AXIS_NUMBER_FONT_SIZE = 12
-SCATTER_ALPHA = 0.68
+OBSERVATION_LINE_ALPHA = 0.12
+OBSERVATION_LINE_WIDTH = 0.75
 COLORBAR_ALPHA = 1.0
 COLORBAR_LABEL = "SSCD"
 SSCD_COLOR_RANGE = (0.0, 1.0)
 FIGURE_PAD_INCHES = 0.05
+PERCENTILE_BANDS = (
+    (0.05, 0.95, 0.12),
+    (0.25, 0.75, 0.18),
+    (0.40, 0.60, 0.26),
+)
+PERCENTILE_BAND_COLOR = "0.35"
 PLOT_STYLE = {
     "figure.figsize": FIGURE_SIZE,
     "font.family": "STIXGeneral",
@@ -150,6 +202,7 @@ class GenerationContract:
 
     paths: GenerationPaths
     sscd_paths: SSCDPaths
+    scheduler_name: str
     science: Mapping[str, Any]
     scientific_hash: str
     schedule_sha256: str
@@ -158,13 +211,33 @@ class GenerationContract:
     latent_dimension: int
     stored_dtype: torch.dtype
     init_noise_sigma: float
-    timestep: int
-    alpha_t: float
-    sigma_t: float
-    snr_t: float
+    timesteps: torch.Tensor
+    alpha_values: torch.Tensor
+    sigma_values: torch.Tensor
+    snr_values: torch.Tensor
     records_by_index: Mapping[str, CompletedGenerationRecord]
     sscd_configuration: Mapping[str, Any]
     sscd_configuration_hash: str
+
+    @property
+    def num_inference_steps(self) -> int:
+        return int(self.timesteps.numel())
+
+    @property
+    def timestep(self) -> int:
+        return int(self.timesteps[0])
+
+    @property
+    def alpha_t(self) -> float:
+        return float(self.alpha_values[0])
+
+    @property
+    def sigma_t(self) -> float:
+        return float(self.sigma_values[0])
+
+    @property
+    def snr_t(self) -> float:
+        return float(self.snr_values[0])
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,27 +254,41 @@ class CenteringContract:
 
 @dataclass(frozen=True, slots=True)
 class _PromptMeasurement:
-    """Compact process-safe metrics for all seeds of one prompt."""
+    """Compact process-safe metrics for every requested source of one prompt."""
 
     position: int
     original_index: str
-    values: np.ndarray | None
-    error: str
+    values_by_source: Mapping[str, np.ndarray | None]
+    errors_by_source: Mapping[str, str]
+
+    setup_work_units: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _GaussianRuntime:
+    """One worker's model and prompt-independent Gaussian probe predictions."""
+
+    components: Any
+    scheduler: Any
+    probes: torch.Tensor
+    unconditional_epsilon: torch.Tensor
 
 
 _WORKER_CONTRACT: GenerationContract | None = None
 _WORKER_DEVICE: torch.device | None = None
-_WORKER_INITIAL_LATENTS: torch.Tensor | None = None
 _WORKER_CENTER: torch.Tensor | None = None
 _WORKER_CENTERING_MODE: str | None = None
+_WORKER_EVALUATION_SOURCES: tuple[str, ...] | None = None
+_WORKER_GAUSSIAN_RUNTIME: _GaussianRuntime | None = None
+_WORKER_GAUSSIAN_ERROR: str = ""
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate Corollary 3 at the cached initial DDIM timestep for every "
-            "frozen-selected prompt and generation seed. The default uses exact "
-            "float64 mu = 0; --use-mu opts into the saved shared baseline."
+            "Evaluate Corollary 3 across every cached scheduler timestep using fixed "
+            "Gaussian probes, cached reverse trajectories, or both. The default "
+            "uses exact float64 mu = 0; --use-mu opts into the saved baseline."
         ),
         allow_abbrev=False,
     )
@@ -210,7 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-strategy",
         choices=SELECTION_STRATEGIES,
         default=DEFAULT_SELECTION_STRATEGY,
-        help="frozen prompt-selection strategy (default: spearman)",
+        help="frozen GMM-only prompt selection (default: gmm)",
     )
     parser.add_argument("--scheduler", choices=SCHEDULER_CHOICES, default="ddim")
     parser.add_argument("--g", type=finite_float, default=7.5, metavar="SCALE")
@@ -248,6 +335,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--evaluation-source",
+        choices=EVALUATION_SOURCE_CHOICES,
+        default=EVALUATION_BOTH,
+        help=(
+            "evaluate fixed Gaussian probes, cached reverse trajectories, or both "
+            "(default: both)"
+        ),
+    )
+    parser.add_argument(
         "--device",
         type=device_argument,
         default="auto",
@@ -261,16 +357,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--plot",
         action="store_true",
         help=(
-            "validate and replot the saved CSV without reading cached trajectory, "
-            "prediction, target-latent, or baseline tensors"
+            "validate and replot the saved CSV without model inference or reading "
+            "cached trajectory, prediction, target-latent, SSCD, or baseline tensors"
         ),
     )
     return parser
 
 
 def _validate_scientific_request(scheduler_name: str, guidance_scale: float) -> None:
-    if scheduler_name != REQUIRED_SCHEDULER:
-        raise ExperimentError("Corollary 3 requires --scheduler ddim")
+    if scheduler_name not in SCHEDULER_CHOICES:
+        raise ExperimentError("Corollary 3 requires --scheduler ddim or ddpm")
     if not math.isclose(
         float(guidance_scale),
         REQUIRED_GUIDANCE_SCALE,
@@ -278,6 +374,14 @@ def _validate_scientific_request(scheduler_name: str, guidance_scale: float) -> 
         abs_tol=0.0,
     ):
         raise ExperimentError("Corollary 3 requires --g 7.5")
+
+
+def _evaluation_sources(requested: str) -> tuple[str, ...]:
+    if requested == EVALUATION_BOTH:
+        return (EVALUATION_GAUSSIAN, EVALUATION_TRAJECTORY)
+    if requested in (EVALUATION_GAUSSIAN, EVALUATION_TRAJECTORY):
+        return (requested,)
+    raise ExperimentError(f"unsupported evaluation source: {requested!r}")
 
 
 def _is_sha256(value: object) -> bool:
@@ -524,10 +628,7 @@ def _load_generation_contract(
     }
     wrong = [key for key, item in expected.items() if science.get(key) != item]
     scheduler = science.get("scheduler")
-    if (
-        not isinstance(scheduler, Mapping)
-        or scheduler.get("name") != REQUIRED_SCHEDULER
-    ):
+    if not isinstance(scheduler, Mapping) or scheduler.get("name") != scheduler_name:
         wrong.append("scheduler")
     if wrong:
         raise ExperimentError(
@@ -576,7 +677,7 @@ def _load_generation_contract(
     ):
         raise ExperimentError("saved initial schedule values are invalid")
     if len(timesteps) > 1 and not bool((timesteps[:-1] > timesteps[1:]).all()):
-        raise ExperimentError("saved DDIM timesteps must be strictly descending")
+        raise ExperimentError("saved scheduler timesteps must be strictly descending")
     if not (
         torch.allclose(alphas.square(), cumulative, rtol=1e-5, atol=1e-6)
         and torch.allclose(sigmas.square(), 1.0 - cumulative, rtol=1e-5, atol=1e-6)
@@ -591,9 +692,9 @@ def _load_generation_contract(
     if not math.isfinite(init_noise_sigma) or init_noise_sigma <= 0.0:
         raise ExperimentError("saved scheduler initial-noise scale is invalid")
     if not math.isclose(init_noise_sigma, 1.0, rel_tol=0.0, abs_tol=1e-12):
-        raise ExperimentError("Corollary 3 requires DDIM init_noise_sigma = 1")
+        raise ExperimentError("Corollary 3 requires scheduler init_noise_sigma = 1")
     schedule_expected = {
-        "scheduler_name": REQUIRED_SCHEDULER,
+        "scheduler_name": scheduler_name,
         "scheduler_class": scheduler.get("class")
         if isinstance(scheduler, Mapping)
         else None,
@@ -614,7 +715,9 @@ def _load_generation_contract(
         raise ExperimentError("saved and configured scheduler settings differ")
     num_train_timesteps = _num_train_timesteps(scheduler_config)
     if bool((timesteps >= num_train_timesteps).any()):
-        raise ExperimentError("saved DDIM timestep is outside the training schedule")
+        raise ExperimentError(
+            "saved scheduler timestep is outside the training schedule"
+        )
     if _schedule_file_sha256(paths) != schedule_sha256:
         raise ExperimentError("saved generation schedule SHA-256 changed while loading")
 
@@ -642,6 +745,7 @@ def _load_generation_contract(
         paths=paths,
         sscd_paths=sscd_paths,
         science=science,
+        scheduler_name=scheduler_name,
         scientific_hash=str(scientific_hash),
         schedule_sha256=schedule_sha256,
         seeds=seeds,
@@ -649,10 +753,10 @@ def _load_generation_contract(
         latent_dimension=math.prod(latent_shape),
         stored_dtype=stored_dtype,
         init_noise_sigma=init_noise_sigma,
-        timestep=int(timesteps[0]),
-        alpha_t=alpha_t,
-        sigma_t=sigma_t,
-        snr_t=snr_t,
+        timesteps=timesteps.clone().contiguous(),
+        alpha_values=alphas.double().contiguous(),
+        sigma_values=sigmas.double().contiguous(),
+        snr_values=alphas.double().square().div(sigmas.double().square()).contiguous(),
         records_by_index=records_by_index,
         sscd_configuration=sscd_configuration,
         sscd_configuration_hash=sscd_hash,
@@ -684,16 +788,16 @@ def _load_shared_baseline(
     except UnconditionalBaselineError as error:
         raise ExperimentError(str(error)) from error
 
-    expected_source_seeds = tuple(range(num_seeds, num_seeds + num_baseline_seeds))
+    expected_baseline_seeds = tuple(range(num_seeds, num_seeds + num_baseline_seeds))
     wrong: list[str] = []
-    if baseline.source_seed_start != num_seeds:
-        wrong.append("source_seed_start")
+    if baseline.baseline_seed_start != num_seeds:
+        wrong.append("baseline_seed_start")
     if baseline.num_baseline_seeds != num_baseline_seeds:
         wrong.append("num_baseline_seeds")
-    if baseline.source_seeds != expected_source_seeds:
-        wrong.append("source_seeds")
-    if set(baseline.source_seeds).intersection(contract.seeds):
-        wrong.append("source_seed_overlap")
+    if baseline.baseline_seeds != expected_baseline_seeds:
+        wrong.append("baseline_seeds")
+    if set(baseline.baseline_seeds).intersection(contract.seeds):
+        wrong.append("baseline_seed_overlap")
     if baseline.timestep != contract.timestep:
         wrong.append("timestep")
     if baseline.latent_shape != contract.latent_shape:
@@ -705,14 +809,14 @@ def _load_shared_baseline(
     for name in ("model_id", "model_revision"):
         if baseline.metadata.get(name) != contract.science.get(name):
             wrong.append(name)
-    metadata_source_seeds = _integer_tuple(
+    metadata_baseline_seeds = _integer_tuple(
         baseline.metadata.get("baseline_seeds"), "baseline metadata seeds"
     )
     if baseline.metadata.get("baseline_seed_start") != num_seeds:
         wrong.append("metadata baseline_seed_start")
     if baseline.metadata.get("num_baseline_seeds") != num_baseline_seeds:
         wrong.append("metadata num_baseline_seeds")
-    if metadata_source_seeds != expected_source_seeds:
+    if metadata_baseline_seeds != expected_baseline_seeds:
         wrong.append("metadata baseline_seeds")
     if wrong:
         raise ExperimentError(
@@ -842,6 +946,306 @@ def _validate_centering_contract(
     return centering
 
 
+def _revision_resolver(contract: GenerationContract) -> Callable[[str], str]:
+    science = contract.science
+    revisions = {
+        str(science["model_id"]): str(science["model_revision"]),
+        str(science["vae_id"]): str(science["vae_revision"]),
+    }
+
+    def resolve(repository_id: str) -> str:
+        try:
+            return revisions[repository_id]
+        except KeyError as error:
+            raise ExperimentError(
+                f"generation cache has no pinned revision for {repository_id}"
+            ) from error
+
+    return resolve
+
+
+def _validate_loaded_components(
+    components: Any,
+    contract: GenerationContract,
+) -> None:
+    expected = {
+        "model_id": contract.science.get("model_id"),
+        "model_revision": contract.science.get("model_revision"),
+        "vae_id": contract.science.get("vae_id"),
+        "vae_revision": contract.science.get("vae_revision"),
+    }
+    observed = {
+        "model_id": getattr(components, "model_id", None),
+        "model_revision": getattr(components, "model_revision", None),
+        "vae_id": getattr(components, "vae_id", None),
+        "vae_revision": getattr(components, "vae_revision", None),
+    }
+    wrong = [key for key, value in expected.items() if observed.get(key) != value]
+    if wrong:
+        raise ExperimentError(
+            "loaded components differ from generation cache at: " + ", ".join(wrong)
+        )
+    actual_shape = validate_latent_shape(
+        components.unet,
+        expected_shape=contract.latent_shape,
+    )
+    if actual_shape != contract.latent_shape:
+        raise ExperimentError("loaded UNet latent shape differs from generation cache")
+
+
+def _offload_unused_vae(components: Any) -> None:
+    device = torch.device(components.device)
+    if device.type == "cpu":
+        return
+    move = getattr(components.vae, "to", None)
+    if not callable(move):
+        raise ExperimentError("loaded VAE has no device-transfer interface")
+    try:
+        move(device=torch.device("cpu"), dtype=torch.float32)
+    except Exception as error:
+        raise ExperimentError(f"cannot offload unused VAE: {error}") from error
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+
+def _validate_active_scheduler(
+    components: Any,
+    contract: GenerationContract,
+) -> Any:
+    result = build_scheduler(components.original_scheduler, contract.scheduler_name)
+    scheduler = result.scheduler
+    setter = getattr(scheduler, "set_timesteps", None)
+    if not callable(setter):
+        raise ExperimentError("active scheduler has no timestep interface")
+    setter(contract.num_inference_steps, device=torch.device(components.device))
+    active_timesteps = torch.as_tensor(scheduler.timesteps).detach().cpu().long()
+    if not torch.equal(active_timesteps, contract.timesteps):
+        raise ExperimentError("active scheduler timesteps differ from generation cache")
+    active_alpha, active_sigma, _ = schedule_alpha_sigma(
+        scheduler,
+        active_timesteps,
+        dtype=torch.float32,
+    )
+    if not (
+        torch.equal(active_alpha.double(), contract.alpha_values)
+        and torch.equal(active_sigma.double(), contract.sigma_values)
+    ):
+        raise ExperimentError(
+            "active scheduler coefficients differ from generation cache"
+        )
+    active_config = _normalize_scheduler_config(result.config)
+    scheduler_metadata = contract.science.get("scheduler")
+    if not isinstance(scheduler_metadata, Mapping):
+        raise ExperimentError("generation scheduler metadata is invalid")
+    cached_config = _normalize_scheduler_config(scheduler_metadata.get("config"))
+    if canonical_hash(active_config) != canonical_hash(cached_config):
+        raise ExperimentError(
+            "active scheduler configuration differs from generation cache"
+        )
+    try:
+        active_sigma = float(getattr(scheduler, "init_noise_sigma"))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ExperimentError(
+            "active scheduler initial-noise scale is invalid"
+        ) from error
+    if not math.isfinite(active_sigma) or not math.isclose(
+        active_sigma,
+        contract.init_noise_sigma,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ExperimentError(
+            "active scheduler initial-noise scale differs from generation cache"
+        )
+    return scheduler
+
+
+def _prediction_batch(
+    conceptual_samples: torch.Tensor,
+    *,
+    condition: torch.Tensor,
+    timestep: int,
+    components: Any,
+    scheduler: Any,
+) -> torch.Tensor:
+    conceptual = conceptual_samples.to(
+        device=components.device,
+        dtype=torch.float32,
+    )
+    model_samples = conceptual.to(dtype=components.inference_dtype)
+    predictions = predict_conditional_epsilon(
+        samples=model_samples,
+        timestep=timestep,
+        condition=condition,
+        unet=components.unet,
+        scheduler=scheduler,
+        conversion_sample=conceptual,
+    )
+    if (
+        not isinstance(predictions, torch.Tensor)
+        or predictions.shape != conceptual.shape
+    ):
+        raise ExperimentError("Gaussian-probe epsilon prediction has an invalid shape")
+    if not bool(torch.isfinite(predictions).all()):
+        raise ExperimentError("Gaussian-probe epsilon prediction is non-finite")
+    return predictions.detach().float().cpu().contiguous()
+
+
+def _is_cuda_out_of_memory(error: RuntimeError, device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    out_of_memory_type = getattr(torch.cuda, "OutOfMemoryError", ())
+    return (
+        isinstance(error, out_of_memory_type) or "out of memory" in str(error).lower()
+    )
+
+
+def _prediction_batches(
+    conceptual_samples: torch.Tensor,
+    *,
+    condition: torch.Tensor,
+    timestep: int,
+    components: Any,
+    scheduler: Any,
+) -> Iterator[tuple[int, int, torch.Tensor]]:
+    position = 0
+    batch_size = min(PREDICTION_BATCH_SIZE, int(conceptual_samples.shape[0]))
+    while position < conceptual_samples.shape[0]:
+        stop = min(position + batch_size, int(conceptual_samples.shape[0]))
+        current_size = stop - position
+        try:
+            predictions = _prediction_batch(
+                conceptual_samples[position:stop],
+                condition=condition,
+                timestep=timestep,
+                components=components,
+                scheduler=scheduler,
+            )
+        except RuntimeError as error:
+            if not _is_cuda_out_of_memory(error, torch.device(components.device)):
+                raise
+            if current_size == 1:
+                raise
+            batch_size = max(1, current_size // 2)
+            torch.cuda.empty_cache()
+            continue
+        yield position, stop, predictions
+        position = stop
+
+
+def _predict_probe_epsilon(
+    probes: torch.Tensor,
+    condition: torch.Tensor,
+    *,
+    components: Any,
+    scheduler: Any,
+    contract: GenerationContract,
+) -> torch.Tensor:
+    expected_shape = (len(contract.seeds), *contract.latent_shape)
+    if (
+        not isinstance(probes, torch.Tensor)
+        or tuple(probes.shape) != expected_shape
+        or probes.dtype != torch.float32
+        or probes.device.type != "cpu"
+        or not probes.is_contiguous()
+        or not bool(torch.isfinite(probes).all())
+    ):
+        raise ExperimentError("Gaussian probe tensor violates its contract")
+    values = torch.empty(
+        (len(contract.seeds), contract.num_inference_steps, *contract.latent_shape),
+        dtype=torch.float32,
+    )
+    for step_index, timestep_value in enumerate(contract.timesteps):
+        timestep = int(timestep_value)
+        for start, stop, predictions in _prediction_batches(
+            probes,
+            condition=condition,
+            timestep=timestep,
+            components=components,
+            scheduler=scheduler,
+        ):
+            values[start:stop, step_index].copy_(predictions)
+    if not values.is_contiguous() or not bool(torch.isfinite(values).all()):
+        raise ExperimentError("Gaussian-probe epsilon trajectory is incomplete")
+    return values
+
+
+def _build_gaussian_runtime(
+    contract: GenerationContract,
+    device: str | torch.device,
+) -> _GaussianRuntime:
+    selected = torch.device(device)
+    if selected.type == "cuda":
+        if selected.index is None:
+            raise ExperimentError("Gaussian workers require a concrete CUDA index")
+        torch.cuda.set_device(selected)
+    runtime = select_runtime(selected, warn_without_cuda=False)
+    components = load_model_components(
+        get_model_spec(str(contract.science["model_cli_name"])),
+        runtime=runtime,
+        revision_resolver=_revision_resolver(contract),
+    )
+    scheduler = _validate_active_scheduler(components, contract)
+    preflight_model_components(
+        components,
+        scheduler=scheduler,
+        num_inference_steps=contract.num_inference_steps,
+    )
+    _validate_loaded_components(components, contract)
+    _offload_unused_vae(components)
+    components = compile_loaded_unet(components)
+    probes = (
+        make_initial_noise(
+            contract.seeds,
+            contract.latent_shape,
+        )
+        .float()
+        .contiguous()
+    )
+    empty_condition = encode_prompt_condition(
+        "",
+        components.tokenizer,
+        components.text_encoder,
+        components.device,
+        components.inference_dtype,
+    )
+    unconditional = _predict_probe_epsilon(
+        probes,
+        empty_condition,
+        components=components,
+        scheduler=scheduler,
+        contract=contract,
+    )
+    return _GaussianRuntime(
+        components=components,
+        scheduler=scheduler,
+        probes=probes,
+        unconditional_epsilon=unconditional,
+    )
+
+
+def _predict_gaussian_conditional(
+    prompt: str,
+    *,
+    runtime: _GaussianRuntime,
+    contract: GenerationContract,
+) -> torch.Tensor:
+    condition = encode_prompt_condition(
+        prompt,
+        runtime.components.tokenizer,
+        runtime.components.text_encoder,
+        runtime.components.device,
+        runtime.components.inference_dtype,
+    )
+    return _predict_probe_epsilon(
+        runtime.probes,
+        condition,
+        components=runtime.components,
+        scheduler=runtime.scheduler,
+        contract=contract,
+    )
+
+
 def _validate_generation_prompt(
     prompt_row: Mapping[str, object],
     *,
@@ -874,7 +1278,7 @@ def _validate_generation_prompt(
         "native_prediction_type": contract.science.get("native_prediction_type"),
         "target_preprocessing": contract.science.get("target_preprocessing"),
         "scientific_config_hash": contract.scientific_hash,
-        "scheduler_name": REQUIRED_SCHEDULER,
+        "scheduler_name": contract.scheduler_name,
         "guidance_scale": REQUIRED_GUIDANCE_SCALE,
         "num_inference_steps": contract.science.get("num_inference_steps"),
         "num_seeds": len(contract.seeds),
@@ -952,30 +1356,57 @@ def _validate_initial_latent_sentinel(
         )
 
 
-def _load_prediction_and_target(
+def _load_target_and_marker(
     prompt_row: Mapping[str, object], contract: GenerationContract
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    Mapping[str, Any],
-]:
+) -> tuple[torch.Tensor, Mapping[str, Any]]:
     marker = _validate_generation_prompt(
         prompt_row,
         contract=contract,
-        tensor_names=("noise_prediction", "target_latent"),
+        tensor_names=("target_latent",),
     )
     index = safe_index(prompt_row.get("original_index"))
     try:
-        prediction_value = safe_torch_load(contract.paths.noise_prediction_path(index))
         target_value = safe_torch_load(contract.paths.target_latent_path(index))
     except CacheIOError as error:
         raise ExperimentError(str(error)) from error
+    target = _validate_tensor(
+        target_value,
+        shape=contract.latent_shape,
+        dtype=torch.float32,
+        label="target latent",
+    )
+    return target, marker
+
+
+def _load_cached_trajectory(
+    prompt_row: Mapping[str, object], contract: GenerationContract
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    _validate_generation_prompt(
+        prompt_row,
+        contract=contract,
+        tensor_names=("latent", "noise_prediction"),
+    )
+    index = safe_index(prompt_row.get("original_index"))
+    try:
+        latent_value = safe_torch_load(contract.paths.latent_path(index))
+        prediction_value = safe_torch_load(contract.paths.noise_prediction_path(index))
+    except CacheIOError as error:
+        raise ExperimentError(str(error)) from error
+    latents = _validate_tensor(
+        latent_value,
+        shape=(
+            len(contract.seeds),
+            contract.num_inference_steps + 1,
+            *contract.latent_shape,
+        ),
+        dtype=contract.stored_dtype,
+        label="latent trajectory",
+    )
     if not isinstance(prediction_value, tuple) or len(prediction_value) != 2:
         raise ExperimentError("cached noise prediction is not a two-tensor tuple")
     prediction_shape = (
         len(contract.seeds),
-        int(contract.science["num_inference_steps"]),
+        contract.num_inference_steps,
         *contract.latent_shape,
     )
     unconditional = _validate_tensor(
@@ -990,13 +1421,7 @@ def _load_prediction_and_target(
         dtype=contract.stored_dtype,
         label="conditional epsilon predictions",
     )
-    target = _validate_tensor(
-        target_value,
-        shape=contract.latent_shape,
-        dtype=torch.float32,
-        label="target latent",
-    )
-    return unconditional[:, 0], conditional[:, 0], target, marker
+    return latents, unconditional, conditional
 
 
 def _load_target_sscd(
@@ -1089,6 +1514,50 @@ def _verify_cfg_identity(
         raise ExperimentError("guided clean estimate was not constructed by exact CFG")
 
 
+def _solve_no_intercept_lstsq(
+    target_direction: torch.Tensor,
+    guided_direction: torch.Tensor,
+) -> torch.Tensor:
+    """Fit one scalar per seed with a shared, zero-intercept design vector."""
+
+    if (
+        target_direction.dtype != torch.float64
+        or guided_direction.dtype != torch.float64
+    ):
+        raise ExperimentError("Corollary 3 least-squares inputs must use float64")
+    if (
+        guided_direction.ndim != target_direction.ndim + 1
+        or tuple(guided_direction.shape[1:]) != tuple(target_direction.shape)
+        or guided_direction.shape[0] == 0
+    ):
+        raise ExperimentError("Corollary 3 least-squares input shapes are invalid")
+    design_matrix = target_direction.flatten()[:, None]
+    target_squared = torch.dot(design_matrix[:, 0], design_matrix[:, 0])
+    if not bool(torch.isfinite(target_squared)) or float(target_squared) <= 0.0:
+        raise ExperimentError(
+            "target direction from the active center has zero or invalid squared norm"
+        )
+    response_matrix = guided_direction.flatten(start_dim=1).T.contiguous()
+    if not bool(torch.isfinite(response_matrix).all()):
+        raise ExperimentError(
+            "Corollary 3 least-squares response matrix contains non-finite values"
+        )
+    try:
+        solution = torch.linalg.lstsq(design_matrix, response_matrix).solution
+    except RuntimeError as error:
+        raise ExperimentError(
+            "Corollary 3 no-intercept least-squares fit failed"
+        ) from error
+    expected_shape = (1, guided_direction.shape[0])
+    if tuple(solution.shape) != expected_shape or not bool(
+        torch.isfinite(solution).all()
+    ):
+        raise ExperimentError(
+            "Corollary 3 no-intercept least-squares solution is invalid"
+        )
+    return solution[0]
+
+
 def _measure_values(
     x_t: torch.Tensor,
     epsilon_empty: torch.Tensor,
@@ -1100,9 +1569,17 @@ def _measure_values(
     contract: GenerationContract,
     device: str | torch.device,
     centering_mode: str,
+    step_index: int = 0,
 ) -> np.ndarray:
     if centering_mode not in CENTERING_MODES:
         raise ExperimentError(f"unsupported centering mode: {centering_mode!r}")
+    if (
+        isinstance(step_index, bool)
+        or not 0 <= step_index < contract.num_inference_steps
+    ):
+        raise ExperimentError(f"invalid scheduler step index: {step_index!r}")
+    alpha_t = float(contract.alpha_values[step_index])
+    sigma_t = float(contract.sigma_values[step_index])
     _validate_tensor(
         center,
         shape=contract.latent_shape,
@@ -1121,8 +1598,8 @@ def _measure_values(
         center_d = center.to(device=reduction_device, dtype=torch.float64)
         if centering_mode == CENTERING_ZERO and bool(torch.count_nonzero(center_d)):
             raise ExperimentError("zero centering tensor must be exactly zero")
-        xhat_empty = (x_t_d - contract.sigma_t * empty_epsilon_d) / contract.alpha_t
-        xhat_c = (x_t_d - contract.sigma_t * conditional_epsilon_d) / contract.alpha_t
+        xhat_empty = (x_t_d - sigma_t * empty_epsilon_d) / alpha_t
+        xhat_c = (x_t_d - sigma_t * conditional_epsilon_d) / alpha_t
         xhat_g = (
             REQUIRED_GUIDANCE_SCALE * xhat_c
             + (1.0 - REQUIRED_GUIDANCE_SCALE) * xhat_empty
@@ -1134,8 +1611,8 @@ def _measure_values(
             xhat_empty,
             xhat_c,
             xhat_g,
-            alpha_t=contract.alpha_t,
-            sigma_t=contract.sigma_t,
+            alpha_t=alpha_t,
+            sigma_t=sigma_t,
             guidance_scale=REQUIRED_GUIDANCE_SCALE,
         )
 
@@ -1149,20 +1626,17 @@ def _measure_values(
             guided_direction = xhat_g - center_d
             guided_reference = center_d + REQUIRED_GUIDANCE_SCALE * target_direction
             unconditional_error = xhat_empty - center_d
+        fitted = _solve_no_intercept_lstsq(target_direction, guided_direction)
         flat_target_direction = target_direction.flatten()
         target_squared = torch.dot(flat_target_direction, flat_target_direction)
-        if not bool(torch.isfinite(target_squared)) or float(target_squared) <= 0.0:
-            raise ExperimentError(
-                "target direction from the active center has zero or invalid squared norm"
-            )
         flat_guided_direction = guided_direction.flatten(start_dim=1)
-        fitted = (flat_guided_direction @ flat_target_direction) / target_squared
         residual = guided_direction - fitted.view(-1, 1, 1, 1) * target_direction
 
         flat_residual = residual.flatten(start_dim=1)
         orthogonality = flat_residual @ flat_target_direction
         orthogonal_bound = PROJECTION_ATOL + PROJECTION_RTOL * (
-            flat_residual.norm(dim=1) * flat_target_direction.norm()
+            (flat_residual.norm(dim=1) + flat_guided_direction.norm(dim=1))
+            * flat_target_direction.norm()
         )
         if bool((orthogonality.abs() > orthogonal_bound).any()):
             raise ExperimentError("no-intercept projection residual is not orthogonal")
@@ -1219,6 +1693,73 @@ def _error_message(error: Exception) -> str:
     return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
 
 
+def _measure_all_steps(
+    samples: torch.Tensor,
+    epsilon_empty: torch.Tensor,
+    epsilon_c: torch.Tensor,
+    target: torch.Tensor,
+    center: torch.Tensor,
+    target_sscd: torch.Tensor,
+    *,
+    contract: GenerationContract,
+    device: str | torch.device,
+    centering_mode: str,
+) -> np.ndarray:
+    prediction_shape = (
+        len(contract.seeds),
+        contract.num_inference_steps,
+        *contract.latent_shape,
+    )
+    if (
+        not isinstance(epsilon_empty, torch.Tensor)
+        or tuple(epsilon_empty.shape) != prediction_shape
+        or not isinstance(epsilon_c, torch.Tensor)
+        or tuple(epsilon_c.shape) != prediction_shape
+    ):
+        raise ExperimentError("epsilon trajectories have invalid shapes")
+    fixed_shape = (len(contract.seeds), *contract.latent_shape)
+    trajectory_shape = (
+        len(contract.seeds),
+        contract.num_inference_steps,
+        *contract.latent_shape,
+    )
+    if not isinstance(samples, torch.Tensor) or tuple(samples.shape) not in {
+        fixed_shape,
+        trajectory_shape,
+    }:
+        raise ExperimentError("source samples have an invalid shape")
+    if not (
+        samples.is_floating_point()
+        and epsilon_empty.is_floating_point()
+        and epsilon_c.is_floating_point()
+        and bool(torch.isfinite(samples).all())
+        and bool(torch.isfinite(epsilon_empty).all())
+        and bool(torch.isfinite(epsilon_c).all())
+    ):
+        raise ExperimentError("source samples and predictions must be finite floats")
+    values = np.empty(
+        (len(contract.seeds), contract.num_inference_steps, 6),
+        dtype=np.float64,
+    )
+    fixed_samples = samples.ndim == 4
+    for step_index in range(contract.num_inference_steps):
+        values[:, step_index] = _measure_values(
+            samples if fixed_samples else samples[:, step_index],
+            epsilon_empty[:, step_index],
+            epsilon_c[:, step_index],
+            target,
+            center,
+            target_sscd,
+            contract=contract,
+            device=device,
+            centering_mode=centering_mode,
+            step_index=step_index,
+        )
+    if not values.flags.c_contiguous or not np.isfinite(values).all():
+        raise ExperimentError("Corollary 3 source measurements are incomplete")
+    return values
+
+
 def _measure_prompt_compact(
     position: int,
     prompt_row: Mapping[str, object],
@@ -1227,35 +1768,72 @@ def _measure_prompt_compact(
     device: str | torch.device,
     center: torch.Tensor,
     centering_mode: str,
-    initial_latents: torch.Tensor | None = None,
+    evaluation_sources: Sequence[str],
+    gaussian_runtime: _GaussianRuntime | None,
+    gaussian_error: str = "",
 ) -> _PromptMeasurement:
-    x_t = (
-        initial_latents
-        if initial_latents is not None
-        else _reconstruct_initial_latents(contract)
-    )
-    epsilon_empty, epsilon_c, target, marker = _load_prediction_and_target(
-        prompt_row, contract
-    )
+    sources = tuple(evaluation_sources)
+    if not sources or any(
+        source not in (EVALUATION_GAUSSIAN, EVALUATION_TRAJECTORY) for source in sources
+    ):
+        raise ExperimentError("prompt measurement has invalid evaluation sources")
+    target, marker = _load_target_and_marker(prompt_row, contract)
     target_sscd = _load_target_sscd(
-        prompt_row, contract=contract, generation_marker=marker
-    )
-    values = _measure_values(
-        x_t,
-        epsilon_empty,
-        epsilon_c,
-        target,
-        center,
-        target_sscd,
+        prompt_row,
         contract=contract,
-        device=device,
-        centering_mode=centering_mode,
+        generation_marker=marker,
     )
+    values_by_source: dict[str, np.ndarray | None] = {}
+    errors_by_source: dict[str, str] = {}
+    for source in sources:
+        try:
+            if source == EVALUATION_GAUSSIAN:
+                if gaussian_error:
+                    raise ExperimentError(gaussian_error)
+                if gaussian_runtime is None:
+                    raise ExperimentError("Gaussian model runtime was not initialized")
+                conditional = _predict_gaussian_conditional(
+                    str(prompt_row.get("prompt", "")),
+                    runtime=gaussian_runtime,
+                    contract=contract,
+                )
+                values = _measure_all_steps(
+                    gaussian_runtime.probes,
+                    gaussian_runtime.unconditional_epsilon,
+                    conditional,
+                    target,
+                    center,
+                    target_sscd,
+                    contract=contract,
+                    device=device,
+                    centering_mode=centering_mode,
+                )
+            else:
+                latents, unconditional, conditional = _load_cached_trajectory(
+                    prompt_row,
+                    contract,
+                )
+                values = _measure_all_steps(
+                    latents[:, : contract.num_inference_steps],
+                    unconditional,
+                    conditional,
+                    target,
+                    center,
+                    target_sscd,
+                    contract=contract,
+                    device=device,
+                    centering_mode=centering_mode,
+                )
+            values_by_source[source] = values
+            errors_by_source[source] = ""
+        except Exception as error:
+            values_by_source[source] = None
+            errors_by_source[source] = _error_message(error)
     return _PromptMeasurement(
         position=position,
         original_index=safe_index(prompt_row.get("original_index")),
-        values=values,
-        error="",
+        values_by_source=values_by_source,
+        errors_by_source=errors_by_source,
     )
 
 
@@ -1267,8 +1845,11 @@ def _measure_prompt_safely(
     device: str | torch.device,
     center: torch.Tensor,
     centering_mode: str,
-    initial_latents: torch.Tensor | None = None,
+    evaluation_sources: Sequence[str],
+    gaussian_runtime: _GaussianRuntime | None,
+    gaussian_error: str = "",
 ) -> _PromptMeasurement:
+    sources = tuple(evaluation_sources)
     try:
         return _measure_prompt_compact(
             position,
@@ -1277,14 +1858,17 @@ def _measure_prompt_safely(
             device=device,
             center=center,
             centering_mode=centering_mode,
-            initial_latents=initial_latents,
+            evaluation_sources=sources,
+            gaussian_runtime=gaussian_runtime,
+            gaussian_error=gaussian_error,
         )
     except Exception as error:
+        message = _error_message(error)
         return _PromptMeasurement(
             position=position,
             original_index=str(prompt_row.get("original_index", "")),
-            values=None,
-            error=_error_message(error),
+            values_by_source={source: None for source in sources},
+            errors_by_source={source: message for source in sources},
         )
 
 
@@ -1293,61 +1877,70 @@ def _rows_for_measurement(
     prompt_row: Mapping[str, object],
     contract: GenerationContract,
     centering: CenteringContract,
+    evaluation_source: str,
 ) -> list[dict[str, object]]:
     _validate_centering_contract(centering, contract=contract, tensor_required=None)
-    rows: list[dict[str, object]] = []
-    if measurement.values is not None and tuple(measurement.values.shape) != (
-        len(contract.seeds),
-        6,
-    ):
+    if evaluation_source not in (EVALUATION_GAUSSIAN, EVALUATION_TRAJECTORY):
+        raise ExperimentError(f"invalid measurement source: {evaluation_source!r}")
+    values = measurement.values_by_source.get(evaluation_source)
+    error = measurement.errors_by_source.get(evaluation_source)
+    if error is None or (values is None) != bool(error):
+        raise ExperimentError("compact prompt measurement has inconsistent status")
+    expected_shape = (len(contract.seeds), contract.num_inference_steps, 6)
+    if values is not None and tuple(values.shape) != expected_shape:
         raise ExperimentError("compact prompt measurement has an invalid shape")
+    rows: list[dict[str, object]] = []
     for seed_position, seed in enumerate(contract.seeds):
-        common: dict[str, object] = {
-            "record_id": str(prompt_row.get("record_id", "")),
-            "generation_seed": seed,
-            "timestep": contract.timestep,
-            "alpha_t": contract.alpha_t,
-            "sigma_t": contract.sigma_t,
-            "snr_t": contract.snr_t,
-            "guidance_scale": REQUIRED_GUIDANCE_SCALE,
-            "centering_mode": centering.mode,
-            "baseline_generation_scientific_config_hash": (
-                centering.baseline_generation_scientific_config_hash
-            ),
-            "baseline_schedule_sha256": centering.baseline_schedule_sha256,
-            "baseline_mu_hat_sha256": centering.baseline_mu_hat_sha256,
-            "num_baseline_seeds": centering.num_baseline_seeds,
-        }
-        if measurement.values is None:
-            common.update(
-                {
-                    "fitted_guidance_scale": math.nan,
-                    "residual_rmse": math.nan,
-                    "guided_target_rmse": math.nan,
-                    "conditional_recovery_rmse": math.nan,
-                    "unconditional_rmse": math.nan,
-                    "target_sscd": math.nan,
-                    "status": "error",
-                    "error": measurement.error,
-                }
-            )
-        else:
-            fitted, residual, guided, conditional, unconditional, score = (
-                measurement.values[seed_position]
-            )
-            common.update(
-                {
-                    "fitted_guidance_scale": float(fitted),
-                    "residual_rmse": float(residual),
-                    "guided_target_rmse": float(guided),
-                    "conditional_recovery_rmse": float(conditional),
-                    "unconditional_rmse": float(unconditional),
-                    "target_sscd": float(score),
-                    "status": "ok",
-                    "error": "",
-                }
-            )
-        rows.append(common)
+        for step_index in range(contract.num_inference_steps):
+            common: dict[str, object] = {
+                "record_id": str(prompt_row.get("record_id", "")),
+                "generation_seed": seed,
+                "evaluation_source": evaluation_source,
+                "step_index": step_index,
+                "timestep": int(contract.timesteps[step_index]),
+                "alpha_t": float(contract.alpha_values[step_index]),
+                "sigma_t": float(contract.sigma_values[step_index]),
+                "snr_t": float(contract.snr_values[step_index]),
+                "guidance_scale": REQUIRED_GUIDANCE_SCALE,
+                "centering_mode": centering.mode,
+                "baseline_generation_scientific_config_hash": (
+                    centering.baseline_generation_scientific_config_hash
+                ),
+                "baseline_schedule_sha256": centering.baseline_schedule_sha256,
+                "baseline_mu_hat_sha256": centering.baseline_mu_hat_sha256,
+                "num_baseline_seeds": centering.num_baseline_seeds,
+            }
+            if values is None:
+                common.update(
+                    {
+                        "fitted_guidance_scale": math.nan,
+                        "residual_rmse": math.nan,
+                        "guided_target_rmse": math.nan,
+                        "conditional_recovery_rmse": math.nan,
+                        "unconditional_rmse": math.nan,
+                        "target_sscd": math.nan,
+                        "status": "error",
+                        "error": error,
+                    }
+                )
+            else:
+                fitted, residual, guided, conditional, unconditional, score = values[
+                    seed_position,
+                    step_index,
+                ]
+                common.update(
+                    {
+                        "fitted_guidance_scale": float(fitted),
+                        "residual_rmse": float(residual),
+                        "guided_target_rmse": float(guided),
+                        "conditional_recovery_rmse": float(conditional),
+                        "unconditional_rmse": float(unconditional),
+                        "target_sscd": float(score),
+                        "status": "ok",
+                        "error": "",
+                    }
+                )
+            rows.append({column: common[column] for column in CSV_COLUMNS})
     return rows
 
 
@@ -1355,17 +1948,18 @@ def _initialize_prompt_worker(
     contract: GenerationContract,
     center: torch.Tensor,
     centering_mode: str,
+    evaluation_sources: tuple[str, ...],
     device_string: str,
     worker_count: int,
 ) -> None:
-    global _WORKER_CONTRACT, _WORKER_DEVICE, _WORKER_INITIAL_LATENTS
-    global _WORKER_CENTER, _WORKER_CENTERING_MODE
+    global _WORKER_CONTRACT, _WORKER_DEVICE, _WORKER_CENTER
+    global _WORKER_CENTERING_MODE, _WORKER_EVALUATION_SOURCES
+    global _WORKER_GAUSSIAN_RUNTIME, _WORKER_GAUSSIAN_ERROR
     configure_worker_cpu_threads(worker_count)
     _WORKER_CONTRACT = contract
     _WORKER_DEVICE = torch.device(device_string)
     if _WORKER_DEVICE.type == "cuda":
         torch.cuda.set_device(_WORKER_DEVICE)
-    _WORKER_INITIAL_LATENTS = _reconstruct_initial_latents(contract)
     _WORKER_CENTER = _validate_tensor(
         center,
         shape=contract.latent_shape,
@@ -1375,27 +1969,57 @@ def _initialize_prompt_worker(
     if centering_mode not in CENTERING_MODES:
         raise ExperimentError(f"unsupported centering mode: {centering_mode!r}")
     _WORKER_CENTERING_MODE = centering_mode
+    _WORKER_EVALUATION_SOURCES = tuple(evaluation_sources)
+    _WORKER_GAUSSIAN_RUNTIME = None
+    _WORKER_GAUSSIAN_ERROR = ""
 
 
 def _prompt_worker_task(
-    position: int, prompt_row: Mapping[str, object]
+    position: int,
+    prompt_row: Mapping[str, object],
 ) -> _PromptMeasurement:
+    global _WORKER_GAUSSIAN_RUNTIME, _WORKER_GAUSSIAN_ERROR
     if (
         _WORKER_CONTRACT is None
         or _WORKER_DEVICE is None
-        or _WORKER_INITIAL_LATENTS is None
         or _WORKER_CENTER is None
         or _WORKER_CENTERING_MODE is None
+        or _WORKER_EVALUATION_SOURCES is None
     ):
         raise ExperimentError("Corollary 3 worker was not initialized")
-    return _measure_prompt_safely(
+    setup_work_units = 0
+    if (
+        EVALUATION_GAUSSIAN in _WORKER_EVALUATION_SOURCES
+        and _WORKER_GAUSSIAN_RUNTIME is None
+        and not _WORKER_GAUSSIAN_ERROR
+    ):
+        setup_work_units = (
+            len(_WORKER_CONTRACT.seeds) * _WORKER_CONTRACT.num_inference_steps
+        )
+        try:
+            _WORKER_GAUSSIAN_RUNTIME = _build_gaussian_runtime(
+                _WORKER_CONTRACT,
+                _WORKER_DEVICE,
+            )
+        except Exception as error:
+            _WORKER_GAUSSIAN_ERROR = _error_message(error)
+    measurement = _measure_prompt_safely(
         position,
         prompt_row,
         contract=_WORKER_CONTRACT,
         device=_WORKER_DEVICE,
         center=_WORKER_CENTER,
         centering_mode=_WORKER_CENTERING_MODE,
-        initial_latents=_WORKER_INITIAL_LATENTS,
+        evaluation_sources=_WORKER_EVALUATION_SOURCES,
+        gaussian_runtime=_WORKER_GAUSSIAN_RUNTIME,
+        gaussian_error=_WORKER_GAUSSIAN_ERROR,
+    )
+    return _PromptMeasurement(
+        position=measurement.position,
+        original_index=measurement.original_index,
+        values_by_source=measurement.values_by_source,
+        errors_by_source=measurement.errors_by_source,
+        setup_work_units=setup_work_units,
     )
 
 
@@ -1420,6 +2044,7 @@ def _compute_rows(
     *,
     contract: GenerationContract,
     centering: CenteringContract,
+    evaluation_source: str,
     devices: Sequence[torch.device],
     progress_factory: Callable[..., Any] = tqdm,
 ) -> tuple[list[dict[str, object]], int]:
@@ -1430,42 +2055,67 @@ def _compute_rows(
         raise ExperimentError("no selected prompts were supplied")
     if not devices:
         raise ExperimentError("at least one execution device is required")
+    sources = _evaluation_sources(evaluation_source)
     worker_count = worker_count_for_tasks(devices, len(prompt_rows))
+    active_devices = tuple(devices[:worker_count])
     use_parallel = worker_count > 1 and all(
-        device.type == "cuda" and device.index is not None
-        for device in devices[:worker_count]
+        device.type == "cuda" and device.index is not None for device in active_devices
     )
+    cells = len(contract.seeds) * contract.num_inference_steps
+    prompt_work = len(sources) * cells
+    setup_work = worker_count * cells if EVALUATION_GAUSSIAN in sources else 0
     measurements: list[_PromptMeasurement] = []
     with progress_factory(
-        total=len(prompt_rows) * len(contract.seeds),
+        total=len(prompt_rows) * prompt_work + setup_work,
         desc=PROGRESS_DESCRIPTION,
-        unit="observation",
+        unit="work-unit",
         dynamic_ncols=True,
     ) as progress:
         if not use_parallel:
-            initial_latents = _reconstruct_initial_latents(contract)
-            selected_device = devices[0]
+            gaussian_runtime: _GaussianRuntime | None = None
+            gaussian_error = ""
+            if EVALUATION_GAUSSIAN in sources:
+                try:
+                    gaussian_runtime = _build_gaussian_runtime(
+                        contract,
+                        active_devices[0],
+                    )
+                except Exception as error:
+                    gaussian_error = _error_message(error)
+                progress.update(cells)
             for position, prompt_row in enumerate(prompt_rows):
                 measurements.append(
                     _measure_prompt_safely(
                         position,
                         prompt_row,
                         contract=contract,
-                        device=selected_device,
+                        device=active_devices[0],
                         center=centering.value,
                         centering_mode=centering.mode,
-                        initial_latents=initial_latents,
+                        evaluation_sources=sources,
+                        gaussian_runtime=gaussian_runtime,
+                        gaussian_error=gaussian_error,
                     )
                 )
-                progress.update(len(contract.seeds))
+                progress.update(prompt_work)
         else:
+            print(
+                "Corollary 3 worker plan: "
+                + ", ".join(
+                    f"{device}={len(round_robin_shard(prompt_rows, worker_index=i, worker_count=worker_count))} prompts"
+                    for i, device in enumerate(active_devices)
+                )
+                + "; one parent progress bar covers Gaussian inference and all "
+                "source observations"
+            )
             context = multiprocessing.get_context("spawn")
             futures: dict[
-                Future[_PromptMeasurement], tuple[int, Mapping[str, object]]
+                Future[_PromptMeasurement],
+                tuple[int, Mapping[str, object], int],
             ] = {}
             with ExitStack() as stack:
-                for worker_index in range(worker_count):
-                    device = devices[worker_index]
+                indexed = tuple(enumerate(prompt_rows))
+                for worker_index, device in enumerate(active_devices):
                     executor = stack.enter_context(
                         ProcessPoolExecutor(
                             max_workers=1,
@@ -1475,55 +2125,69 @@ def _compute_rows(
                                 contract,
                                 centering.value,
                                 centering.mode,
+                                sources,
                                 str(device),
                                 worker_count,
                             ),
                         )
                     )
-                    indexed = tuple(enumerate(prompt_rows))
                     for position, prompt_row in round_robin_shard(
                         indexed,
                         worker_index=worker_index,
                         worker_count=worker_count,
                     ):
                         future = executor.submit(
-                            _prompt_worker_task, position, prompt_row
+                            _prompt_worker_task,
+                            position,
+                            prompt_row,
                         )
-                        futures[future] = (position, prompt_row)
+                        futures[future] = (position, prompt_row, worker_index)
+                setup_accounted: set[int] = set()
                 for future in as_completed(futures):
-                    position, prompt_row = futures[future]
+                    position, prompt_row, worker_index = futures[future]
                     try:
                         result = future.result()
                     except BaseException as error:
+                        message = _error_message(
+                            error
+                            if isinstance(error, Exception)
+                            else RuntimeError(str(error))
+                        )
                         result = _PromptMeasurement(
                             position=position,
                             original_index=str(prompt_row.get("original_index", "")),
-                            values=None,
-                            error=_error_message(
-                                error
-                                if isinstance(error, Exception)
-                                else RuntimeError(str(error))
+                            values_by_source={source: None for source in sources},
+                            errors_by_source={source: message for source in sources},
+                            setup_work_units=(
+                                cells
+                                if EVALUATION_GAUSSIAN in sources
+                                and worker_index not in setup_accounted
+                                else 0
                             ),
                         )
                     measurements.append(result)
-                    progress.update(len(contract.seeds))
+                    if result.setup_work_units:
+                        setup_accounted.add(worker_index)
+                    progress.update(prompt_work + result.setup_work_units)
 
     canonical = _canonical_measurements(measurements, len(prompt_rows))
     rows: list[dict[str, object]] = []
     failed = 0
-    for position, measurement in enumerate(canonical):
-        expected_index = safe_index(prompt_rows[position].get("original_index"))
-        if measurement.original_index != expected_index:
-            raise ExperimentError("worker result prompt identity differs")
-        rows.extend(
-            _rows_for_measurement(
-                measurement,
-                prompt_rows[position],
-                contract,
-                centering,
+    for source in sources:
+        for position, measurement in enumerate(canonical):
+            expected_index = safe_index(prompt_rows[position].get("original_index"))
+            if measurement.original_index != expected_index:
+                raise ExperimentError("worker result prompt identity differs")
+            rows.extend(
+                _rows_for_measurement(
+                    measurement,
+                    prompt_rows[position],
+                    contract,
+                    centering,
+                    source,
+                )
             )
-        )
-        failed += int(measurement.values is None)
+            failed += int(measurement.values_by_source.get(source) is None)
     return rows, failed
 
 
@@ -1537,6 +2201,7 @@ def _default_output_directory(
     centering_mode: str,
     selection_strategy: str,
     selection_hash: str,
+    evaluation_source: str = EVALUATION_BOTH,
 ) -> Path:
     if selection_strategy not in SELECTION_STRATEGIES:
         raise ExperimentError(f"unsupported selection strategy: {selection_strategy!r}")
@@ -1544,6 +2209,7 @@ def _default_output_directory(
         raise ExperimentError("selection hash must be a lowercase SHA-256 digest")
     if centering_mode not in CENTERING_MODES:
         raise ExperimentError(f"unsupported centering mode: {centering_mode!r}")
+    _evaluation_sources(evaluation_source)
     run_name = generation_run_name(
         model_name,
         scheduler_name,
@@ -1554,16 +2220,17 @@ def _default_output_directory(
     )
     experiment_root = ROOT / "outputs" / run_name / EXPERIMENT_DIRECTORY
     if centering_mode == CENTERING_ZERO:
-        return experiment_root / "centering_zero" / selection_strategy / selection_hash
-    if isinstance(num_baseline_seeds, bool) or num_baseline_seeds <= 0:
-        raise ExperimentError("num_baseline_seeds must be positive with --use-mu")
-    return (
-        experiment_root
-        / "centering_mu_hat"
-        / f"baseline_S{num_seeds}_N{num_baseline_seeds}"
-        / selection_strategy
-        / selection_hash
-    )
+        base = experiment_root / "centering_zero" / selection_hash
+    else:
+        if isinstance(num_baseline_seeds, bool) or num_baseline_seeds <= 0:
+            raise ExperimentError("num_baseline_seeds must be positive with --use-mu")
+        base = (
+            experiment_root
+            / "centering_mu_hat"
+            / f"baseline_S{num_seeds}_N{num_baseline_seeds}"
+            / selection_hash
+        )
+    return base / f"evaluation_{evaluation_source}"
 
 
 def _requested_output_directory(
@@ -1577,6 +2244,7 @@ def _requested_output_directory(
     centering_mode: str,
     selection_strategy: str,
     selection_hash: str,
+    evaluation_source: str,
     output_dir: str | Path | None,
 ) -> Path:
     if output_dir is not None:
@@ -1591,6 +2259,7 @@ def _requested_output_directory(
         centering_mode,
         selection_strategy,
         selection_hash,
+        evaluation_source,
     )
 
 
@@ -1610,9 +2279,34 @@ def _prepare_output_directory(output_dir: str | Path) -> Path:
     return path
 
 
-def _figure_paths(output_directory: str | Path) -> tuple[Path, ...]:
+def _figure_paths(
+    output_directory: str | Path,
+    evaluation_source: str | None = None,
+    metric: str | None = None,
+) -> tuple[Path, ...]:
     output = Path(output_directory)
-    return tuple(output / filename for filename in FIGURE_FILENAMES)
+    if evaluation_source is None:
+        if metric is not None:
+            raise ExperimentError("figure metric requires an evaluation source")
+        filenames = FIGURE_FILENAMES
+    elif evaluation_source == EVALUATION_GAUSSIAN:
+        coefficient = GAUSSIAN_COEFFICIENT_FIGURE_FILENAMES
+        residual = GAUSSIAN_RESIDUAL_FIGURE_FILENAMES
+    elif evaluation_source == EVALUATION_TRAJECTORY:
+        coefficient = TRAJECTORY_COEFFICIENT_FIGURE_FILENAMES
+        residual = TRAJECTORY_RESIDUAL_FIGURE_FILENAMES
+    else:
+        raise ExperimentError(f"invalid figure source: {evaluation_source!r}")
+    if evaluation_source is not None:
+        if metric is None:
+            filenames = (*coefficient, *residual)
+        elif metric == COEFFICIENT_METRIC:
+            filenames = coefficient
+        elif metric == RESIDUAL_METRIC:
+            filenames = residual
+        else:
+            raise ExperimentError(f"invalid figure metric: {metric!r}")
+    return tuple(output / filename for filename in filenames)
 
 
 def _remove_figure_outputs(output_directory: str | Path) -> None:
@@ -1697,18 +2391,28 @@ def _validated_plot_frame(
     selection: TargetPairSelection,
     contract: GenerationContract,
     centering: CenteringContract,
+    evaluation_source: str = EVALUATION_BOTH,
 ) -> pd.DataFrame:
     _validate_centering_contract(centering, contract=contract, tensor_required=None)
+    sources = _evaluation_sources(evaluation_source)
     if tuple(frame.columns) != CSV_COLUMNS:
-        raise ExperimentError("saved CSV columns do not match the experiment schema")
+        raise ExperimentError(
+            "saved CSV uses the old Corollary 3 schema; recompute it for both "
+            "evaluation sources across all cached timesteps"
+        )
     prompts = _included_prompt_rows(selection)
-    expected_count = len(prompts) * len(contract.seeds)
+    seed_count = len(contract.seeds)
+    step_count = contract.num_inference_steps
+    cells_per_source = len(prompts) * seed_count * step_count
+    expected_count = len(sources) * cells_per_source
     if len(frame) != expected_count:
         raise ExperimentError(
-            f"saved CSV has {len(frame)}/{expected_count} prompt-seed rows"
+            f"saved CSV has {len(frame)}/{expected_count} "
+            "source-prompt-seed-timestep rows"
         )
     validated = frame.copy()
-    validated["record_id"] = validated["record_id"].astype(str)
+    for name in ("record_id", "evaluation_source"):
+        validated[name] = validated[name].astype(str)
     text_constants = {
         "centering_mode": centering.mode,
         "baseline_generation_scientific_config_hash": (
@@ -1720,7 +2424,12 @@ def _validated_plot_frame(
     for name, expected in text_constants.items():
         if not validated[name].astype(str).eq(expected).all():
             raise ExperimentError(f"saved CSV {name} differs from requested provenance")
-    for name in ("generation_seed", "timestep", "num_baseline_seeds"):
+    for name in (
+        "generation_seed",
+        "step_index",
+        "timestep",
+        "num_baseline_seeds",
+    ):
         validated[name] = _numeric_series(validated, name, integer=True)
     if not validated["num_baseline_seeds"].eq(centering.num_baseline_seeds).all():
         raise ExperimentError(
@@ -1759,32 +2468,69 @@ def _validated_plot_frame(
     ):
         raise ExperimentError("saved CSV target_sscd is outside [-1, 1]")
 
-    expected_records = np.repeat(
-        np.asarray([str(row["record_id"]) for row in prompts], dtype=object),
-        len(contract.seeds),
+    prompt_records = np.asarray(
+        [str(row["record_id"]) for row in prompts],
+        dtype=object,
     )
-    expected_seeds = np.tile(np.asarray(contract.seeds, dtype=np.int64), len(prompts))
-    if not np.array_equal(
-        validated["record_id"].to_numpy(dtype=object), expected_records
+    base_records = np.repeat(prompt_records, seed_count * step_count)
+    base_seeds = np.tile(
+        np.repeat(np.asarray(contract.seeds, dtype=np.int64), step_count),
+        len(prompts),
+    )
+    base_steps = np.tile(
+        np.arange(step_count, dtype=np.int64),
+        len(prompts) * seed_count,
+    )
+    expected_sources = np.repeat(
+        np.asarray(sources, dtype=object),
+        cells_per_source,
+    )
+    expected_records = np.tile(base_records, len(sources))
+    expected_seeds = np.tile(base_seeds, len(sources))
+    expected_steps = np.tile(base_steps, len(sources))
+    for name, observed, expected in (
+        (
+            "evaluation_source",
+            validated["evaluation_source"].to_numpy(dtype=object),
+            expected_sources,
+        ),
+        ("record_id", validated["record_id"].to_numpy(dtype=object), expected_records),
+        ("generation_seed", validated["generation_seed"].to_numpy(), expected_seeds),
+        ("step_index", validated["step_index"].to_numpy(), expected_steps),
     ):
-        raise ExperimentError(
-            "saved CSV records are not the canonical frozen selection"
-        )
-    if not np.array_equal(validated["generation_seed"].to_numpy(), expected_seeds):
-        raise ExperimentError(
-            "saved CSV does not contain the complete ordered seed grid"
-        )
-    constants = {
-        "timestep": contract.timestep,
-        "alpha_t": contract.alpha_t,
-        "sigma_t": contract.sigma_t,
-        "snr_t": contract.snr_t,
-        "guidance_scale": REQUIRED_GUIDANCE_SCALE,
+        if not np.array_equal(observed, expected):
+            raise ExperimentError(f"saved CSV {name} is not the canonical source grid")
+
+    repetitions = len(sources) * len(prompts) * seed_count
+    schedule_values = {
+        "timestep": contract.timesteps.detach().cpu().numpy(),
+        "alpha_t": contract.alpha_values.detach().cpu().numpy(),
+        "sigma_t": contract.sigma_values.detach().cpu().numpy(),
+        "snr_t": contract.snr_values.detach().cpu().numpy(),
     }
-    for name, expected in constants.items():
-        observed = validated[name].to_numpy(dtype=float)
-        if not np.allclose(observed, float(expected), rtol=1e-13, atol=0.0):
-            raise ExperimentError(f"saved CSV {name} differs from requested provenance")
+    for name, schedule in schedule_values.items():
+        expected = np.tile(schedule, repetitions)
+        observed = validated[name].to_numpy()
+        exact = np.array_equal(observed, expected)
+        if name != "timestep":
+            exact = np.allclose(observed, expected, rtol=1e-13, atol=0.0)
+        if not exact:
+            raise ExperimentError(f"saved CSV {name} differs from the cached schedule")
+    if not np.allclose(
+        validated["guidance_scale"].to_numpy(dtype=float),
+        REQUIRED_GUIDANCE_SCALE,
+        rtol=0.0,
+        atol=0.0,
+    ):
+        raise ExperimentError("saved CSV guidance_scale differs from Corollary 3")
+    grouped_scores = validated.groupby(
+        ["record_id", "generation_seed"],
+        sort=False,
+    )["target_sscd"].nunique(dropna=False)
+    if not grouped_scores.eq(1).all():
+        raise ExperimentError(
+            "same-seed endpoint target_sscd differs across sources or timesteps"
+        )
     return validated
 
 
@@ -1793,54 +2539,110 @@ def _render_figure(
     destinations: Sequence[Path],
     *,
     centering_mode: str,
+    evaluation_source: str,
+    metric: str,
 ) -> None:
     if centering_mode not in CENTERING_MODES:
         raise ExperimentError(f"unsupported centering mode: {centering_mode!r}")
+    if evaluation_source not in (EVALUATION_GAUSSIAN, EVALUATION_TRAJECTORY):
+        raise ExperimentError(f"invalid figure source: {evaluation_source!r}")
+    if metric not in PLOT_METRICS:
+        raise ExperimentError(f"invalid figure metric: {metric!r}")
+    if not frame["evaluation_source"].astype(str).eq(evaluation_source).all():
+        raise ExperimentError("figure frame mixes evaluation sources")
     with matplotlib.rc_context(PLOT_STYLE):
         figure, axis = plt.subplots(figsize=FIGURE_SIZE)
         try:
             norm = Normalize(
-                vmin=SSCD_COLOR_RANGE[0], vmax=SSCD_COLOR_RANGE[1], clip=True
+                vmin=SSCD_COLOR_RANGE[0],
+                vmax=SSCD_COLOR_RANGE[1],
+                clip=True,
             )
-            colors = frame["target_sscd"].to_numpy(dtype=float)
-            scatter = axis.scatter(
-                frame["fitted_guidance_scale"].to_numpy(dtype=float),
-                frame["residual_rmse"].to_numpy(dtype=float),
-                c=colors,
+            observation_segments: list[np.ndarray] = []
+            observation_colors: list[float] = []
+            for (_record_id, _generation_seed), group in frame.groupby(
+                ["record_id", "generation_seed"], sort=False
+            ):
+                ordered = group.sort_values("snr_t", kind="stable")
+                observation_segments.append(
+                    ordered[["snr_t", metric]].to_numpy(dtype=float)
+                )
+                observation_colors.append(float(ordered["target_sscd"].iloc[0]))
+            observations = LineCollection(
+                observation_segments,
                 cmap="viridis",
                 norm=norm,
-                s=22,
-                alpha=SCATTER_ALPHA,
-                edgecolors="none",
+                linewidths=OBSERVATION_LINE_WIDTH,
+                alpha=OBSERVATION_LINE_ALPHA,
+                zorder=2,
             )
-            mappable = ScalarMappable(norm=scatter.norm, cmap=scatter.cmap)
-            mappable.set_array(colors)
+            observations.set_array(np.asarray(observation_colors, dtype=float))
+            axis.add_collection(observations)
+
+            groups = sorted(
+                (
+                    (
+                        float(group["snr_t"].iloc[0]),
+                        group[metric].to_numpy(dtype=float),
+                    )
+                    for _step_index, group in frame.groupby("step_index", sort=True)
+                ),
+                key=lambda item: item[0],
+            )
+            x_values = np.asarray([x for x, _values in groups], dtype=float)
+            medians = np.asarray(
+                [np.median(values) for _x, values in groups], dtype=float
+            )
+            for lower_q, upper_q, alpha in PERCENTILE_BANDS:
+                axis.fill_between(
+                    x_values,
+                    [np.quantile(values, lower_q) for _x, values in groups],
+                    [np.quantile(values, upper_q) for _x, values in groups],
+                    color=PERCENTILE_BAND_COLOR,
+                    alpha=alpha,
+                    linewidth=0.0,
+                    zorder=1,
+                )
+            axis.plot(
+                x_values,
+                medians,
+                color="black",
+                linewidth=1.35,
+                zorder=3,
+            )
+            if metric == COEFFICIENT_METRIC:
+                axis.axhline(
+                    REQUIRED_GUIDANCE_SCALE,
+                    color="black",
+                    linestyle="--",
+                    linewidth=1.0,
+                    label=rf"$g={REQUIRED_GUIDANCE_SCALE:g}$",
+                    zorder=4,
+                )
+                axis.legend(fontsize=10, frameon=False)
+            axis.set_xscale("log")
+            axis.xaxis.set_major_locator(LogLocator(base=10, subs=(1,), numticks=7))
+            axis.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
+            axis.set_xlabel(r"$\alpha_t^2/\sigma_t^2$")
+            axis.grid(True, which="both", alpha=0.18, linewidth=0.6)
+            if metric == COEFFICIENT_METRIC:
+                if centering_mode == CENTERING_MU_HAT:
+                    axis.set_ylabel(r"$\widehat{g}_t(\widehat{\boldsymbol{\mu}})$")
+                else:
+                    axis.set_ylabel(r"$\widehat{g}_t$")
+            elif centering_mode == CENTERING_MU_HAT:
+                axis.set_ylabel(
+                    r"$\|\mathbf{r}_t(\widehat{\boldsymbol{\mu}})\|/\sqrt{d}$"
+                )
+            else:
+                axis.set_ylabel(r"$\|\mathbf{r}_t\|/\sqrt{d}$")
+            mappable = ScalarMappable(norm=norm, cmap="viridis")
+            mappable.set_array(np.asarray(observation_colors, dtype=float))
             colorbar = figure.colorbar(mappable, ax=axis)
             if colorbar.solids is not None:
                 colorbar.solids.set_alpha(COLORBAR_ALPHA)
             colorbar.set_label(COLORBAR_LABEL, fontsize=TEXT_FONT_SIZE)
             colorbar.ax.tick_params(labelsize=AXIS_NUMBER_FONT_SIZE)
-            axis.axvline(
-                REQUIRED_GUIDANCE_SCALE,
-                color="black",
-                linewidth=0.8,
-                linestyle="--",
-                alpha=0.75,
-            )
-            axis.set_xlabel(r"$\widehat{g}$")
-            if centering_mode == CENTERING_MU_HAT:
-                axis.set_ylabel(
-                    r"$\|(\widehat{\mathbf{x}}_{0\mid T,g}-\widehat{\boldsymbol{\mu}})-"
-                    r"\widehat{g}(\mathbf{x}^{\star}-\widehat{\boldsymbol{\mu}})"
-                    r"\|_2/\sqrt{d}$"
-                )
-            else:
-                axis.set_ylabel(
-                    r"$\|\widehat{\mathbf{x}}_{0\mid T,g}-"
-                    r"\widehat{g}\mathbf{x}^{\star}\|_2/\sqrt{d}$"
-                )
-            axis.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
-            axis.grid(True, which="both", alpha=0.18, linewidth=0.6)
             figure.tight_layout()
             _atomic_save_figures(figure, destinations)
         finally:
@@ -1854,6 +2656,7 @@ def plot_saved_results(
     selection: TargetPairSelection,
     contract: GenerationContract,
     centering: CenteringContract,
+    evaluation_source: str,
 ) -> None:
     source = Path(csv_path)
     if source.is_symlink() or not source.is_file():
@@ -1863,6 +2666,7 @@ def plot_saved_results(
             source,
             dtype={
                 "record_id": str,
+                "evaluation_source": str,
                 "centering_mode": str,
                 "baseline_generation_scientific_config_hash": str,
                 "baseline_schedule_sha256": str,
@@ -1878,12 +2682,20 @@ def plot_saved_results(
         selection=selection,
         contract=contract,
         centering=centering,
+        evaluation_source=evaluation_source,
     )
-    _render_figure(
-        validated,
-        _figure_paths(output_directory),
-        centering_mode=centering.mode,
-    )
+    for source_name in _evaluation_sources(evaluation_source):
+        source_frame = validated.loc[
+            validated["evaluation_source"].eq(source_name)
+        ].copy()
+        for metric in PLOT_METRICS:
+            _render_figure(
+                source_frame,
+                _figure_paths(output_directory, source_name, metric),
+                centering_mode=centering.mode,
+                evaluation_source=source_name,
+                metric=metric,
+            )
 
 
 def run_experiment(
@@ -1896,11 +2708,13 @@ def run_experiment(
     num_seeds: int,
     num_baseline_seeds: int,
     use_mu: bool = False,
+    evaluation_source: str = EVALUATION_BOTH,
     output_dir: str | Path | None,
     device: str | torch.device = "auto",
     progress_factory: Callable[..., Any] = tqdm,
 ) -> int:
     _validate_scientific_request(scheduler_name, guidance_scale)
+    _evaluation_sources(evaluation_source)
     selection = _load_frozen_selection(
         ROOT,
         model_name=model_name,
@@ -1953,6 +2767,7 @@ def run_experiment(
         centering_mode=centering.mode,
         selection_strategy=selection.selection_strategy,
         selection_hash=selection.sha256,
+        evaluation_source=evaluation_source,
         output_dir=output_dir,
     )
     output = _prepare_output_directory(requested)
@@ -1961,11 +2776,13 @@ def run_experiment(
         devices = resolve_devices(device)
     except DeviceSelectionError as error:
         raise ExperimentError(str(error)) from error
-    _validate_initial_latent_sentinel(prompts[0], contract)
+    if EVALUATION_GAUSSIAN in _evaluation_sources(evaluation_source):
+        _validate_initial_latent_sentinel(prompts[0], contract)
     rows, failed_prompts = _compute_rows(
         prompts,
         contract=contract,
         centering=centering,
+        evaluation_source=evaluation_source,
         devices=devices,
         progress_factory=progress_factory,
     )
@@ -1974,12 +2791,14 @@ def run_experiment(
         _remove_figure_outputs(output)
         return 1
     try:
+        _remove_figure_outputs(output)
         plot_saved_results(
             csv_path,
             output,
             selection=selection,
             contract=contract,
             centering=centering,
+            evaluation_source=evaluation_source,
         )
     except BaseException:
         _remove_figure_outputs(output)
@@ -2000,6 +2819,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_seeds=arguments.num_seeds,
             num_baseline_seeds=arguments.num_baseline_seeds,
             use_mu=arguments.use_mu,
+            evaluation_source=arguments.evaluation_source,
             output_dir=arguments.output_dir,
             device=arguments.device,
         )
@@ -2043,16 +2863,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         centering_mode=centering.mode,
         selection_strategy=selection.selection_strategy,
         selection_hash=selection.sha256,
+        evaluation_source=arguments.evaluation_source,
         output_dir=arguments.output_dir,
     )
     output = _prepare_output_directory(requested)
-    _remove_figure_outputs(output)
     plot_saved_results(
         output / CSV_NAME,
         output,
         selection=selection,
         contract=contract,
         centering=centering,
+        evaluation_source=arguments.evaluation_source,
     )
     return 0
 

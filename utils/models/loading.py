@@ -27,7 +27,10 @@ from .devices import (
 RevisionResolver = Callable[[str], str]
 _TRUE_ENVIRONMENT_VALUES = frozenset({"1", "on", "true", "yes"})
 _TORCH_COMPILE_BACKEND = "inductor"
-_TORCH_COMPILE_MODE = "reduce-overhead"
+_TORCH_COMPILE_OPTIONS: Mapping[str, bool] = {
+    "triton.cudagraphs": True,
+    "triton.cudagraph_skip_dynamic_graphs": True,
+}
 
 
 class ModelLoadingError(RuntimeError):
@@ -115,7 +118,9 @@ def compile_loaded_unet(
     Compilation is configured once per loaded worker replica. PyTorch compiles
     lazily on the first forward call, so the guarded forward retries that same
     call eagerly if compilation fails. CUDA OOM remains visible to the caller's
-    existing adaptive batching logic.
+    existing adaptive batching logic. CUDA Graphs remain enabled for stable
+    input shapes, while Inductor skips their capture for symbolic shapes rather
+    than recording a separate graph for every observed dynamic size.
     """
 
     try:
@@ -133,6 +138,7 @@ def compile_loaded_unet(
         "status": "skipped_non_cuda",
         "backend": None,
         "mode": None,
+        "options": None,
         "fullgraph": None,
     }
     metadata["torch_compile"] = compilation
@@ -187,7 +193,7 @@ def compile_loaded_unet(
         compiled_forward = compiler(
             eager_forward,
             backend=_TORCH_COMPILE_BACKEND,
-            mode=_TORCH_COMPILE_MODE,
+            options=dict(_TORCH_COMPILE_OPTIONS),
             fullgraph=True,
         )
         if not callable(compiled_forward):
@@ -196,7 +202,7 @@ def compile_loaded_unet(
         compilation.update(
             status="eager_fallback",
             backend=_TORCH_COMPILE_BACKEND,
-            mode=_TORCH_COMPILE_MODE,
+            options=dict(_TORCH_COMPILE_OPTIONS),
             fullgraph=True,
             reason=f"{type(error).__name__}: {error}",
         )
@@ -206,7 +212,7 @@ def compile_loaded_unet(
     compilation.update(
         status="configured",
         backend=_TORCH_COMPILE_BACKEND,
-        mode=_TORCH_COMPILE_MODE,
+        options=dict(_TORCH_COMPILE_OPTIONS),
         fullgraph=True,
     )
 
@@ -237,7 +243,7 @@ def compile_loaded_unet(
     print(
         "torch.compile configured UNet on "
         f"{device} (backend={_TORCH_COMPILE_BACKEND}, "
-        f"mode={_TORCH_COMPILE_MODE}, fullgraph=True); "
+        f"options={dict(_TORCH_COMPILE_OPTIONS)}, fullgraph=True); "
         "the first forward includes compilation.",
         file=sys.stderr,
     )

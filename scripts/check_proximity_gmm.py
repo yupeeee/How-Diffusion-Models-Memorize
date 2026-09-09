@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Inspect GMM evidence and prompt-level proximity decisions."""
+"""Inspect the current diagonal-GMM prompt selection in single-panel figures."""
 
 from __future__ import annotations
 
 import argparse
 import math
 import sys
-from io import BytesIO
 from pathlib import Path
 
 import matplotlib
@@ -14,6 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
 from matplotlib.patches import Ellipse  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 import numpy as np
 import pandas as pd
 
@@ -22,22 +22,37 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.check_proximity_clusters import (  # noqa: E402
     CLUSTER_COLORS,
-    KIND_COLORS,
     KIND_ORDER,
-    RULE_COLORS,
-    load_points,
+    KIND_LINESTYLES,
     normalized_kind,
-    prompt_spearman,
 )
-from utils.common.io import atomic_write_bytes, atomic_write_frame_csv  # noqa: E402
+from utils.common.io import atomic_write_frame_csv  # noqa: E402
 from utils.data.proximity_gmm import (  # noqa: E402
     COMPONENT_NAMES,
     DEFAULT_REG_COVAR,
     GaussianMixtureFit,
     fit_gaussian_mixture,
-    marginal_component_boundary,
     raw_parameters,
     standardize_features,
+)
+from utils.data.selection import (  # noqa: E402
+    _gmm_decision,
+    _normalize_csv,
+    _prompt_spearman,
+)
+from utils.experiments.plotting import (  # noqa: E402
+    AXIS_NUMBER_FONT_SIZE,
+    CATEGORY_LINESTYLES,
+    FIGURE_SIZE,
+    LEGEND_FONT_SIZE,
+    PLOT_STYLE,
+    TEXT_FONT_SIZE,
+    X_AXIS_LABEL,
+    Y_AXIS_LABEL,
+    _publish_figures,
+    add_prompt_curves,
+    add_sscd_colorbar,
+    category_legend_label,
 )
 
 AUDIT_COLUMNS = [
@@ -51,18 +66,16 @@ AUDIT_COLUMNS = [
     "l2_norm",
     "sscd",
     "include_prompt",
+    "observation_status",
+    "observation_error",
     "gmm_component",
     "gmm_low_mode_probability",
     "computed_prompt_spearman",
     "prompt_rule",
-    "prompt_median_l2_norm",
-    "gmm_high_proximity_evidence",
-    "prompt_gmm_evidence_seed_count",
     "gmm_selection_decision",
     "gmm_reg_covar",
     "gmm_iterations",
     "gmm_log_likelihood",
-    "sscd_marginal_boundary",
 ]
 
 
@@ -79,9 +92,10 @@ def positive_finite_float(value: str) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Fit a deterministic two-component full-covariance Gaussian mixture "
-            "to standardized L2/SSCD points, derive its marginal SSCD boundary, "
-            "and apply the prompt evidence-and-correlation rule."
+            "Fit the current deterministic two-component diagonal-covariance "
+            "Gaussian mixture to every valid reference L2/SSCD observation. "
+            "Keep complete prompts with any high-component seed; Spearman "
+            "correlations are descriptive only."
         ),
         allow_abbrev=False,
     )
@@ -95,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         required=True,
         type=Path,
-        help="Directory for one assignment CSV and one comparison figure.",
+        help="Directory for one assignment CSV and three single-panel PNG/PDF views.",
     )
     parser.add_argument(
         "--reg-covar",
@@ -104,6 +118,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum covariance eigenvalue in standardized feature units.",
     )
     return parser
+
+
+def _valid_observations(frame: pd.DataFrame) -> pd.Series:
+    return (
+        frame["observation_status"].eq("complete")
+        & np.isfinite(frame["l2_norm"])
+        & np.isfinite(frame["sscd"])
+    )
+
+
+def load_reference_points(path: Path) -> tuple[pd.DataFrame, int, int]:
+    """Load current reference rows without dropping valid incomplete siblings."""
+
+    expanded = path.expanduser()
+    if not expanded.is_file() or expanded.is_symlink():
+        raise ValueError(f"input CSV is missing or unsafe: {expanded}")
+    frame = _normalize_csv(
+        pd.read_csv(
+            expanded.resolve(),
+            dtype={"original_index": str},
+            keep_default_na=False,
+            float_precision="round_trip",
+        )
+    )
+    if frame.empty:
+        raise ValueError("reference selection contains no prompts")
+    identity_counts = frame.groupby("original_index", sort=False)[
+        ["prompt", "kind", "include_prompt"]
+    ].nunique(dropna=False)
+    if identity_counts.gt(1).any(axis=1).any():
+        raise ValueError("prompt, kind, and include_prompt must be fixed per prompt ID")
+    if frame.duplicated(["original_index", "seed"]).any():
+        raise ValueError("duplicate (original_index, seed) observations found")
+    seed_sets = frame.groupby("original_index", sort=False)["seed"].agg(
+        lambda values: tuple(sorted(int(value) for value in values))
+    )
+    expected_seeds = seed_sets.iloc[0]
+    if not seed_sets.map(lambda values: values == expected_seeds).all():
+        raise ValueError("reference prompts do not share one common seed set")
+    if len(expected_seeds) < 2:
+        raise ValueError("at least two reference seeds per prompt are required")
+    valid = _valid_observations(frame)
+    if not valid.any():
+        raise ValueError("reference selection has no valid observations")
+    incomplete_prompts = (
+        (~valid).groupby(frame["original_index"], sort=False).any().sum()
+    )
+    return frame.reset_index(drop=True), len(expected_seeds), int(incomplete_prompts)
 
 
 def verify_prompt_correlations(
@@ -157,15 +219,25 @@ def annotate(
     fit: GaussianMixtureFit,
     *,
     reg_covar: float,
-    sscd_boundary: float,
 ) -> pd.DataFrame:
     result = frame.copy()
-    low_probability = fit.responsibilities[:, 0]
-    hard_component = fit.responsibilities.argmax(axis=1)
-    result["gmm_component"] = np.asarray(COMPONENT_NAMES)[hard_component]
-    result["gmm_low_mode_probability"] = low_probability
+    valid = _valid_observations(result)
+    if fit.responsibilities.shape != (int(valid.sum()), 2):
+        raise ValueError("GMM responsibilities do not match the valid observations")
+    result["gmm_component"] = ""
+    result["gmm_low_mode_probability"] = math.nan
+    result.loc[valid, "gmm_component"] = np.asarray(COMPONENT_NAMES)[
+        fit.responsibilities.argmax(axis=1)
+    ]
+    result.loc[valid, "gmm_low_mode_probability"] = fit.responsibilities[:, 0]
 
-    correlations = prompt_spearman(result)
+    correlations = pd.Series(
+        {
+            str(index): _prompt_spearman(group.to_dict(orient="records"))
+            for index, group in result.groupby("original_index", sort=False)
+        },
+        dtype="float64",
+    )
     verify_prompt_correlations(result, correlations)
     result["computed_prompt_spearman"] = result["original_index"].map(correlations)
     rho = result["computed_prompt_spearman"]
@@ -174,26 +246,17 @@ def annotate(
         ["rho < 0", "rho >= 0"],
         default="rho undefined",
     )
-
-    prompt_median_l2 = result.groupby("original_index", sort=False)[
-        "l2_norm"
-    ].transform("median")
-    evidence = result["sscd"].gt(sscd_boundary) & result["l2_norm"].lt(prompt_median_l2)
-    evidence_count = evidence.groupby(result["original_index"], sort=False).transform(
-        "sum"
-    )
-    result["prompt_median_l2_norm"] = prompt_median_l2
-    result["gmm_high_proximity_evidence"] = evidence
-    result["prompt_gmm_evidence_seed_count"] = evidence_count
-    result["gmm_selection_decision"] = np.select(
-        [rho.lt(0.0) & evidence_count.ge(1), rho.notna()],
-        ["include", "discard"],
-        default="unusable",
-    )
+    decisions: dict[str, str] = {}
+    for index, group in result.groupby("original_index", sort=False):
+        if not valid.loc[group.index].all():
+            decisions[str(index)] = "unusable"
+            continue
+        included, _, _ = _gmm_decision(group["gmm_low_mode_probability"].tolist())
+        decisions[str(index)] = "include" if included else "discard"
+    result["gmm_selection_decision"] = result["original_index"].map(decisions)
     result["gmm_reg_covar"] = reg_covar
     result["gmm_iterations"] = fit.iterations
     result["gmm_log_likelihood"] = fit.log_likelihood
-    result["sscd_marginal_boundary"] = sscd_boundary
     return result
 
 
@@ -207,20 +270,18 @@ def print_report(
     scope: str,
     seeds_per_prompt: int,
     excluded_prompts: int,
-    sscd_boundary: float,
 ) -> None:
     raw_means, raw_covariances = raw_parameters(fit, feature_mean, feature_scale)
     print(f"Input: {source}")
     print(
-        f"Scope: {scope}; observations={len(frame)}; "
+        f"Scope: {scope}; fitted observations={len(fit.responsibilities)}; "
         f"prompts={frame['original_index'].nunique()}; "
-        f"seeds/prompt={seeds_per_prompt}; excluded incomplete prompts={excluded_prompts}"
+        f"seeds/prompt={seeds_per_prompt}; unusable incomplete prompts={excluded_prompts}"
     )
     print(
         f"Converged in {fit.iterations} EM iterations; "
         f"log likelihood={fit.log_likelihood:.6f}"
     )
-    print(f"Weighted marginal SSCD boundary={sscd_boundary:.6f}")
     for component_index, component_name in enumerate(COMPONENT_NAMES):
         group = frame.loc[frame["gmm_component"].eq(component_name)]
         covariance = raw_covariances[component_index]
@@ -247,19 +308,17 @@ def print_report(
         .mean()
     )
     split_prompts = hard_fraction.between(0.0, 1.0, inclusive="neither").sum()
-    print("\nGMM evidence selection versus within-prompt Spearman sign:")
+    print("\nGMM selection versus descriptive within-prompt Spearman sign:")
     print(table.to_string())
     print(
         f"Prompts with hard assignments in both components: {split_prompts}/{len(prompts)}"
     )
 
     undefined_rho = prompts["prompt_rule"].eq("rho undefined").sum()
-    evidence_prompts = int(prompts["prompt_gmm_evidence_seed_count"].ge(1).sum())
     included_prompts = int(prompts["gmm_selection_decision"].eq("include").sum())
     print(
-        "Prompts with high-SSCD/below-median-L2 evidence: "
-        f"{evidence_prompts}/{len(prompts)}; included by evidence and rho < 0: "
-        f"{included_prompts}/{len(prompts)}; undefined rho={undefined_rho}"
+        f"Prompts included by any high-component seed: {included_prompts}/{len(prompts)}; "
+        f"undefined rho (descriptive only)={undefined_rho}"
     )
 
 
@@ -294,70 +353,92 @@ def plot_assignments(
     *,
     component_means: np.ndarray,
     component_covariances: np.ndarray,
-    title: str,
-) -> None:
+) -> tuple[Path, ...]:
+    """Save separate component, Spearman-sign, and kind proximity profiles.
+
+    SSCD controls color. Line style records the category of each segment's
+    right endpoint after L2 ordering; curves never join different prompts.
+    """
+
     plotted = frame.copy()
     plotted["plot_kind"] = normalized_kind(plotted["kind"])
-    panels = (
-        (
-            "gmm_component",
-            CLUSTER_COLORS,
-            COMPONENT_NAMES,
-            "Full-covariance GMM, k=2",
-        ),
-        (
-            "prompt_rule",
-            RULE_COLORS,
-            ("rho < 0", "rho >= 0", "rho undefined"),
-            "Within-prompt Spearman sign",
-        ),
-        ("plot_kind", KIND_COLORS, KIND_ORDER, "Prompt kind"),
+    views = (
+        ("gmm_component", COMPONENT_NAMES, ""),
+        ("prompt_rule", ("rho < 0", "rho >= 0", "rho undefined"), "_spearman"),
+        ("plot_kind", KIND_ORDER, "_kind"),
     )
-    figure, axes = plt.subplots(1, 3, figsize=(12.0, 4.0), sharex=True, sharey=True)
-    for axis, (column, colors, order, panel_title) in zip(axes, panels, strict=True):
-        for label in order:
-            subset = plotted.loc[plotted[column].eq(label)]
-            if subset.empty:
-                continue
-            axis.scatter(
-                subset["l2_norm"],
-                subset["sscd"],
-                s=7,
-                alpha=0.32,
-                color=colors[label],
-                edgecolors="none",
-                label=label,
-                rasterized=True,
-            )
-        axis.axhline(
-            float(plotted["sscd_marginal_boundary"].iloc[0]),
-            color="0.35",
-            linestyle="--",
-            linewidth=0.8,
-        )
-        axis.set_title(panel_title)
-        axis.set_xlabel(r"$\|\mathbf{x}_0-\mathbf{x}^{\star}\|_2$")
-        axis.grid(True, linewidth=0.5, alpha=0.15)
-        axis.legend(frameon=False, fontsize=8, markerscale=1.5)
-    for component_index in range(2):
-        for standard_deviations in (1.0, 2.0):
-            axes[0].add_patch(
-                covariance_ellipse(
-                    component_means[component_index],
-                    component_covariances[component_index],
-                    component_index=component_index,
-                    standard_deviations=standard_deviations,
+    figures = []
+    published_paths: list[Path] = []
+    with matplotlib.rc_context(PLOT_STYLE):
+        try:
+            for column, order, suffix in views:
+                figure, axis = plt.subplots(figsize=FIGURE_SIZE)
+                filenames = {
+                    extension: f"{destination.stem}{suffix}.{extension}"
+                    for extension in ("png", "pdf")
+                }
+                figures.append((figure, filenames))
+                published_paths.extend(
+                    destination.parent / name for name in filenames.values()
                 )
-            )
-    axes[0].set_ylabel("SSCD")
-    figure.suptitle(title, fontsize=11)
-    figure.tight_layout()
-    buffer = BytesIO()
-    try:
-        figure.savefig(buffer, format="png", dpi=220, bbox_inches="tight")
-    finally:
-        plt.close(figure)
-    atomic_write_bytes(destination, buffer.getvalue())
+                category_styles = (
+                    KIND_LINESTYLES
+                    if column == "plot_kind"
+                    else dict(zip(order, CATEGORY_LINESTYLES))
+                )
+                add_prompt_curves(
+                    axis,
+                    plotted,
+                    category_column=column,
+                    category_styles=category_styles,
+                )
+                add_sscd_colorbar(figure, axis, plotted["sscd"])
+                handles = [
+                    Line2D(
+                        [],
+                        [],
+                        color="black",
+                        linestyle=category_styles[label],
+                        linewidth=1.0,
+                        alpha=1.0,
+                        label=(
+                            category_legend_label(label)
+                            if column == "plot_kind"
+                            else label.replace("_", " ")
+                        ),
+                    )
+                    for label in order
+                    if plotted[column].eq(label).any()
+                ]
+                if column == "gmm_component":
+                    for component_index in range(2):
+                        for standard_deviations in (1.0, 2.0):
+                            axis.add_patch(
+                                covariance_ellipse(
+                                    component_means[component_index],
+                                    component_covariances[component_index],
+                                    component_index=component_index,
+                                    standard_deviations=standard_deviations,
+                                )
+                            )
+                axis.set_xlabel(X_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
+                axis.set_ylabel(Y_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
+                axis.tick_params(
+                    axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE
+                )
+                axis.grid(True, linewidth=0.6, alpha=0.18)
+                if handles:
+                    axis.legend(
+                        handles=handles,
+                        frameon=False,
+                        fontsize=LEGEND_FONT_SIZE,
+                    )
+                figure.tight_layout()
+            _publish_figures(destination.parent, figures)
+        finally:
+            for figure, _filenames in figures:
+                plt.close(figure)
+    return tuple(published_paths)
 
 
 def main() -> int:
@@ -368,38 +449,20 @@ def main() -> int:
     output = arguments.output_dir.expanduser().resolve()
     if output == source.parent or source.parent in output.parents:
         parser.error("output directory must not be inside the input CSV directory")
-    scope = "all complete reference prompts"
+    scope = "all valid reference observations"
 
     try:
-        frame, seeds_per_prompt, excluded_prompts = load_points(
-            source_argument,
-            plotted_only=False,
+        frame, seeds_per_prompt, excluded_prompts = load_reference_points(
+            source_argument
         )
-        required_reference_columns = {
-            "reference_run_name",
-            "reference_generation_hash",
-            "reference_sscd_hash",
-        }
-        missing_reference_columns = sorted(required_reference_columns - set(frame))
-        if missing_reference_columns:
-            raise ValueError(
-                "input must be a frozen reference selection.csv; missing: "
-                + ", ".join(missing_reference_columns)
-            )
-        raw_values = frame[["l2_norm", "sscd"]].to_numpy(dtype=np.float64)
+        valid = _valid_observations(frame)
+        raw_values = frame.loc[valid, ["l2_norm", "sscd"]].to_numpy(dtype=np.float64)
         features, feature_mean, feature_scale = standardize_features(raw_values)
         fit = fit_gaussian_mixture(features, reg_covar=arguments.reg_covar)
-        boundary_standardized = marginal_component_boundary(
-            fit.weights, fit.means, fit.covariances, feature_index=1
-        )
-        sscd_boundary = float(
-            feature_mean[1] + boundary_standardized * feature_scale[1]
-        )
         annotated = annotate(
             frame,
             fit,
             reg_covar=arguments.reg_covar,
-            sscd_boundary=sscd_boundary,
         )
         assignments_path = output / "gmm_assignments.csv"
         figure_path = output / "gmm_k2.png"
@@ -422,20 +485,19 @@ def main() -> int:
             scope=scope,
             seeds_per_prompt=seeds_per_prompt,
             excluded_prompts=excluded_prompts,
-            sscd_boundary=sscd_boundary,
         )
-        plot_assignments(
-            saved,
+        figure_paths = plot_assignments(
+            saved.loc[_valid_observations(saved)].copy(),
             figure_path,
             component_means=component_means,
             component_covariances=component_covariances,
-            title=f"{saved['model_name'].iloc[0]}: GMM vs prompt behavior ({scope})",
         )
     except (OSError, RuntimeError, ValueError, np.linalg.LinAlgError) as error:
         parser.error(str(error))
 
     print(f"Assignments: {assignments_path}")
-    print(f"Figure: {figure_path}")
+    for path in figure_paths:
+        print(f"Figure: {path}")
     return 0
 
 

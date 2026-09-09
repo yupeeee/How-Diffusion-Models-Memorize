@@ -425,6 +425,7 @@ def test_compile_loaded_unet_skips_non_cuda_without_calling_compiler(
         "status": "skipped_non_cuda",
         "backend": None,
         "mode": None,
+        "options": None,
         "fullgraph": None,
     }
 
@@ -460,14 +461,21 @@ def test_compile_loaded_unet_configures_bound_forward_and_becomes_active(
     assert compiled_target == eager_forward
     assert compile_kwargs == {
         "backend": "inductor",
-        "mode": "reduce-overhead",
+        "options": {
+            "triton.cudagraphs": True,
+            "triton.cudagraph_skip_dynamic_graphs": True,
+        },
         "fullgraph": True,
     }
     assert observed.device_metadata["torch_compile"] == {
         "target": "unet.forward",
         "status": "configured",
         "backend": "inductor",
-        "mode": "reduce-overhead",
+        "mode": None,
+        "options": {
+            "triton.cudagraphs": True,
+            "triton.cudagraph_skip_dynamic_graphs": True,
+        },
         "fullgraph": True,
     }
 
@@ -525,6 +533,7 @@ def test_compile_loaded_unet_records_unavailable_environment(
     assert metadata["status"] == "unavailable"
     assert metadata["backend"] is None
     assert metadata["mode"] is None
+    assert metadata["options"] is None
     assert metadata["fullgraph"] is None
     assert isinstance(metadata["reason"], str)
     _call_compile_test_unet(observed)
@@ -558,7 +567,11 @@ def test_compile_loaded_unet_falls_back_after_immediate_setup_error(
         "target": "unet.forward",
         "status": "eager_fallback",
         "backend": "inductor",
-        "mode": "reduce-overhead",
+        "mode": None,
+        "options": {
+            "triton.cudagraphs": True,
+            "triton.cudagraph_skip_dynamic_graphs": True,
+        },
         "fullgraph": True,
         "reason": "RuntimeError: synthetic compile setup failure",
     }
@@ -969,11 +982,15 @@ def test_scheduler_construction_from_config_matches_component_wrapper() -> None:
     assert received == [config, config]
     assert direct.name == wrapped.name == "ddim"
     assert direct.class_name == wrapped.class_name == "Built"
-    assert direct.config == wrapped.config == {
-        "prediction_type": "v_prediction",
-        "beta_start": 0.00085,
-        "_use_default_values": ["clip_sample_range", "thresholding"],
-    }
+    assert (
+        direct.config
+        == wrapped.config
+        == {
+            "prediction_type": "v_prediction",
+            "beta_start": 0.00085,
+            "_use_default_values": ["clip_sample_range", "thresholding"],
+        }
+    )
     assert direct.removed_config_keys == wrapped.removed_config_keys == ()
     assert direct.metadata() == wrapped.metadata()
 

@@ -61,13 +61,15 @@ def load_unconditional_baseline_metadata_only(
         metadata.get("init_noise_sigma"), "scheduler initial-noise scale"
     )
     if not math.isclose(init_noise_sigma, 1.0, rel_tol=0.0, abs_tol=1e-12):
-        raise UnconditionalBaselineError("DDIM init_noise_sigma must equal 1")
+        raise UnconditionalBaselineError(
+            f"{identity.scheduler_name.upper()} init_noise_sigma must equal 1"
+        )
     timestep = _nonnegative_integer(metadata.get("timestep"), "baseline timestep")
     alpha_t = _positive_finite_float(metadata.get("alpha_T"), "baseline alpha_T")
     sigma_t = _positive_finite_float(metadata.get("sigma_T"), "baseline sigma_T")
     if not math.isclose(alpha_t**2 + sigma_t**2, 1.0, rel_tol=1e-5, abs_tol=1e-6):
         raise UnconditionalBaselineError(
-            "baseline alpha_T and sigma_T violate the DDIM coefficient identity"
+            "baseline alpha_T and sigma_T violate the diffusion coefficient identity"
         )
     num_train_timesteps = _nonnegative_integer(
         scheduler_config.get("num_train_timesteps"),
