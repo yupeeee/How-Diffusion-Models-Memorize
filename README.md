@@ -17,6 +17,25 @@ python -m pip install -r requirements.txt
 python -m pip install -r requirements-dev.txt
 ```
 
+## Figure exports
+
+All Matplotlib figure writers use the shared `FIGURE_DPI = 150` in
+`utils/experiments/plotting.py`, including PNG output and embedded raster
+content in PDFs. This is a moderate, established export resolution (also the
+[MATLAB export default](https://www.mathworks.com/help/matlab/ref/exportgraphics.html)),
+not a power-of-two pixel-size convention. PDF text and curves remain vector
+graphics and retain their zoom quality. Lower DPI is not guaranteed to be
+indistinguishable at high zoom or in high-resolution printing.
+
+Single-panel figures stay 4×4 inches; the 3×10 decoded galleries stay 12×4
+inches. STIX fonts, label/tick/legend sizes, `bbox_inches="tight"`, and
+`pad_inches=0.05` are unchanged. At the same physical dimensions, 150 DPI
+uses one-quarter as many raster pixels as 300 DPI; compressed file-size
+savings depend on content. Existing figures adopt this policy when replotted.
+The PIL generation montages and proximity example copies already use explicit
+pixel dimensions/downscaling; changing their DPI metadata would not reduce
+their file sizes, so those scientific/preview image paths are unchanged.
+
 ## Workflow
 
 Run the complete experiment matrix from any directory with one command:
@@ -50,7 +69,14 @@ once per pair. The runner rebuilds GMM reference selection and experiment
 proximity, runs Theorem 1 once, and runs Lemma 2 and Corollary 3 for each
 requested center.
 Theorem 1 has no centering dependency and is not redundantly run twice.
-Defaults give 12 numbered stages per pair, or 72 stages across six pairs.
+The forward-corruptions/generated-states experiment also runs once, after
+Theorem 1 and before the center-specific stages, when the pair is SDv1/DDIM
+with `--g 7.5`, `--N 20`, and `--T >= 9` (default 50). It reuses evaluation
+seeds 0–19 and independent reference seeds 20–39. Other configurations receive
+a numbered skip. It includes the two distance plots and the two decoded-state
+galleries described in [the experiment guide](FORWARD_CORRUPTIONS_GENERATED_STATES.md).
+Defaults give 13 numbered stages per pair, or 78 stages across six pairs,
+including explicit skips.
 
 For mean-centered runs, `B = --num-baseline-seeds` Gaussian initial latents
 (default `1000`) with seeds `N` through `N+B-1` are evaluated by the empty branch
@@ -225,13 +251,17 @@ faster. Long runs with repeated UNet calls are expected to benefit, but the
 speedup depends on the workload, model, GPU, and software environment.
 
 Pass `--plot` to `run_all.sh` to skip every computational stage and regenerate
-the Theorem 1, Lemma 2, and Corollary 3 PNG and PDF figures from their saved
-CSVs. It follows the same 24-configuration matrix by default, with 60 plotting
-stages (Theorem 1 once per model–scheduler–selection). `--use-mu` selects only
-mean-centered results; `--no-mu` selects only zero-centered results. No generation,
-SSCD, proximity, or baseline command is invoked. Every requested CSV and its
-matching provenance must already exist; use the axis filters to plot a subset.
-Only nonstandard guidance causes a Corollary 3 skip; both schedulers are supported.
+the theory PNG/PDF figures plus the compatible forward-corruptions figures.
+It follows the same 12-configuration matrix by default, with 36 numbered
+plotting stages including explicit skips (Theorem 1 and forward corruptions
+are independent of centering). `--use-mu` selects only mean-centered results;
+`--no-mu` selects only zero-centered results. No generation, SSCD, proximity,
+baseline, or VAE decoding is invoked. Every requested CSV and its matching
+provenance must exist; forward-corruptions galleries additionally require their
+saved decoded-image logs. Run that experiment once without `--plot` if those
+logs are missing. Use the axis filters to plot a subset. Both schedulers are
+supported by the theory experiments; forward corruptions has the compatibility
+requirements above, and nonstandard guidance causes a Corollary 3 skip.
 
 ```bash
 ./theorem1_loss_recovery.sh \

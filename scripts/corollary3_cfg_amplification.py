@@ -67,6 +67,7 @@ from utils.experiments.cache import (  # noqa: E402
     safe_index,
     validate_generation_record,
 )
+from utils.experiments.plotting import FIGURE_DPI  # noqa: E402
 from utils.experiments.sscd import (  # noqa: E402
     SCORE_DEFINITION,
     SSCDPaths,
@@ -2337,9 +2338,8 @@ def _atomic_save_figures(figure: Any, destinations: Sequence[Path]) -> None:
                 "format": figure_format,
                 "bbox_inches": "tight",
                 "pad_inches": FIGURE_PAD_INCHES,
+                "dpi": FIGURE_DPI,
             }
-            if figure_format == "png":
-                options["dpi"] = 300
             figure.savefig(temporary, **options)
             with temporary.open("rb") as handle:
                 os.fsync(handle.fileno())

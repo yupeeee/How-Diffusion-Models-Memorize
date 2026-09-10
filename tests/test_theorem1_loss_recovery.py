@@ -2521,12 +2521,13 @@ def test_plot_reloads_csv_and_draws_trajectory_with_matching_primary_points(
             "format": "png",
             "bbox_inches": "tight",
             "pad_inches": 0.05,
-            "dpi": 300,
+            "dpi": 150,
         },
         {
             "format": "pdf",
             "bbox_inches": "tight",
             "pad_inches": 0.05,
+            "dpi": 150,
         },
     ]
 

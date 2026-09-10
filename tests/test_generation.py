@@ -2173,6 +2173,7 @@ fi
 """
     for name in (
         "download_webster.sh",
+        "forward_corruptions_generated_states.sh",
         "generate.sh",
         "sscd.sh",
         "compute_proximity.sh",
@@ -2266,16 +2267,42 @@ def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> 
         assert not {"--use-mu", "--num-baseline-seeds"}.intersection(call)
         assert ("--overwrite" in call) is (mode == "overwrite")
         assert ("--plot" in call) is (mode == "plot")
+    forward = [c for c in calls if c[0] == "forward_corruptions_generated_states.sh"]
+    assert len(forward) == 1
+    for option, value in (
+        ("--model", "sdv1"),
+        ("--scheduler", "ddim"),
+        ("--g", "7.5"),
+        ("--T", "50"),
+        ("--N", "20"),
+        ("--seed-start", "0"),
+        ("--reference-seed-start", "20"),
+    ):
+        assert _pipeline_option(forward[0], option) == value
+    assert ("--plot" in forward[0]) is (mode == "plot")
+    assert ("--overwrite" in forward[0]) is (mode == "overwrite")
+    assert not {
+        "--device",
+        "--selection-strategy",
+        "--use-mu",
+        "--num-baseline-seeds",
+        "--evaluation-source",
+        "--num-loss-seeds",
+        "--loss-seed",
+        "--downscale",
+    }.intersection(forward[0])
+    assert result.stdout.count("Skipping forward corruptions vs generated states:") == 5
     if mode == "plot":
-        assert len(calls) == 30
+        assert len(calls) == 31
         assert set(names) == {
+            "forward_corruptions_generated_states.sh",
             "theorem1_loss_recovery.sh",
             "lemma2_mean_convergence.sh",
             "corollary3_cfg_amplification.sh",
         }
-        total = 5
+        total = 6
     else:
-        assert len(calls) == 72 + int(mode == "download")
+        assert len(calls) == 73 + int(mode == "download")
         assert names.count("download_webster.sh") == int(mode == "download")
         if mode == "download":
             assert calls[0][0] == "download_webster.sh"
@@ -2317,7 +2344,7 @@ def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> 
             for strategy in selections
             for seed in ("0", "20")
         }
-        total = 12
+        total = 13
     labels = [
         line.split("]", 1)[0] + "]"
         for line in result.stdout.splitlines()
@@ -2476,6 +2503,143 @@ def test_run_all_filters_only_requested_axes(
 
 
 @pytest.mark.parametrize(
+    ("mode", "device", "centering", "steps"),
+    (
+        ((), "auto", (), "50"),
+        (("--plot",), "auto", (), "50"),
+        (("--overwrite",), "cuda:2", (), "9"),
+        ((), "cpu", ("--no-mu",), "50"),
+        (("--plot",), "cuda:1", ("--use-mu",), "9"),
+        ((), "cuda", ("--use-mu",), "50"),
+    ),
+)
+def test_run_all_forward_states_compatible_flags_once_per_scheduler(
+    tmp_path: Path,
+    mode: tuple[str, ...],
+    device: str,
+    centering: tuple[str, ...],
+    steps: str,
+) -> None:
+    result, calls = _run_all_stub(
+        tmp_path,
+        (
+            "--model",
+            "sdv1",
+            "--scheduler",
+            "ddim",
+            "--g",
+            "7.500",
+            "--T",
+            steps,
+            "--N",
+            "0020",
+            "--device",
+            device,
+            "--evaluation-source",
+            "trajectory",
+            *centering,
+            *mode,
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    forward = [c for c in calls if c[0] == "forward_corruptions_generated_states.sh"]
+    assert forward == [
+        [
+            "forward_corruptions_generated_states.sh",
+            "--model",
+            "sdv1",
+            "--scheduler",
+            "ddim",
+            "--g",
+            "7.5",
+            "--T",
+            steps,
+            "--N",
+            "20",
+            "--seed-start",
+            "0",
+            "--reference-seed-start",
+            "20",
+            *(() if device == "auto" else ("--device", device)),
+            *mode,
+        ]
+    ]
+    names = [c[0] for c in calls]
+    assert (
+        names.index("theorem1_loss_recovery.sh")
+        < names.index("forward_corruptions_generated_states.sh")
+        < names.index("lemma2_mean_convergence.sh")
+    )
+    centers = 1 if centering else 2
+    total = 2 + 2 * centers + (0 if mode == ("--plot",) else 7)
+    labels = [
+        line.split("]", 1)[0] + "]"
+        for line in result.stdout.splitlines()
+        if line.startswith("[") and line[1:2].isdigit()
+    ]
+    assert labels == [f"[{stage}/{total}]" for stage in range(1, total + 1)]
+    assert "Skipping forward corruptions vs generated states:" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("arguments", "received"),
+    (
+        (("--model", "sdv2"), "received sdv2, ddim"),
+        (("--model", "realvis"), "received realvis, ddim"),
+        (("--scheduler", "ddpm"), "received sdv1, ddpm"),
+        (("--g", "3.25"), "g=3.25"),
+        (("--N", "19"), "N=19"),
+        (("--T", "8"), "T=8"),
+        (("--T", "1"), "T=1"),
+    ),
+)
+def test_run_all_forward_states_numbers_incompatible_skip(
+    tmp_path: Path, arguments: tuple[str, ...], received: str
+) -> None:
+    result, calls = _run_all_stub(
+        tmp_path,
+        ("--plot", "--model", "sdv1", "--scheduler", "ddim", *arguments),
+    )
+    assert result.returncode == 0, result.stderr
+    assert all(c[0] != "forward_corruptions_generated_states.sh" for c in calls)
+    skipped = [
+        line
+        for line in result.stdout.splitlines()
+        if "Skipping forward corruptions vs generated states:" in line
+    ]
+    assert len(skipped) == 1
+    assert skipped[0].startswith("[2/6]")
+    assert (
+        "requires --model sdv1, --scheduler ddim, --g 7.5, --N 20, --T >= 9"
+        in skipped[0]
+    )
+    assert received in skipped[0]
+    assert any(c[0] == "theorem1_loss_recovery.sh" for c in calls)
+    assert any(c[0] == "lemma2_mean_convergence.sh" for c in calls)
+
+
+@pytest.mark.parametrize("mode", ((), ("--plot",)))
+def test_run_all_stops_matrix_on_failed_forward_states_stage(
+    tmp_path: Path, mode: tuple[str, ...]
+) -> None:
+    result, calls = _run_all_stub(
+        tmp_path,
+        mode,
+        FAIL_WRAPPER="forward_corruptions_generated_states.sh",
+        FAIL_MODEL="sdv1",
+    )
+    assert result.returncode == 17
+    assert calls[-1][0] == "forward_corruptions_generated_states.sh"
+    assert all(_pipeline_option(c, "--model") == "sdv1" for c in calls)
+    assert all(_pipeline_option(c, "--scheduler") == "ddim" for c in calls)
+    assert not any(c[0] == "lemma2_mean_convergence.sh" for c in calls)
+    assert (
+        "pipeline failed for model sdv1 / scheduler ddim / "
+        "forward corruptions vs generated states (exit 17)"
+    ) in result.stderr
+
+
+@pytest.mark.parametrize(
     "wrapper",
     ("generate.sh", "lemma2_mean_convergence.sh", "corollary3_cfg_amplification.sh"),
 )
@@ -2518,7 +2682,7 @@ def test_run_all_stops_after_failed_download(tmp_path: Path, exit_code: str) -> 
 
 
 @pytest.mark.parametrize("plot", (False, True))
-def test_run_all_only_skips_corollary_for_nonstandard_guidance(
+def test_run_all_keeps_lemma_when_guidance_skips_specialized_experiments(
     tmp_path: Path, plot: bool
 ) -> None:
     result, calls = _run_all_stub(
@@ -2540,6 +2704,8 @@ def test_run_all_only_skips_corollary_for_nonstandard_guidance(
         for c in calls
     )
     assert "Skipping Corollary 3: requires --g 7.5" in result.stdout
+    assert "Skipping forward corruptions vs generated states:" in result.stdout
+    assert all(c[0] != "forward_corruptions_generated_states.sh" for c in calls)
     assert "Skipping Lemma 2" not in result.stdout
 
 
@@ -2725,6 +2891,12 @@ def test_run_all_documents_default_selection_strategy(tmp_path: Path) -> None:
         "guidance scale 7.5",
         "same-seed target SSCD",
         "numbered Corollary 3 skip",
+        "forward_corruptions_generated_states.sh once outside the centering loop",
+        "sdv1/DDIM, g=7.5, N=20, T>=9",
+        "reference seeds 20..39",
+        "all evaluation seeds 0..19",
+        "independently of GMM selection and centering",
+        "precomputed decoded galleries",
         "Both DDIM and DDPM are supported",
         "Any failed stage stops the matrix",
     ):
@@ -2785,6 +2957,7 @@ def test_run_all_routes_noise_evaluation_to_all_theory_stages(
         "corollary3_cfg_amplification.sh",
     }
     wrappers = theory | {
+        "forward_corruptions_generated_states.sh",
         "generate.sh",
         "sscd.sh",
         "compute_proximity.sh",
@@ -2834,8 +3007,13 @@ printf '\\n' >> "$RUN_ALL_LOG"
             assert ("--plot" in call) is plot_only
         else:
             assert "--evaluation-source" not in call
+    forward = [c for c in calls if c[0] == "forward_corruptions_generated_states.sh"]
+    assert len(forward) == 1
+    assert ("--plot" in forward[0]) is plot_only
     if plot_only:
-        assert {call[0] for call in calls} == theory
+        assert {call[0] for call in calls} == theory | {
+            "forward_corruptions_generated_states.sh"
+        }
 
 
 def test_run_all_rejects_unknown_noise_evaluation_source(tmp_path: Path) -> None:
@@ -2981,6 +3159,8 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
         "utils/experiments": {
             "__init__.py",
             "cache.py",
+            "forward_corruptions_cache.py",
+            "forward_corruptions_plotting.py",
             "generation.py",
             "plotting.py",
             "latent_statistics.py",
@@ -3016,6 +3196,7 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
         "check_proximity_gmm.py",
         "compute_proximity.py",
         "download_webster.py",
+        "forward_corruptions_generated_states.py",
         "generate.py",
         "sscd.py",
         "theorem1_loss_recovery.py",

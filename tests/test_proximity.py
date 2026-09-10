@@ -1504,25 +1504,25 @@ def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
     assert save_calls == [
         {
             "format": "png",
-            "dpi": 300,
+            "dpi": 150,
             "bbox_inches": "tight",
             "pad_inches": 0.05,
         },
         {
             "format": "pdf",
-            "dpi": 300,
+            "dpi": 150,
             "bbox_inches": "tight",
             "pad_inches": 0.05,
         },
         {
             "format": "png",
-            "dpi": 300,
+            "dpi": 150,
             "bbox_inches": "tight",
             "pad_inches": 0.05,
         },
         {
             "format": "pdf",
-            "dpi": 300,
+            "dpi": 150,
             "bbox_inches": "tight",
             "pad_inches": 0.05,
         },

@@ -31,12 +31,15 @@ Run sdv1/sdv2/realvis x ddim/ddpm x zero/mu_hat with GMM selection
 (12 configurations). Explicit options narrow individual axes.
 Generation, SSCD, and the shared baseline run once per model/scheduler;
 Theorem 1 runs once per model/scheduler because it does not depend on the center.
+Forward corruptions vs generated states also runs once, only for compatible
+sdv1/DDIM, g=7.5, N=20, T>=9 configurations; other combinations are skipped.
 
 Options:
   --download            Run/resume shared Webster preparation once first
-  --plot                Only plot all requested theory results from saved CSVs
+  --plot                Only plot saved theory results and decoded-state galleries
   --overwrite           Regenerate each shared trajectory/SSCD cache, Theorem 1
-                        cache, and any required baseline once per model/scheduler
+                        cache, and any required baseline once per model/scheduler;
+                        also rebuild the compatible forward/state experiment cache
   --model MODEL         sdv1, sdv2, realvis, or all (default: all three)
   --scheduler NAME      ddim, ddpm, or all (default: both schedulers)
   --g FLOAT             Classifier-free guidance scale (default: 7.5)
@@ -88,9 +91,18 @@ other guidance values retain an explicit numbered Corollary 3 skip. Both DDIM
 and DDPM are supported by all theory experiments and the shared baseline.
 Figures plot alpha_t^2/sigma_t^2 logarithmically, lower noise ratios to the left.
 
+The forward/state experiment runs forward_corruptions_generated_states.sh once
+outside the centering loop. It uses reference seeds 20..39 to fix its two pairs
+and all evaluation seeds 0..19, independently of GMM selection and centering.
+It reuses trajectories and SSCD, decoding gallery inputs with only the VAE when
+needed. Incompatible model, scheduler, guidance, seed count, or step count gives
+an explicit numbered skip. Its --plot mode requires the decoded gallery cache;
+it never regenerates trajectories, scores, or decoded images.
+
 --plot never invokes generation, SSCD, selection rebuilding, or baseline
 computation. It requires the saved CSVs and matching provenance for the entire
-requested matrix. --plot cannot be combined with --download or --overwrite.
+requested matrix, including precomputed decoded galleries for the compatible
+forward/state experiment. --plot cannot be combined with --download or --overwrite.
 Download tuning options apply only with --download. The PYTHON environment
 variable is honored by every wrapper. Any failed stage stops the matrix.
 EOF
@@ -294,7 +306,7 @@ run_stage() {
 
 run_model_scheduler() {
     local STAGE_INDEX=1
-    local STAGE_TOTAL=$((1 + 2 * ${#CENTERS[@]}))
+    local STAGE_TOTAL=$((2 + 2 * ${#CENTERS[@]}))
     local selection="gmm"
     local center
     local COMMON_ARGUMENTS=(
@@ -304,6 +316,10 @@ run_model_scheduler() {
     local REFERENCE_ARGUMENTS=("${COMMON_ARGUMENTS[@]}" --seed-start "$NUM_SEEDS")
     local EXPERIMENT_ARGUMENTS=("${COMMON_ARGUMENTS[@]}" --seed-start 0)
     local CENTERING_ARGUMENTS=()
+    local FORWARD_DEVICE_ARGUMENTS=()
+    if [[ "$DEVICE" != "auto" ]]; then
+        FORWARD_DEVICE_ARGUMENTS=(--device "$DEVICE")
+    fi
     local cache_action="Checking/resuming"
     if ((OVERWRITE)); then
         cache_action="Regenerating"
@@ -347,6 +363,19 @@ run_model_scheduler() {
             --loss-seed "$LOSS_SEED" --device "$DEVICE" \
             "${EVALUATION_ARGUMENTS[@]}" "${PLOT_ARGUMENTS[@]}" \
             "${CACHE_OVERWRITE_ARGUMENTS[@]}"
+
+        RUN_CONTEXT="model $MODEL / scheduler $SCHEDULER / forward corruptions vs generated states"
+        if [[ "$MODEL" == "sdv1" && "$SCHEDULER" == "ddim" \
+            && "$GUIDANCE_SCALE" == "7.5" && "$NUM_SEEDS" == "20" ]] \
+            && decimal_greater_than "$NUM_INFERENCE_STEPS" 8; then
+            run_stage "Forward corruptions vs generated states (independent of centering)" \
+                "$PROJECT_ROOT/forward_corruptions_generated_states.sh" "${COMMON_ARGUMENTS[@]}" \
+                --seed-start 0 --reference-seed-start "$NUM_SEEDS" \
+                "${FORWARD_DEVICE_ARGUMENTS[@]}" "${PLOT_ARGUMENTS[@]}" \
+                "${CACHE_OVERWRITE_ARGUMENTS[@]}"
+        else
+            run_stage "Skipping forward corruptions vs generated states: requires --model sdv1, --scheduler ddim, --g 7.5, --N 20, --T >= 9 (received $MODEL, $SCHEDULER, g=$GUIDANCE_SCALE, N=$NUM_SEEDS, T=$NUM_INFERENCE_STEPS)" true
+        fi
 
         for center in "${CENTERS[@]}"; do
             RUN_CONTEXT="model $MODEL / scheduler $SCHEDULER / selection $selection / center $center"

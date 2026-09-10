@@ -2471,3 +2471,29 @@ def test_zero_centering_computes_each_estimate_norm(
             expected[seed_position, step_index] = float(estimate.square().mean().sqrt())
 
     np.testing.assert_array_equal(observed, expected)
+
+
+def test_atomic_figure_writer_uses_moderate_dpi_for_png_and_pdf(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def savefig(destination: Path, **options: object) -> None:
+        calls.append(options)
+        destination.write_bytes(b"figure")
+
+    destinations = (tmp_path / "figure.png", tmp_path / "figure.pdf")
+    experiment._atomic_save_figures(SimpleNamespace(savefig=savefig), destinations)
+
+    assert experiment.FIGURE_DPI == 150
+    assert calls == [
+        {
+            "format": figure_format,
+            "bbox_inches": "tight",
+            "pad_inches": 0.05,
+            "dpi": 150,
+        }
+        for figure_format in ("png", "pdf")
+    ]
+    assert all(destination.read_bytes() == b"figure" for destination in destinations)
+    assert sorted(tmp_path.iterdir()) == sorted(destinations)

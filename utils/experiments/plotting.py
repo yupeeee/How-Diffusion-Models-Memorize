@@ -45,6 +45,7 @@ _KIND_COLORS = {
     "Other / unlabeled": "#7F7F7F",
 }
 FIGURE_SIZE = (4.0, 4.0)
+FIGURE_DPI = 150
 TEXT_FONT_SIZE = 15
 AXIS_NUMBER_FONT_SIZE = 12
 LEGEND_FONT_SIZE = 10
@@ -85,6 +86,7 @@ PROXIMITY_FIGURE_FILENAMES = tuple(
 
 PLOT_STYLE = {
     "figure.figsize": FIGURE_SIZE,
+    "savefig.dpi": FIGURE_DPI,
     "font.family": "STIXGeneral",
     "font.size": TEXT_FONT_SIZE,
     "mathtext.fontset": "stix",
@@ -576,7 +578,7 @@ def _publish_figures(
                 figure.savefig(
                     temporary,
                     format=file_format,
-                    dpi=300,
+                    dpi=FIGURE_DPI,
                     bbox_inches="tight",
                     pad_inches=FIGURE_PAD_INCHES,
                 )
