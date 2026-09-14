@@ -32,10 +32,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SELECTION_STRATEGY,
         help="GMM-only prompt selection (default: gmm)",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--overwrite",
         action="store_true",
         help="recompute and replace this strategy's cached proximity outputs",
+    )
+    mode.add_argument(
+        "--plot",
+        action="store_true",
+        help="regenerate figures only from the frozen selection and saved CSV",
     )
     return parser
 
@@ -44,19 +50,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the requested analysis and return its process exit status."""
 
     arguments = build_parser().parse_args(argv)
-    from utils.experiments.proximity import run_proximity
+    from utils.experiments.proximity import plot_proximity, run_proximity
 
-    summary = run_proximity(
-        PROJECT_ROOT,
-        model_name=arguments.model,
-        scheduler_name=arguments.scheduler,
-        guidance_scale=arguments.g,
-        num_inference_steps=arguments.T,
-        num_seeds=arguments.N,
-        seed_start=arguments.seed_start,
-        overwrite=arguments.overwrite,
-        selection_strategy=arguments.selection_strategy,
-    )
+    common = {
+        "model_name": arguments.model,
+        "scheduler_name": arguments.scheduler,
+        "guidance_scale": arguments.g,
+        "num_inference_steps": arguments.T,
+        "num_seeds": arguments.N,
+        "seed_start": arguments.seed_start,
+        "selection_strategy": arguments.selection_strategy,
+    }
+    if arguments.plot:
+        summary = plot_proximity(PROJECT_ROOT, **common)
+    else:
+        summary = run_proximity(
+            PROJECT_ROOT,
+            overwrite=arguments.overwrite,
+            **common,
+        )
     print(f"Summary: {summary.paths.summary_json}")
     return summary.exit_code
 

@@ -44,19 +44,23 @@ Run the complete experiment matrix from any directory with one command:
 ./run_all.sh
 ```
 
-The default covers 12 configurations:
+The default covers 8 configurations: four model/scheduler pairs, each with
+zero and saved model-implied-mean centering.
 
-| Axis | Default values | Restrict the run |
-| --- | --- | --- |
-| Model | `sdv1`, `sdv2`, `realvis` | `--model MODEL` |
-| Scheduler | `ddim`, `ddpm` | `--scheduler NAME` |
-| Center | zero, saved model-implied mean | `--no-mu` or `--use-mu` |
-| Selection | `gmm` only | `--selection-strategy gmm` |
+| Model | Schedulers |
+| --- | --- |
+| `sdv1` | `ddim`, `ddpm` |
+| `sdv2` | `ddim` |
+| `realvis` | `ddim` |
 
-Each explicit model or scheduler option narrows only its own axis; `all` is
-accepted for those two axes. Selection is fixed to GMM. `--use-mu` and
-`--no-mu` are mutually exclusive. For example, a single zero-centered
-configuration is:
+`--model MODEL` and `--scheduler NAME` filter these supported pairs; `all`
+retains all matching pairs. For example, `--scheduler ddpm` runs only SDv1,
+and `--model sdv2` runs only SDv2/DDIM. A request with no supported pair
+(such as `--model sdv2 --scheduler ddpm`) fails before any stage, including
+data download. This restriction applies to `run_all.sh`; individual experiment
+wrappers are unchanged. Selection is fixed to GMM. `--use-mu` and `--no-mu`
+select only saved-mean or zero centering and are mutually exclusive; omitting
+both runs both centers. For example, a single zero-centered configuration is:
 
 ```bash
 ./run_all.sh --model sdv1 --scheduler ddim --selection-strategy gmm --no-mu
@@ -75,7 +79,7 @@ with `--g 7.5`, `--N 20`, and `--T >= 9` (default 50). It reuses evaluation
 seeds 0–19 and independent reference seeds 20–39. Other configurations receive
 a numbered skip. It includes the two distance plots and the two decoded-state
 galleries described in [the experiment guide](FORWARD_CORRUPTIONS_GENERATED_STATES.md).
-Defaults give 13 numbered stages per pair, or 78 stages across six pairs,
+Defaults give 13 numbered stages per pair, or 52 stages across four pairs,
 including explicit skips.
 
 For mean-centered runs, `B = --num-baseline-seeds` Gaussian initial latents
@@ -86,7 +90,7 @@ reads SSCD, categories, memorization labels, frozen selections, or cached
 prompt predictions. It has a separate `S<N>_N<B>` namespace inside the reference
 generation run. Zero-only runs skip this stage. Direct experiment wrappers
 still default to zero centering and GMM selection; `run_all.sh` runs both
-centers and all three models and two schedulers, with GMM selection by default.
+centers for the four model/scheduler pairs above, with GMM selection by default.
 
 All three theory experiments evaluate every timestep in the saved `T`-step
 schedule. `--evaluation-source {gaussian,trajectory,both}` selects the input
@@ -110,7 +114,7 @@ supports both schedulers with `g = 7.5`. Theorem 1 retains independent
 forward-corruption loss measurements at every timestep in either source mode.
 
 The Lemma 2 and Corollary 3 timestep sweeps use a logarithmic
-$\alpha_t^2/\sigma_t^2$ x-axis with lower values on the left. Theorem 1 uses
+$\mathrm{SNR}_t$ x-axis with lower values on the left. Theorem 1 uses
 normalized forward-loss RMSE on x: its primary figure compares initial-step
 loss and independent-Gaussian recovery, while its sweep figures use the
 corresponding timestep-specific loss. These are finite-noise diagnostics, not an
@@ -156,8 +160,9 @@ Pass `--overwrite` only to force regeneration of the shared scientific caches.
 The orchestrator regenerates trajectories, SSCD, and any required shared
 unconditional baseline once per model–scheduler pair, and forwards the flag to
 Theorem 1 to recompute its selected-prompt records. On every normal run, with or
-without that flag, `run_all.sh` atomically rebuilds the GMM frozen reference and
-experiment-proximity outputs from validated caches. Thus a plain run repairs
+without that flag, `run_all.sh` atomically rebuilds the authoritative GMM
+selection and publishes the derived reference and experiment proximity outputs
+from validated caches. Thus a plain run repairs
 stale derived selection provenance while complete generation, SSCD, and
 Theorem 1 records are reused. A direct `sscd.sh --overwrite` affects only its
 requested SSCD seed pool, while a direct Theorem 1 `--overwrite` affects only
@@ -250,20 +255,33 @@ call pays compilation overhead, so short or cache-only runs may not become
 faster. Long runs with repeated UNet calls are expected to benefit, but the
 speedup depends on the workload, model, GPU, and software environment.
 
-Pass `--plot` to `run_all.sh` to skip every computational stage and regenerate
-the theory PNG/PDF figures plus the compatible forward-corruptions figures.
-It follows the same 12-configuration matrix by default, with 36 numbered
-plotting stages including explicit skips (Theorem 1 and forward corruptions
-are independent of centering). `--use-mu` selects only mean-centered results;
-`--no-mu` selects only zero-centered results. No generation, SSCD, proximity,
-baseline, or VAE decoding is invoked. Every requested CSV and its matching
-provenance must exist; forward-corruptions galleries additionally require their
-saved decoded-image logs. Run that experiment once without `--plot` if those
-logs are missing. Use the axis filters to plot a subset. Both schedulers are
-supported by the theory experiments; forward corruptions has the compatibility
-requirements above, and nonstandard guidance causes a Corollary 3 skip.
+Pass `--plot` to `run_all.sh` to skip every measurement stage and regenerate
+the derived reference and experiment proximity PNG/PDF figures, including the
+stored GMM-fit ellipses, plus the theory and compatible forward-corruptions
+figures. It follows the same 8-configuration matrix by default, with 32
+numbered plotting stages including explicit skips (proximity, Theorem 1, and
+forward corruptions are independent of centering). `--use-mu` selects only
+mean-centered results; `--no-mu` selects only zero-centered results. No
+generation, SSCD, proximity measurement, selection rebuilding, baseline
+computation, or VAE decoding is invoked. Every requested saved CSV and matching
+configuration/provenance must exist; forward-corruptions galleries additionally
+require their saved decoded-image logs. Run that experiment once without
+`--plot` if those logs are missing. Use the axis filters to plot a subset. Both
+schedulers are supported by the theory experiments; forward corruptions has
+the compatibility requirements above, and nonstandard guidance causes a
+Corollary 3 skip.
 
 ```bash
+# Derived reference proximity figures, including the stored GMM fit.
+./compute_proximity.sh \
+  --model sdv1 --scheduler ddim --g 7.5 --T 50 --N 20 \
+  --seed-start 20 --selection-strategy gmm --plot
+
+# Matching experiment proximity figures.
+./compute_proximity.sh \
+  --model sdv1 --scheduler ddim --g 7.5 --T 50 --N 20 \
+  --seed-start 0 --selection-strategy gmm --plot
+
 ./theorem1_loss_recovery.sh \
   --model sdv1 --scheduler ddim --g 7.5 --T 50 --N 20 \
   --selection-strategy gmm --num-loss-seeds 20 --loss-seed 0 --plot
@@ -279,6 +297,17 @@ requirements above, and nonstandard guidance causes a Corollary 3 skip.
 # Add both options to either theory wrapper to select its saved mean-centered run.
 # --use-mu --num-baseline-seeds 1000
 ```
+
+Reference proximity plot-only mode reads the authoritative frozen
+`selection.csv`, `config.json`, and `summary.json` under
+`data/webster/selection/`, then writes all six derived PNG/PDF figures under
+`outputs/<parent>/proximity/reference_S<N>_N<N>/`. Experiment proximity
+plot-only mode reads its existing `proximity.csv` and `run_config.json`
+together with that frozen selection. Both validate the requested identity and
+saved provenance without consulting generation or SSCD caches. They update
+only the derived PNG/PDF figures: CSV, configuration, summary, failure, and
+representative-example artifacts are not rewritten. Direct proximity `--plot`
+and `--overwrite` are mutually exclusive.
 
 Zero-centered plot-only mode never loads or validates a baseline artifact. With
 `--use-mu`, it validates the shared-baseline metadata and hash without
@@ -444,10 +473,12 @@ option (default `8`). It changes inference chunking, not the scientific sample
 counts, and is intentionally not a `run_all.sh` option.
 
 The reference proximity call creates the selected strategy's frozen selection
-from all seeds `N` through `2N-1`. Run selected-prompt analyses only after it succeeds.
+from all seeds `N` through `2N-1` and publishes its derived figures and examples
+under `outputs/<parent>/proximity/reference_S<N>_N<N>/`. Run selected-prompt
+analyses only after it succeeds.
 `run_all.sh` checks reference generation, optionally computes or validates the
 shared baseline when mean centering is requested, checks reference SSCD, and then
-atomically rebuilds the selection and its figures.
+atomically rebuilds the selection and republishes its derived figures.
 
 Supported models are `sdv1`, `sdv2`, and `realvis`; supported schedulers are
 `ddim` and `ddpm`. The RealisticVision dataset directory remains named
@@ -464,9 +495,9 @@ Corollary 3 requires `--g 7.5`; other guidance values print an explicit skip.
 `download_webster.sh` organizes the three 500-record metadata views
 and persists recovery state in
 `data/webster/state/recovery.sqlite`. On every rerun it first
-performs a fast structural check of saved image paths, headers, dimensions,
-and formats. Valid recovered images are skipped without a network request; a
-missing or visibly corrupt artifact alone is audited and reactivated. The
+checks saved image paths, headers, dimensions, formats, and known placeholder
+content. Valid recovered images are skipped without a network request; a
+missing, corrupt, or known placeholder artifact is audited and reactivated. The
 final validation phase still performs full dataset checks. Completed misses
 stay completed, while only pending or retryable records proceed to network
 recovery. An unresolved record is narrowly reopened when
@@ -481,6 +512,19 @@ elapsed time, ETA, and
 `MV x/y | TV x/y | RV x/y | N x/y | Total x/y`; download logs do not
 dump serialized summaries to the terminal. Detailed request audits remain in
 `data/webster/logs/<record_id>.jsonl`.
+
+Image validation rejects the camera-icon "No Image Available" replacement
+shown in the Wayfair product-image response, including resized and re-encoded
+copies, by matching both perceptual and difference hashes. This content check
+also applies when the URL still looks like a normal product image, to cached
+recovered images on reruns, and to archive or duplicate candidates. Existing
+tracking-pixel, transparency, and placeholder-URL checks still apply. A rejected
+response is logged as an invalid image and recovery continues through the
+remaining sources. If no valid target is recovered, the record remains in the
+metadata with `image_available=False` and is excluded from the default dataset
+loader; the stale model-view image reference is removed when views are rebuilt.
+Raw cached responses remain available for audit. The visual fingerprints cover
+this known placeholder design, rather than arbitrary text in photographs.
 
 Failed rows that identify the same exact target are grouped before direct and
 archive work. One representative is queried, and a successful image or
@@ -665,21 +709,35 @@ each whole-prompt decision.
 The only selection strategy, `gmm`, pools every valid `(l2_norm, sscd)` reference
 observation, including valid seeds from otherwise incomplete prompts. It
 standardizes both coordinates over that entire population and fits one global,
-two-component, diagonal-covariance Gaussian mixture. The diagonal model prevents
-a tilted component covariance from extrapolating high-SSCD membership into
-the distant low-SSCD cloud. Two deterministic initializations (the existing
+two-component, full-covariance Gaussian mixture. Each component estimates the
+L2/SSCD covariance, allowing its Gaussian ellipse to rotate with the observed
+relationship. Two deterministic initializations (the existing
 first-principal-component k-means and SSCD-only k-means) compete by converged
 log likelihood; only the higher-likelihood fit is used. Components are ordered
 by fitted SSCD mean. Every valid observation receives exactly one hard
-component assignment by maximum posterior probability (exact ties go to the
-low component).
+component assignment by maximum posterior probability. A low-component
+posterior of exactly `0.5` is a tie and is assigned to the low component.
 There is no trimming, confidence cutoff, or unassigned valid observation.
 
-A complete prompt is included if any reference seed belongs to the high-SSCD
-component. A high-component seed retains its prompt even when other seeds
-occupy the bottom cloud. All seeds of an included prompt remain in the analysis.
-Neither Spearman rho nor an additional SSCD threshold affects this decision. Missing
-observations still have explicit error statuses and cannot enter the fit.
+A complete prompt is retained whenever at least one reference-seed SSCD is
+strictly greater than `0.75`, even if most seeds belong to the low-SSCD GMM
+component. A score of exactly `0.75` does not trigger this override. Otherwise,
+the prompt is discarded if and only if strictly more than half of its `N`
+reference seeds are assigned to the low-SSCD component. An exact half stays
+included: for `N=20`, 11 or more low-component seeds discard the prompt only
+when every reference SSCD is at most `0.75`; 10 or fewer low-component seeds
+keep it regardless. The override uses only the independent reference seeds
+`N` through `2N-1`, retains the whole prompt, and keeps all of its experiment
+seeds in the analysis. Incomplete or otherwise unusable reference groups are
+not rescued, even if one of their available scores exceeds `0.75`.
+The policy identifier is
+`prompt_gmm_low_component_majority_sscd_override_full_covariance`. The GMM
+majority decision counts hard component assignments; it does not average
+posterior probabilities or weight seeds by posterior confidence. Neither
+Spearman rho nor prompt kind gates the decision. Missing observations still
+have explicit error statuses and cannot
+enter the fit. The full-covariance GMM fit and its population of valid reference
+observations are unchanged by this prompt-level reduction.
 
 Selections and experiment logs must match the current scientific configuration
 and schema. Normal `run_all.sh` builds the requested reference selections before
@@ -699,18 +757,27 @@ Generation trajectories, noise predictions, target latents, preview montages,
 and SSCD tensors remain intact for discarded and unusable prompts; selection
 filters only the analysis.
 
-The frozen reference directory contains the three authoritative artifacts,
-four derived figures, and the cache-only representative examples:
+The frozen reference directory contains only the three authoritative
+selection artifacts:
 
 ```text
 data/webster/selection/<dataset>/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/reference_S<N>_N<N>/
 ├── selection.csv
 ├── config.json
-├── summary.json
+└── summary.json
+```
+
+All derived reference visualizations and cache-only representative examples
+are published separately:
+
+```text
+outputs/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/proximity/reference_S<N>_N<N>/
 ├── proximity_vs_sscd.png
 ├── proximity_vs_sscd.pdf
 ├── proximity_vs_sscd_all_prompts.png
 ├── proximity_vs_sscd_all_prompts.pdf
+├── proximity_vs_sscd_gmm_fit.png
+├── proximity_vs_sscd_gmm_fit.pdf
 └── examples/
     ├── manifest.json
     ├── retained/
@@ -724,23 +791,34 @@ data/webster/selection/<dataset>/<model>_<scheduler>_g<guidance>_T<steps>_N<N>/r
 `selection.csv` has exactly N seed rows per prompt. It records `prompt`,
 `kind`, `l2_norm`, `sscd`, the strategy, per-seed observation status, repeated
 prompt-level decision, descriptive `prompt_spearman`, reference provenance,
-and each valid seed's fitted GMM component and low-mode posterior. Any
-high-component seed retains a complete prompt.
+and each valid seed's fitted GMM component and low-mode posterior. The repeated
+prompt decision uses the strict low-component majority count with the
+reference-SSCD override above, not an average of those posteriors. Its audited
+decision and reason distinguish discarded low-component majorities from
+prompts retained by a reference score strictly greater than `0.75`.
 `generated_image_path` points to the existing seed-ascending preview montage;
 `generated_image_tile_index` identifies its zero-based row-major tile, so
 indices `0` through `N-1` map directly to seeds `N` through `2N-1`. Those cache
-paths remain the evidence source; only the chosen files under `examples/` are
-derived copies. `config.json` records the model,
-sampler values, strategy and frozen policy, seed set, provenance hashes, and
-the standardized global GMM fit, while `summary.json` records concise decision
+paths remain the evidence source; only the chosen files under the reference
+proximity output's `examples/` directory are derived copies. `config.json`
+records the model, sampler values, strategy and frozen policy (including the
+strict `0.75` override), seed set, provenance hashes, and the standardized
+global GMM fit, while `summary.json` records concise decision
 and observation counts. `proximity_vs_sscd.{png,pdf}` is the
 selected-prompt view. `proximity_vs_sscd_all_prompts.{png,pdf}` is the
 pre-discard view containing every prompt with a complete finite N-seed
 reference group, including both selected and discarded prompts. Incomplete or
 otherwise unplottable prompts remain in `selection.csv` for audit but cannot
 appear in the scatter plots. The two views use identical axis limits for direct
-comparison. All four figures are rebuilt from `selection.csv`; they are
-derived visualizations rather than part of the frozen scientific identity.
+comparison. These four figures are rebuilt from `selection.csv`.
+`proximity_vs_sscd_gmm_fit.{png,pdf}` instead shows the exact observation
+population used by the GMM, colored by fitted component, including valid seeds
+from otherwise incomplete prompts. It marks each fitted mean and overlays the
+stored one- and two-standard-deviation full-covariance ellipses in raw L2/SSCD
+coordinates. The GMM is not refit while plotting: this pair is rebuilt from
+`selection.csv` and the saved fit in `config.json`. All six figures and the
+reference examples live under `outputs/`; they are not part of the frozen
+scientific identity.
 
 If the selection is missing, experiment proximity exits with the exact three
 reference commands required to create it. A direct reference proximity call
@@ -751,6 +829,18 @@ directory. The orchestrated `run_all.sh` path always uses that overwrite only
 for reference and experiment proximity. Raw generation and SSCD records remain
 under their normal cache-reuse rules unless the top-level `--overwrite` flag is
 passed.
+
+This override changes the audited selection, frozen configuration, and
+selection-dependent scientific hashes. Frozen selections from the previous
+prompt rule must be rebuilt. Run the normal `bash run_all.sh` path without
+`--plot` or `--overwrite` to rebuild the selection under
+`prompt_gmm_low_component_majority_sscd_override_full_covariance` and refresh
+the matching analyses. Complete generation and SSCD caches are retained and
+reused; this policy update does not require regenerating trajectories or
+recomputing SSCD.
+
+Plot-only mode must validate the current selection and cannot change decisions
+or upgrade an old-policy selection.
 
 Later mechanism experiments use the same API:
 
@@ -774,10 +864,12 @@ identity, `num_seeds`, `included_indices`, `excluded_indices`, `prompt_frame`,
 
 ### Proximity outputs
 
-The successful reference invocation writes no second proximity-output tree;
-the frozen selection directory contains its three authoritative data and
-provenance files plus the derived figures and examples shown above.
-For an experiment, `compute_proximity.sh` reads cached terminal and target
+A successful reference invocation writes its authoritative `selection.csv`,
+`config.json`, and `summary.json` under `data/webster/selection/`, and writes
+its six figures and `examples/` tree under
+`outputs/<parent>/proximity/reference_S<N>_N<N>/`, as shown above. No derived
+figure or example is stored in the frozen selection directory. For an
+experiment, `compute_proximity.sh` reads cached terminal and target
 latents, joins every seed with its cached SSCD score, applies the frozen
 selection, and writes:
 
@@ -815,18 +907,22 @@ The selected view's annotation and `summary.json` aggregate one experimental
 Spearman value per included prompt: selected and evaluable prompt counts, the
 count and fraction of evaluable prompts with rho below zero, and median rho.
 No pooled seed-row correlation is reported. `run_config.json` pins the
-generation, SSCD, selection-strategy, and frozen-selection identities. Plotting
-reloads `proximity.csv`; it does not rerun diffusion.
+generation, SSCD, selection-strategy, and frozen-selection identities. Direct
+`compute_proximity.sh --plot` reloads `proximity.csv`, validates it against this
+saved configuration and the frozen selection, and replaces only these four
+figures; it does not inspect generation or SSCD caches or rerun diffusion.
 
 #### Automatic representative examples
 
-Every successful `compute_proximity.sh` invocation refreshes an `examples/`
-directory beside that invocation's existing proximity figures. Experiment
-examples therefore live inside `outputs/.../proximity/experiment_S0_N<N>/`.
-Reference examples live beside the frozen-selection figures shown above; they
-do not create a second reference output tree. Re-running reference proximity
+Every successful non-plot `compute_proximity.sh` invocation refreshes an
+`examples/` directory beside that invocation's existing proximity figures.
+Experiment examples therefore live inside
+`outputs/.../proximity/experiment_S0_N<N>/`. Reference examples live beside all
+six reference figures under
+`outputs/.../proximity/reference_S<N>_N<N>/`, never under the authoritative
+`data/webster/selection/` directory. Re-running non-plot reference proximity
 refreshes these derived examples even when the compatible frozen selection is
-reused.
+reused; `--plot` leaves them unchanged.
 
 The exporter considers retained and discarded prompts separately. A prompt is
 eligible only when it has usable, complete terminal-L2 observations for all
@@ -864,9 +960,9 @@ resized image back to its unmodified cache. `target_image_sha256` retains the
 source target identity; `generated_image_sha256` and `training_image_sha256`
 describe the exported PNGs.
 
-The GMM diagnostic uses the same diagonal fit and any-high-seed prompt rule;
-Spearman sign is descriptive only. The GMM/k-means diagnostic scripts write
-`gmm_k2{,_spearman,_kind}.{png,pdf}` and
+The GMM diagnostic uses the same full-covariance fit, strict low-component
+majority, and reference-SSCD override; Spearman sign is descriptive only. The
+GMM/k-means diagnostic scripts write `gmm_k2{,_spearman,_kind}.{png,pdf}` and
 `kmeans_k2{,_spearman,_kind}.{png,pdf}` views. Color encodes SSCD; line style
 encodes component, Spearman sign, or prompt kind. On membership views, each
 segment's style represents its right endpoint in L2 order. These diagnostic
@@ -888,18 +984,24 @@ seeds before taking a square root.
 The primary `theorem1_loss_recovery.{png,pdf}` figure uses only the actual
 initial timestep $T$. Each selected prompt is one scatter point: x is
 `normalized_loss_rmse`,
-$\sqrt{\mathcal{L}_T(c)/[d(\alpha_T^2/\sigma_T^2)]}$, and y is the independently
+$\sqrt{\mathcal{L}_T(c)/[d\,\mathrm{SNR}_T]}$, and y is the independently
 measured Gaussian recovery RMSE,
 $\sqrt{\mathbb{E}_{\mathbf{x}_T}[\|\widehat{\mathbf{x}}_{0\mid T,c}(\mathbf{x}_T)-\mathbf{x}^{\star}\|^2]/d}$.
-Prompts are not joined by lines, and this primary figure has no median or
-reference line. It compares the theorem's normalized-loss premise with
+Prompts are not joined to one another. The black line labeled `Median` sorts
+the prompt points by x, partitions them into at most ten approximately
+equal-count bins, computes the median x and median y separately within each
+bin, and connects those bin medians. It is a simple descriptive tendency
+summary, not a regression, an additional observation, or a theoretical
+equality. The primary figure has no vertical reference line and does not assert
+an exact $y=x$ identity. It compares the theorem's normalized-loss premise with
 recovery at a finite initialization; it neither proves convergence in
-probability nor asserts an exact $y=x$ identity. The loss is measured on
-forward-corrupted targets, not defined from the generated-state recovery error.
+probability nor changes the underlying prompt-level measurements. The loss is
+measured on forward-corrupted targets, not defined from the generated-state
+recovery error.
 
 The `theorem1_loss_recovery_trajectory.{png,pdf}` figure retains the
 selected-prompt cached-trajectory diagnostic. It uses
-$\sqrt{\mathcal{L}_t(c)/[d(\alpha_t^2/\sigma_t^2)]}$ on x and recovery RMSE on y.
+$\sqrt{\mathcal{L}_t(c)/[d\,\mathrm{SNR}_t]}$ on x and recovery RMSE on y.
 It connects each selected prompt's observations in timestep order, even when
 its loss is nonmonotonic. It does not join unrelated prompts or retain the old
 timestep-aggregate bands and median-loss reference: normalized loss now varies
@@ -910,6 +1012,31 @@ measurements are unavailable, the overlay instead uses each trajectory's own
 cached initial-timestep observation. Cached-trajectory and independently
 evaluated Gaussian initial recovery can differ slightly because of numerical
 precision; the trajectory curves are not snapped to the Gaussian markers.
+The trajectory figure has no vertical reference line or legend; it retains
+only the prompt trajectories, their initial scatter, and the SSCD colorbar.
+
+The companion `theorem1_loss_vs_timestep.{png,pdf}` figure directly compares
+each selected prompt's forward loss $\mathcal{L}_t(c)$ with the scheduler's
+$\mathrm{SNR}_t$ curve. It uses the raw `conditional_loss` column:
+the forward-noise expectation of the summed squared error, without dividing
+by $d$, taking a square root, or substituting generated-state recovery.
+The horizontal axis retains the actual logged scheduler timestep $t$, increasing
+left to right toward higher noise; it is not a reverse-step index. Only the
+endpoints are labeled: $0$ on the image side and $T$ at the largest logged
+timestep on the noise side, without intermediate numbered ticks. These labels
+indicate the limit directions, not extra measurements or an assertion that
+the finite cached schedule reaches either exact limit. No synthetic clean
+endpoint is added to the curves. The vertical axis is logarithmic
+(symlog if an exact zero loss is present).
+Each prompt has one line with its fixed mean target-specific SSCD color
+and alpha 0.35; the noise-ratio reference is black, dashed, and fully opaque.
+No prompt median or
+extra scatter points are added. The plot is emitted once for any source
+mode; in `both` mode, shared forward-loss rows are validated and used only once.
+This finite-schedule comparison illustrates relative decay, not proof of the
+terminal-noise limit. It is regenerated from the same CSV by `--plot`,
+without new measurements or cache changes, and follows the existing 4-by-4-inch
+STIX, opaque [0, 1] SSCD colorbar, PNG/PDF, and tight-padding conventions.
 
 Later trajectory states have already been influenced by
 prompt conditioning and CFG, so improved trajectory recovery is not a
@@ -969,7 +1096,7 @@ This is strict bootstrap of current results, not migration of an old CSV format.
 
 The aggregate cache CSV records source, timestep, and frozen-selection
 provenance. The output directory remains a derived publication containing that
-CSV and its figures. With both sources it contains one derived CSV and four
+CSV and its figures. With both sources it contains one derived CSV and six
 figure files:
 
 ```text
@@ -978,7 +1105,9 @@ outputs/<experiment-run>/theorem1_loss_recovery/<selection-hash>/evaluation_both
 ├── theorem1_loss_recovery.png
 ├── theorem1_loss_recovery.pdf
 ├── theorem1_loss_recovery_trajectory.png
-└── theorem1_loss_recovery_trajectory.pdf
+├── theorem1_loss_recovery_trajectory.pdf
+├── theorem1_loss_vs_timestep.png
+└── theorem1_loss_vs_timestep.pdf
 ```
 
 Plot-only mode is CPU-only. It reads the aggregate CSV from the logs cache and
@@ -1048,7 +1177,7 @@ outputs/<experiment-run>/lemma2_mean_convergence/centering_mu_hat/baseline_S<N>_
 Each contains `lemma2_mean_convergence.csv` plus a PNG and PDF per requested
 source. The existing figure names identify Gaussian probes; the `_trajectory`
 suffix identifies the cached diagnostic. `--output-dir` replaces the final
-default directory. Figures plot `alpha_t^2/sigma_t^2` on a logarithmic x-axis
+default directory. Figures plot $\mathrm{SNR}_t$ on a logarithmic x-axis
 and show individual connected timestep curves, a black median, and nested
 5th–95th, 25th–75th, and 40th–60th percentile bands. Cached prompt–seed curves
 use matching endpoint target SSCD colors (viridis, fixed [0, 1]); Gaussian
@@ -1120,7 +1249,7 @@ for each source and fitted quantity. The existing Gaussian/`_trajectory`
 basenames show the fitted guidance scale $\widehat{g}_t$, with a dashed
 $g=7.5$ reference; an additional `_residual` suffix shows
 $\|\mathbf{r}_t\|_2/\sqrt{d}$. Each is a 4-by-4 STIX figure with a logarithmic
-$\alpha_t^2/\sigma_t^2$ axis, without subplots. In `--use-mu` mode the labels
+$\mathrm{SNR}_t$ axis, without subplots. In `--use-mu` mode the labels
 indicate the shared $\widehat{\boldsymbol{\mu}}$ used for centering. The corollary
 predicts convergence of the fitted scale toward $g$ and of the residual toward
 zero. The direct error at prescribed $g$ and both premise errors remain in the

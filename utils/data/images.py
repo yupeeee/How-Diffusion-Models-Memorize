@@ -52,6 +52,15 @@ _TRACKING_PIXEL = (
     b"\x00\x00\x02\x02D\x01\x00;"
 )
 KNOWN_PLACEHOLDER_SHA256 = {hashlib.sha256(_TRACKING_PIXEL).hexdigest()}
+# Camera icon above "No Image Available", returned at a Wayfair product URL.
+# Fingerprints of the decoded sample (raw SHA256 below) survive resizing and
+# re-encoding; requiring both hashes avoids discarding unrelated simple images.
+# e1d6caae9082aa1deb5d18b4c9ec58d7f70540c881a216d566445fc30dedde5a
+KNOWN_PLACEHOLDER_VISUAL_HASHES = (
+    ("No Image Available (camera icon)", "ec343131d3c6e1ce", "9e3b2723273bd599"),
+)
+PLACEHOLDER_MAX_PHASH_DISTANCE = 4
+PLACEHOLDER_MAX_DHASH_DISTANCE = 8
 
 
 def has_alpha(image: Image.Image) -> bool:
@@ -70,6 +79,19 @@ def visual_rgb_frame(image: Image.Image) -> Image.Image:
     background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
     background.alpha_composite(rgba)
     return background.convert("RGB")
+
+
+def _known_placeholder_reason(
+    visual: Image.Image, perceptual_hash: imagehash.ImageHash
+) -> str | None:
+    """Match known replacement graphics independently of their response URLs."""
+
+    for name, phash, dhash in KNOWN_PLACEHOLDER_VISUAL_HASHES:
+        if perceptual_hash - imagehash.hex_to_hash(phash) > PLACEHOLDER_MAX_PHASH_DISTANCE:
+            continue
+        if imagehash.dhash(visual) - imagehash.hex_to_hash(dhash) <= PLACEHOLDER_MAX_DHASH_DISTANCE:
+            return f"known placeholder image: {name}"
+    return None
 
 
 def _url_path(value: str | None) -> str:
@@ -155,7 +177,12 @@ def validate_image_bytes(
             )
             if reason is not None:
                 raise ImageValidationError(reason)
-            perceptual_hash = str(imagehash.phash(visual_rgb_frame(decoded)))
+            visual = visual_rgb_frame(decoded)
+            visual_hash = imagehash.phash(visual)
+            reason = _known_placeholder_reason(visual, visual_hash)
+            if reason is not None:
+                raise ImageValidationError(reason)
+            perceptual_hash = str(visual_hash)
     except ImageValidationError:
         raise
     except (OSError, SyntaxError, ValueError) as error:
@@ -366,7 +393,7 @@ def create_reference(source: Path, destination: Path) -> Path:
 def recovery_artifacts_available(
     paths: WebsterPaths, record: Mapping[str, object]
 ) -> bool:
-    """Quickly validate paths and image headers before network recovery."""
+    """Check paths, image headers, and cached placeholder content before reuse."""
 
     try:
         raw_path = Path(str(record["local_raw_path"]))
@@ -388,6 +415,9 @@ def recovery_artifacts_available(
         with Image.open(normalized_path) as normalized:
             normalized_size = normalized.size
             normalized_format = str(normalized.format or "")
+            visual = visual_rgb_frame(normalized)
+            if _known_placeholder_reason(visual, imagehash.phash(visual)) is not None:
+                return False
         expected_width = int(record["width"])
         expected_height = int(record["height"])
         expected_format = str(record["image_format"] or "")

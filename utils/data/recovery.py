@@ -1359,7 +1359,7 @@ class RecoveryEngine:
         records = self.state.records(statuses=RECOVERED_STATUS_VALUES)
         reason = (
             "saved recovered image artifacts are missing, corrupt, "
-            "or inconsistent"
+            "inconsistent, or known placeholders"
         )
         for record in _progress(
             records,

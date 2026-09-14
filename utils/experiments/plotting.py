@@ -1,4 +1,4 @@
-"""Write proximity audit tables and comparable all/selected scatter plots."""
+"""Write proximity audit tables and selection diagnostic figures."""
 
 from __future__ import annotations
 
@@ -18,10 +18,12 @@ from matplotlib.collections import LineCollection  # noqa: E402
 from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
+from matplotlib.patches import Ellipse  # noqa: E402
 import numpy as np
 import pandas as pd
 
 from utils.common.io import atomic_write_frame_csv
+from utils.data.proximity_gmm import COMPONENT_NAMES
 
 __all__ = [
     "AnalysisStatistics",
@@ -29,10 +31,15 @@ __all__ = [
     "PlottingError",
     "PROXIMITY_FIGURE_FILENAMES",
     "PROXIMITY_FIGURES",
+    "SELECTION_FIGURE_FILENAMES",
+    "SELECTION_GMM_FIGURES",
     "add_prompt_curves",
     "add_sscd_colorbar",
     "category_legend_label",
+    "covariance_ellipse",
     "write_analysis_outputs",
+    "write_gmm_fit_figure",
+    "write_saved_analysis_figures",
     "write_selection_figure",
 ]
 
@@ -83,6 +90,18 @@ PROXIMITY_FIGURE_FILENAMES = tuple(
     for view in ("selected", "all_prompts")
     for file_format in _FIGURE_FORMATS
 )
+SELECTION_GMM_FIGURES = {
+    "png": "proximity_vs_sscd_gmm_fit.png",
+    "pdf": "proximity_vs_sscd_gmm_fit.pdf",
+}
+SELECTION_FIGURE_FILENAMES = PROXIMITY_FIGURE_FILENAMES + tuple(
+    SELECTION_GMM_FIGURES[file_format] for file_format in _FIGURE_FORMATS
+)
+_GMM_COMPONENT_COLORS = {
+    "low_sscd_mode": "#7B3294",
+    "high_sscd_mode": "#008837",
+}
+_GMM_ELLIPSE_STANDARD_DEVIATIONS = (1.0, 2.0)
 
 PLOT_STYLE = {
     "figure.figsize": FIGURE_SIZE,
@@ -149,7 +168,34 @@ def write_analysis_outputs(
     csv_path = output / "proximity.csv"
     atomic_write_frame_csv(annotated, csv_path)
 
-    saved_analysis = pd.read_csv(csv_path)
+    return write_saved_analysis_figures(output)
+
+
+def write_saved_analysis_figures(
+    output_directory: str | Path,
+) -> AnalysisStatistics:
+    """Rebuild experiment proximity figures without rewriting their saved CSV."""
+
+    output = Path(output_directory)
+    csv_path = output / "proximity.csv"
+    if not csv_path.is_file() or csv_path.is_symlink():
+        raise PlottingError(f"saved proximity table is missing or unsafe: {csv_path}")
+    try:
+        saved_analysis = pd.read_csv(
+            csv_path,
+            dtype={
+                "original_index": str,
+                "record_id": str,
+                "prompt": str,
+                "kind": str,
+                "target_image_sha256": str,
+                "generated_image_path": str,
+            },
+            keep_default_na=False,
+            float_precision="round_trip",
+        )
+    except (OSError, TypeError, ValueError) as error:
+        raise PlottingError(f"cannot read saved proximity table {csv_path}: {error}") from error
     _validate_analysis(saved_analysis)
     _validate_prompt_spearman(saved_analysis, column=EXPERIMENT_SPEARMAN_COLUMN)
     all_prompts = saved_analysis.copy()
@@ -165,8 +211,10 @@ def write_analysis_outputs(
 
 def write_selection_figure(
     selection_directory: str | Path,
+    *,
+    output_directory: str | Path,
 ) -> AnalysisStatistics:
-    """Rebuild comparable all/selected scatter plots from frozen ``selection.csv``.
+    """Rebuild reference scatter plots from frozen ``selection.csv``.
 
     The frozen table remains the sole numerical log. The pre-discard view
     includes complete prompt groups regardless of their selection decision;
@@ -174,8 +222,9 @@ def write_selection_figure(
     are omitted.
     """
 
-    output = Path(selection_directory)
-    csv_path = output / "selection.csv"
+    selection = Path(selection_directory)
+    output = Path(output_directory)
+    csv_path = selection / "selection.csv"
     try:
         saved_selection = pd.read_csv(
             csv_path,
@@ -205,6 +254,23 @@ def write_selection_figure(
             selected=selected,
             spearman_column="prompt_spearman",
         )
+
+
+def write_gmm_fit_figure(
+    selection_directory: str | Path,
+    *,
+    frame: pd.DataFrame,
+    configuration: Mapping[str, object],
+) -> None:
+    """Plot the stored full-covariance GMM without fitting it again."""
+
+    output = Path(selection_directory)
+    with matplotlib.rc_context(PLOT_STYLE):
+        figure = _gmm_fit_figure(frame, configuration)
+        try:
+            _publish_figures(output, ((figure, SELECTION_GMM_FIGURES),))
+        finally:
+            plt.close(figure)
 
 
 def _fully_plottable_prompt_rows(frame: pd.DataFrame) -> pd.DataFrame:
@@ -445,6 +511,188 @@ def _scatter_figure(
         },
     )
     axes.grid(True, which="both", linewidth=0.6, alpha=0.18)
+    figure.tight_layout()
+    return figure
+
+
+def covariance_ellipse(
+    mean: np.ndarray,
+    covariance: np.ndarray,
+    *,
+    standard_deviations: float,
+    **properties: object,
+) -> Ellipse:
+    """Return a covariance contour whose angle follows its principal axis."""
+
+    center = np.asarray(mean, dtype=np.float64)
+    matrix = np.asarray(covariance, dtype=np.float64)
+    if center.shape != (2,) or matrix.shape != (2, 2):
+        raise PlottingError("GMM ellipse parameters have invalid shapes")
+    if not np.all(np.isfinite(center)) or not np.all(np.isfinite(matrix)):
+        raise PlottingError("GMM ellipse parameters must be finite")
+    if not np.allclose(matrix, matrix.T, rtol=0.0, atol=1e-12):
+        raise PlottingError("GMM ellipse covariance is not symmetric")
+    if (
+        isinstance(standard_deviations, bool)
+        or not math.isfinite(standard_deviations)
+        or standard_deviations <= 0.0
+    ):
+        raise PlottingError("GMM ellipse scale must be finite and positive")
+    try:
+        eigenvalues, eigenvectors = np.linalg.eigh(matrix)
+    except np.linalg.LinAlgError as error:
+        raise PlottingError("GMM ellipse covariance decomposition failed") from error
+    if np.any(eigenvalues <= 0.0):
+        raise PlottingError("GMM ellipse covariance is not positive definite")
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    direction = eigenvectors[:, order[0]]
+    angle = math.degrees(math.atan2(direction[1], direction[0]))
+    width, height = 2.0 * standard_deviations * np.sqrt(eigenvalues)
+    return Ellipse(
+        xy=center,
+        width=float(width),
+        height=float(height),
+        angle=angle,
+        **properties,
+    )
+
+
+def _gmm_fit_plot_data(
+    frame: pd.DataFrame,
+    configuration: Mapping[str, object],
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    if not isinstance(frame, pd.DataFrame):
+        raise PlottingError("GMM fit input must be a pandas DataFrame")
+    if not isinstance(configuration, Mapping):
+        raise PlottingError("GMM selection configuration is invalid")
+    fit = configuration.get("gmm_fit")
+    if not isinstance(fit, Mapping):
+        raise PlottingError("GMM selection configuration is missing gmm_fit")
+    if fit.get("covariance_type") != "full":
+        raise PlottingError("GMM fit covariance_type must be full")
+    if fit.get("feature_names") != ["l2_norm", "sscd"]:
+        raise PlottingError("GMM fit feature names are invalid")
+    if fit.get("component_names") != list(COMPONENT_NAMES):
+        raise PlottingError("GMM fit component names are invalid")
+
+    required = {"observation_status", "gmm_component", "l2_norm", "sscd"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise PlottingError(
+            "selection table is missing columns: " + ", ".join(missing)
+        )
+    plotted = frame.loc[frame["observation_status"].eq("complete")].copy()
+    _validate_measurements(plotted)
+    components = plotted["gmm_component"].astype(str)
+    if set(components) != set(COMPONENT_NAMES):
+        raise PlottingError("GMM fit rows have invalid component assignments")
+    usable_count = fit.get("usable_observation_count")
+    if (
+        isinstance(usable_count, bool)
+        or not isinstance(usable_count, int)
+        or usable_count != len(plotted)
+    ):
+        raise PlottingError("GMM fit observation count is inconsistent")
+
+    try:
+        feature_mean = np.asarray(fit["feature_mean"], dtype=np.float64)
+        feature_scale = np.asarray(fit["feature_scale"], dtype=np.float64)
+        means = np.asarray(fit["means_standardized"], dtype=np.float64)
+        covariances = np.asarray(
+            fit["covariances_standardized"], dtype=np.float64
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise PlottingError("GMM fit arrays are invalid") from error
+    if (
+        feature_mean.shape != (2,)
+        or feature_scale.shape != (2,)
+        or means.shape != (2, 2)
+        or covariances.shape != (2, 2, 2)
+        or not all(
+            np.all(np.isfinite(values))
+            for values in (feature_mean, feature_scale, means, covariances)
+        )
+        or np.any(feature_scale <= 0.0)
+    ):
+        raise PlottingError("GMM fit arrays are invalid")
+
+    raw_means = feature_mean + means * feature_scale
+    raw_covariances = (
+        covariances
+        * feature_scale[None, :, None]
+        * feature_scale[None, None, :]
+    )
+    for mean, covariance in zip(raw_means, raw_covariances, strict=True):
+        covariance_ellipse(
+            mean,
+            covariance,
+            standard_deviations=1.0,
+        )
+    return plotted, raw_means, raw_covariances
+
+
+def _gmm_fit_figure(
+    frame: pd.DataFrame,
+    configuration: Mapping[str, object],
+) -> Figure:
+    plotted, means, covariances = _gmm_fit_plot_data(frame, configuration)
+    figure, axes = plt.subplots(figsize=FIGURE_SIZE)
+    handles: list[Line2D] = []
+    for component_index, component in enumerate(COMPONENT_NAMES):
+        color = _GMM_COMPONENT_COLORS[component]
+        group = plotted.loc[plotted["gmm_component"].eq(component)]
+        axes.scatter(
+            group["l2_norm"].to_numpy(dtype=np.float64),
+            group["sscd"].to_numpy(dtype=np.float64),
+            s=SCATTER_SIZE,
+            color=color,
+            alpha=SCATTER_ALPHA,
+            edgecolors="none",
+            rasterized=True,
+            zorder=2,
+        )
+        for standard_deviations in _GMM_ELLIPSE_STANDARD_DEVIATIONS:
+            axes.add_patch(
+                covariance_ellipse(
+                    means[component_index],
+                    covariances[component_index],
+                    standard_deviations=standard_deviations,
+                    fill=False,
+                    edgecolor=color,
+                    linewidth=1.0,
+                    alpha=0.9,
+                    zorder=3,
+                )
+            )
+        axes.plot(
+            means[component_index, 0],
+            means[component_index, 1],
+            linestyle="none",
+            marker="x",
+            markersize=6,
+            markeredgewidth=1.25,
+            color=color,
+            zorder=4,
+        )
+        handles.append(
+            Line2D(
+                [],
+                [],
+                color=color,
+                marker="o",
+                linestyle="-",
+                markersize=math.sqrt(SCATTER_SIZE),
+                linewidth=1.0,
+                label=component.replace("_sscd_mode", " SSCD mode"),
+            )
+        )
+    axes.set_xlabel(X_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
+    axes.set_ylabel(Y_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
+    axes.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
+    axes.grid(True, which="both", linewidth=0.6, alpha=0.18)
+    axes.legend(handles=handles, frameon=False, fontsize=LEGEND_FONT_SIZE)
+    axes.autoscale_view()
     figure.tight_layout()
     return figure
 

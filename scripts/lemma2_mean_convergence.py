@@ -2954,7 +2954,7 @@ def _render_figure(
             axis.xaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0,), numticks=7))
             axis.xaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
             axis.xaxis.set_minor_formatter(NullFormatter())
-            axis.set_xlabel(r"$\alpha_t^2/\sigma_t^2$")
+            axis.set_xlabel(r"$\mathrm{SNR}_t$")
             if centering_mode == CENTERING_MU_HAT:
                 ylabel = (
                     r"$\|\widehat{\mathbf{x}}_{0\mid t,\emptyset}"

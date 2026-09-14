@@ -2220,17 +2220,22 @@ def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> 
     arguments = [] if mode == "normal" else [f"--{mode}"]
     result, calls = _run_all_stub(tmp_path, arguments, DOWNLOAD_EXIT_CODE="2")
     assert result.returncode == 0, result.stderr
-    assert "12 configurations" in result.stdout
-    models, schedulers, selections = (
-        ("sdv1", "sdv2", "realvis"),
-        ("ddim", "ddpm"),
-        ("gmm",),
+    assert (
+        "Experiment matrix: 4 model/scheduler pairs x 2 centers x 1 selection "
+        "(8 configurations)"
+    ) in result.stdout
+    ordered_pairs = (
+        ("sdv1", "ddim"),
+        ("sdv1", "ddpm"),
+        ("sdv2", "ddim"),
+        ("realvis", "ddim"),
     )
-    pairs = {(m, s) for m in models for s in schedulers}
+    pairs = set(ordered_pairs)
+    selections = ("gmm",)
     names = [call[0] for call in calls]
     for wrapper in ("lemma2_mean_convergence.sh", "corollary3_cfg_amplification.sh"):
         subset = [call for call in calls if call[0] == wrapper]
-        assert len(subset) == 12
+        assert len(subset) == 8
         assert {
             (
                 _pipeline_option(c, "--model"),
@@ -2252,7 +2257,7 @@ def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> 
             if "--use-mu" in call:
                 assert _pipeline_option(call, "--num-baseline-seeds") == "1000"
     theorem = [c for c in calls if c[0] == "theorem1_loss_recovery.sh"]
-    assert len(theorem) == 6
+    assert len(theorem) == 4
     assert [
         (
             _pipeline_option(c, "--model"),
@@ -2261,7 +2266,7 @@ def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> 
         )
         for c in theorem
     ] == [
-        (m, s, strategy) for m in models for s in schedulers for strategy in selections
+        (m, s, strategy) for m, s in ordered_pairs for strategy in selections
     ]
     for call in theorem:
         assert not {"--use-mu", "--num-baseline-seeds"}.intersection(call)
@@ -2291,25 +2296,43 @@ def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> 
         "--loss-seed",
         "--downscale",
     }.intersection(forward[0])
-    assert result.stdout.count("Skipping forward corruptions vs generated states:") == 5
+    assert result.stdout.count("Skipping forward corruptions vs generated states:") == 3
+    proximity = [c for c in calls if c[0] == "compute_proximity.sh"]
+    assert len(proximity) == 8
+    assert {
+        (
+            _pipeline_option(c, "--model"),
+            _pipeline_option(c, "--scheduler"),
+            _pipeline_option(c, "--selection-strategy"),
+            _pipeline_option(c, "--seed-start"),
+        )
+        for c in proximity
+    } == {
+        (m, s, strategy, seed)
+        for m, s in pairs
+        for strategy in selections
+        for seed in ("0", "20")
+    }
     if mode == "plot":
-        assert len(calls) == 31
+        assert len(calls) == 29
+        assert all("--plot" in call and "--overwrite" not in call for call in proximity)
         assert set(names) == {
+            "compute_proximity.sh",
             "forward_corruptions_generated_states.sh",
             "theorem1_loss_recovery.sh",
             "lemma2_mean_convergence.sh",
             "corollary3_cfg_amplification.sh",
         }
-        total = 6
+        total = 8
     else:
-        assert len(calls) == 73 + int(mode == "download")
+        assert len(calls) == 49 + int(mode == "download")
         assert names.count("download_webster.sh") == int(mode == "download")
         if mode == "download":
             assert calls[0][0] == "download_webster.sh"
             assert "download progress marker" in result.stderr
         for wrapper in ("generate.sh", "sscd.sh"):
             subset = [c for c in calls if c[0] == wrapper]
-            assert len(subset) == 12
+            assert len(subset) == 8
             assert {
                 (
                     _pipeline_option(c, "--model"),
@@ -2320,30 +2343,14 @@ def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> 
             } == {(m, s, seed) for m, s in pairs for seed in ("0", "20")}
             assert all(("--overwrite" in c) is (mode == "overwrite") for c in subset)
         baselines = [c for c in calls if c[0] == "unconditional_baseline.sh"]
-        assert len(baselines) == 6
+        assert len(baselines) == 4
         assert {
             (_pipeline_option(c, "--model"), _pipeline_option(c, "--scheduler"))
             for c in baselines
         } == pairs
         assert all("--selection-strategy" not in c for c in baselines)
         assert all(("--overwrite" in c) is (mode == "overwrite") for c in baselines)
-        proximity = [c for c in calls if c[0] == "compute_proximity.sh"]
-        assert len(proximity) == 12
         assert all(c[-1] == "--overwrite" for c in proximity)
-        assert {
-            (
-                _pipeline_option(c, "--model"),
-                _pipeline_option(c, "--scheduler"),
-                _pipeline_option(c, "--selection-strategy"),
-                _pipeline_option(c, "--seed-start"),
-            )
-            for c in proximity
-        } == {
-            (m, s, strategy, seed)
-            for m, s in pairs
-            for strategy in selections
-            for seed in ("0", "20")
-        }
         total = 13
     labels = [
         line.split("]", 1)[0] + "]"
@@ -2351,21 +2358,25 @@ def test_run_all_full_matrix_reuses_shared_stages(tmp_path: Path, mode: str) -> 
         if line.startswith("[") and line[1:2].isdigit()
     ]
     assert labels == [
-        f"[{stage}/{total}]" for _pair in range(6) for stage in range(1, total + 1)
+        f"[{stage}/{total}]" for _pair in range(4) for stage in range(1, total + 1)
     ]
 
 
-@pytest.mark.parametrize("scheduler", ("ddim", "ddpm"))
+@pytest.mark.parametrize(
+    ("model", "scheduler"),
+    (("sdv1", "ddim"), ("sdv1", "ddpm"), ("sdv2", "ddim"), ("realvis", "ddim")),
+)
 @pytest.mark.parametrize("centering", (None, "--use-mu", "--no-mu"))
 def test_run_all_explicit_axes_and_seed_forwarding(
     tmp_path: Path,
+    model: str,
     scheduler: str,
     centering: str | None,
 ) -> None:
     result, calls = _run_all_stub(
         tmp_path,
         (
-            "--model=realvis",
+            f"--model={model}",
             "--scheduler",
             scheduler,
             "--selection-strategy",
@@ -2389,7 +2400,7 @@ def test_run_all_explicit_axes_and_seed_forwarding(
     centers = [False, True] if centering is None else [centering == "--use-mu"]
     for call in calls:
         for option, value in (
-            ("--model", "realvis"),
+            ("--model", model),
             ("--scheduler", scheduler),
             ("--g", "7.5"),
             ("--T", "12"),
@@ -2432,66 +2443,69 @@ def test_run_all_explicit_axes_and_seed_forwarding(
 
 
 @pytest.mark.parametrize(
-    ("arguments", "models", "schedulers", "selections", "centers"),
+    ("arguments", "expected_pairs", "centers"),
     (
+        (("--model", "sdv2"), (("sdv2", "ddim"),), (False, True)),
+        (("--model=realvis",), (("realvis", "ddim"),), (False, True)),
         (
-            ("--model", "sdv2"),
-            {"sdv2"},
-            {"ddim", "ddpm"},
-            {"gmm"},
-            {False, True},
+            ("--model", "sdv1"),
+            (("sdv1", "ddim"), ("sdv1", "ddpm")),
+            (False, True),
         ),
+        (("--scheduler=ddpm",), (("sdv1", "ddpm"),), (False, True)),
         (
-            ("--scheduler=ddpm",),
-            {"sdv1", "sdv2", "realvis"},
-            {"ddpm"},
-            {"gmm"},
-            {False, True},
+            ("--scheduler", "ddim"),
+            (("sdv1", "ddim"), ("sdv2", "ddim"), ("realvis", "ddim")),
+            (False, True),
         ),
         (
             ("--selection-strategy=gmm",),
-            {"sdv1", "sdv2", "realvis"},
-            {"ddim", "ddpm"},
-            {"gmm"},
-            {False, True},
+            (
+                ("sdv1", "ddim"),
+                ("sdv1", "ddpm"),
+                ("sdv2", "ddim"),
+                ("realvis", "ddim"),
+            ),
+            (False, True),
         ),
         (
             ("--use-mu",),
-            {"sdv1", "sdv2", "realvis"},
-            {"ddim", "ddpm"},
-            {"gmm"},
-            {True},
+            (
+                ("sdv1", "ddim"),
+                ("sdv1", "ddpm"),
+                ("sdv2", "ddim"),
+                ("realvis", "ddim"),
+            ),
+            (True,),
         ),
         (
             ("--no-mu",),
-            {"sdv1", "sdv2", "realvis"},
-            {"ddim", "ddpm"},
-            {"gmm"},
-            {False},
+            (
+                ("sdv1", "ddim"),
+                ("sdv1", "ddpm"),
+                ("sdv2", "ddim"),
+                ("realvis", "ddim"),
+            ),
+            (False,),
         ),
     ),
 )
 def test_run_all_filters_only_requested_axes(
     tmp_path: Path,
     arguments: tuple[str, ...],
-    models: set[str],
-    schedulers: set[str],
-    selections: set[str],
-    centers: set[bool],
+    expected_pairs: tuple[tuple[str, str], ...],
+    centers: tuple[bool, ...],
 ) -> None:
     result, calls = _run_all_stub(tmp_path, ("--plot", *arguments))
     assert result.returncode == 0, result.stderr
     for wrapper in ("lemma2_mean_convergence.sh", "corollary3_cfg_amplification.sh"):
         subset = [c for c in calls if c[0] == wrapper]
-        expected = {
-            (m, s, strategy, center)
-            for m in models
-            for s in schedulers
-            for strategy in selections
+        expected = [
+            (model, scheduler, "gmm", center)
+            for model, scheduler in expected_pairs
             for center in centers
-        }
-        assert len(subset) == len(expected)
-        assert {
+        ]
+        assert [
             (
                 _pipeline_option(c, "--model"),
                 _pipeline_option(c, "--scheduler"),
@@ -2499,7 +2513,71 @@ def test_run_all_filters_only_requested_axes(
                 "--use-mu" in c,
             )
             for c in subset
-        } == expected
+        ] == expected
+    assert [
+        (_pipeline_option(c, "--model"), _pipeline_option(c, "--scheduler"))
+        for c in calls
+        if c[0] == "theorem1_loss_recovery.sh"
+    ] == list(expected_pairs)
+    assert {
+        (_pipeline_option(c, "--model"), _pipeline_option(c, "--scheduler"))
+        for c in calls
+    } == set(expected_pairs)
+    assert (
+        f"Experiment matrix: {len(expected_pairs)} model/scheduler pairs x "
+        f"{len(centers)} centers x 1 selection "
+        f"({len(expected_pairs) * len(centers)} configurations)"
+    ) in result.stdout
+
+
+def test_run_all_plot_routes_both_proximity_pools_before_theory(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_all_stub(
+        tmp_path,
+        (
+            "--plot",
+            "--model",
+            "sdv1",
+            "--scheduler",
+            "ddpm",
+            "--g",
+            "3.25",
+            "--N",
+            "4",
+            "--no-mu",
+        ),
+    )
+
+    assert result.returncode == 0, result.stderr
+    names = [call[0] for call in calls]
+    assert names == [
+        "compute_proximity.sh",
+        "compute_proximity.sh",
+        "theorem1_loss_recovery.sh",
+        "lemma2_mean_convergence.sh",
+    ]
+    proximity = calls[:2]
+    assert [_pipeline_option(call, "--seed-start") for call in proximity] == ["4", "0"]
+    for call in proximity:
+        assert _pipeline_option(call, "--model") == "sdv1"
+        assert _pipeline_option(call, "--scheduler") == "ddpm"
+        assert _pipeline_option(call, "--g") == "3.25"
+        assert _pipeline_option(call, "--N") == "4"
+        assert _pipeline_option(call, "--selection-strategy") == "gmm"
+        assert "--plot" in call
+        assert "--overwrite" not in call
+    assert not {
+        "generate.sh",
+        "sscd.sh",
+        "unconditional_baseline.sh",
+    }.intersection(names)
+    labels = [
+        line.split("]", 1)[0] + "]"
+        for line in result.stdout.splitlines()
+        if line.startswith("[") and line[1:2].isdigit()
+    ]
+    assert labels == [f"[{stage}/6]" for stage in range(1, 7)]
 
 
 @pytest.mark.parametrize(
@@ -2571,7 +2649,7 @@ def test_run_all_forward_states_compatible_flags_once_per_scheduler(
         < names.index("lemma2_mean_convergence.sh")
     )
     centers = 1 if centering else 2
-    total = 2 + 2 * centers + (0 if mode == ("--plot",) else 7)
+    total = 2 + 2 * centers + (2 if mode == ("--plot",) else 7)
     labels = [
         line.split("]", 1)[0] + "]"
         for line in result.stdout.splitlines()
@@ -2608,7 +2686,7 @@ def test_run_all_forward_states_numbers_incompatible_skip(
         if "Skipping forward corruptions vs generated states:" in line
     ]
     assert len(skipped) == 1
-    assert skipped[0].startswith("[2/6]")
+    assert skipped[0].startswith("[4/8]")
     assert (
         "requires --model sdv1, --scheduler ddim, --g 7.5, --N 20, --T >= 9"
         in skipped[0]
@@ -2689,7 +2767,7 @@ def test_run_all_keeps_lemma_when_guidance_skips_specialized_experiments(
         tmp_path,
         (
             "--model",
-            "sdv2",
+            "sdv1",
             "--scheduler=ddpm",
             "--selection-strategy=gmm",
             "--g=3.25",
@@ -2707,6 +2785,28 @@ def test_run_all_keeps_lemma_when_guidance_skips_specialized_experiments(
     assert "Skipping forward corruptions vs generated states:" in result.stdout
     assert all(c[0] != "forward_corruptions_generated_states.sh" for c in calls)
     assert "Skipping Lemma 2" not in result.stdout
+
+
+@pytest.mark.parametrize("model", ("sdv2", "realvis"))
+@pytest.mark.parametrize("equals_syntax", (False, True))
+@pytest.mark.parametrize("mode", ((), ("--plot",), ("--download",)))
+def test_run_all_rejects_excluded_model_scheduler_pairs_before_any_stage(
+    tmp_path: Path,
+    model: str,
+    equals_syntax: bool,
+    mode: tuple[str, ...],
+) -> None:
+    pair_options = (
+        (f"--model={model}", "--scheduler=ddpm")
+        if equals_syntax
+        else ("--model", model, "--scheduler", "ddpm")
+    )
+    result, calls = _run_all_stub(tmp_path, (*mode, *pair_options))
+    assert result.returncode == 2
+    assert calls == []
+    assert "run_all.sh:" in result.stderr
+    assert model in result.stderr
+    assert "ddpm" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -2862,10 +2962,14 @@ def test_run_all_documents_default_selection_strategy(tmp_path: Path) -> None:
     help_text = " ".join(result.stdout.split())
     for snippet in (
         "default: all three",
-        "default: both schedulers",
+        "default: all supported pairs",
         "--selection-strategy NAME",
         "gmm only (default: gmm)",
-        "12 configurations",
+        "8 configurations",
+        "sdv1/ddim, sdv1/ddpm, sdv2/ddim, and realvis/ddim",
+        "Explicit model/scheduler options filter these supported pairs",
+        "no matching pair fail before any stage",
+        "--scheduler ddpm selects sdv1 only",
         "--use-mu",
         "--no-mu",
         "mutually exclusive",
@@ -2908,6 +3012,8 @@ def test_run_all_documents_default_selection_strategy(tmp_path: Path) -> None:
         "spearman",
         "gmm-evidence",
         "24 configurations",
+        "12 configurations",
+        "default: both schedulers",
     ):
         assert obsolete not in help_text
 
@@ -3012,7 +3118,8 @@ printf '\\n' >> "$RUN_ALL_LOG"
     assert ("--plot" in forward[0]) is plot_only
     if plot_only:
         assert {call[0] for call in calls} == theory | {
-            "forward_corruptions_generated_states.sh"
+            "compute_proximity.sh",
+            "forward_corruptions_generated_states.sh",
         }
 
 

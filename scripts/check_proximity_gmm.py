@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect the current diagonal-GMM prompt selection in single-panel figures."""
+"""Inspect the current full-covariance GMM selection in single-panel figures."""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from utils.data.proximity_gmm import (  # noqa: E402
     standardize_features,
 )
 from utils.data.selection import (  # noqa: E402
+    HIGH_SSCD_RETENTION_THRESHOLD,
     _gmm_decision,
     _normalize_csv,
     _prompt_spearman,
@@ -53,6 +54,7 @@ from utils.experiments.plotting import (  # noqa: E402
     add_prompt_curves,
     add_sscd_colorbar,
     category_legend_label,
+    covariance_ellipse as _covariance_ellipse,
 )
 
 AUDIT_COLUMNS = [
@@ -92,9 +94,11 @@ def positive_finite_float(value: str) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Fit the current deterministic two-component diagonal-covariance "
+            "Fit the current deterministic two-component full-covariance "
             "Gaussian mixture to every valid reference L2/SSCD observation. "
-            "Keep complete prompts with any high-component seed; Spearman "
+            "Discard complete prompts with a strict low-component seed majority "
+            "unless any reference seed has SSCD > "
+            f"{HIGH_SSCD_RETENTION_THRESHOLD:g}; Spearman "
             "correlations are descriptive only."
         ),
         allow_abbrev=False,
@@ -251,7 +255,9 @@ def annotate(
         if not valid.loc[group.index].all():
             decisions[str(index)] = "unusable"
             continue
-        included, _, _ = _gmm_decision(group["gmm_low_mode_probability"].tolist())
+        included, _, _ = _gmm_decision(
+            group["gmm_low_mode_probability"].tolist(), group["sscd"].tolist()
+        )
         decisions[str(index)] = "include" if included else "discard"
     result["gmm_selection_decision"] = result["original_index"].map(decisions)
     result["gmm_reg_covar"] = reg_covar
@@ -317,7 +323,7 @@ def print_report(
     undefined_rho = prompts["prompt_rule"].eq("rho undefined").sum()
     included_prompts = int(prompts["gmm_selection_decision"].eq("include").sum())
     print(
-        f"Prompts included by any high-component seed: {included_prompts}/{len(prompts)}; "
+        f"Prompts included by the selection rule: {included_prompts}/{len(prompts)}; "
         f"undefined rho (descriptive only)={undefined_rho}"
     )
 
@@ -329,17 +335,10 @@ def covariance_ellipse(
     component_index: int,
     standard_deviations: float,
 ) -> Ellipse:
-    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-    order = np.argsort(eigenvalues)[::-1]
-    eigenvalues = eigenvalues[order]
-    direction = eigenvectors[:, order[0]]
-    angle = math.degrees(math.atan2(direction[1], direction[0]))
-    width, height = 2.0 * standard_deviations * np.sqrt(eigenvalues)
-    return Ellipse(
-        xy=mean,
-        width=width,
-        height=height,
-        angle=angle,
+    return _covariance_ellipse(
+        mean,
+        covariance,
+        standard_deviations=standard_deviations,
         fill=False,
         color=CLUSTER_COLORS[COMPONENT_NAMES[component_index]],
         linewidth=1.0,

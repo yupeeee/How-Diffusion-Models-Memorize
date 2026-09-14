@@ -30,7 +30,12 @@ import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
-from matplotlib.ticker import LogFormatterSciNotation, LogLocator, NullFormatter
+from matplotlib.ticker import (
+    LogFormatterSciNotation,
+    LogLocator,
+    NullLocator,
+    NullFormatter,
+)
 import numpy as np
 import pandas as pd
 import torch
@@ -124,6 +129,10 @@ TRAJECTORY_FIGURE_FILENAMES = (
     "theorem1_loss_recovery_trajectory.png",
     "theorem1_loss_recovery_trajectory.pdf",
 )
+LOSS_TIMESTEP_FIGURE_FILENAMES = (
+    "theorem1_loss_vs_timestep.png",
+    "theorem1_loss_vs_timestep.pdf",
+)
 # Recognized only to remove obsolete figures; these outputs are never generated.
 _RETIRED_FIGURE_FILENAMES = (
     "theorem1_loss_recovery_noise_sweep.png",
@@ -132,6 +141,7 @@ _RETIRED_FIGURE_FILENAMES = (
 FIGURE_FILENAMES = (
     *GAUSSIAN_FIGURE_FILENAMES,
     *TRAJECTORY_FIGURE_FILENAMES,
+    *LOSS_TIMESTEP_FIGURE_FILENAMES,
 )
 CSV_COLUMNS = (
     "record_id",
@@ -174,6 +184,7 @@ TEXT_FONT_SIZE = 15
 AXIS_NUMBER_FONT_SIZE = 12
 LEGEND_FONT_SIZE = 10
 OBSERVATION_LINE_ALPHA = 0.68
+LOSS_TIMESTEP_LINE_ALPHA = 0.35
 OBSERVATION_LINE_WIDTH = 0.75
 COLORBAR_ALPHA = 1.0
 FIGURE_PAD_INCHES = 0.05
@@ -184,8 +195,8 @@ TRAJECTORY_SOURCE = "trajectory"
 EVALUATION_SOURCES = (GAUSSIAN_SOURCE, TRAJECTORY_SOURCE)
 EVALUATION_SOURCE_CHOICES = (*EVALUATION_SOURCES, "both")
 
-INITIAL_LOSS_XLABEL = r"$\sqrt{\mathcal{L}_T(c)/[d(\alpha_T^2/\sigma_T^2)]}$"
-SWEEP_LOSS_XLABEL = r"$\sqrt{\mathcal{L}_t(c)/[d(\alpha_t^2/\sigma_t^2)]}$"
+INITIAL_LOSS_XLABEL = r"$\sqrt{\mathcal{L}_T(c)/[d\,\mathrm{SNR}_T]}$"
+SWEEP_LOSS_XLABEL = r"$\sqrt{\mathcal{L}_t(c)/[d\,\mathrm{SNR}_t]}$"
 INITIAL_RECOVERY_YLABEL = (
     r"$\sqrt{\mathbb{E}_{\mathbf{x}_T,\boldsymbol{\xi}}"
     r"[\|\widehat{\mathbf{x}}_{0\mid T,c}(\mathbf{x}_T)-"
@@ -1793,6 +1804,16 @@ def _render_initial_loss_recovery(
             linewidths=0.0,
             zorder=2,
         )
+        median_x, median_y = _binned_medians(x_values, y_values)
+        axis.plot(
+            median_x,
+            median_y,
+            color="black",
+            linewidth=1.35,
+            zorder=3,
+            label="Median",
+        )
+        axis.legend(loc="lower right", fontsize=LEGEND_FONT_SIZE, frameon=False)
         _add_sscd_colorbar(figure, axis, color_norm, scores)
         _set_recovery_axis_scale(axis, x_values, coordinate="x")
         _set_recovery_axis_scale(axis, y_values)
@@ -1803,8 +1824,12 @@ def _render_initial_loss_recovery(
             (axis.yaxis, axis.get_yscale()),
         ):
             if scale == "log":
+                lower, upper = coordinate.get_view_interval()
+                tick_subs = (
+                    (1.0,) if math.log10(upper / lower) > 1.0 else (1.0, 2.0, 5.0)
+                )
                 coordinate.set_major_locator(
-                    LogLocator(base=10, subs=(1.0, 2.0, 5.0), numticks=7)
+                    LogLocator(base=10, subs=tick_subs, numticks=7)
                 )
                 coordinate.set_major_formatter(
                     LogFormatterSciNotation(
@@ -1922,10 +1947,89 @@ def _render_pair_figure(
         axis.set_ylabel(_source_ylabel(evaluation_source))
         axis.grid(True, which="both", alpha=0.18, linewidth=0.6)
 
-        # There is no shared x coordinate per timestep: each prompt has its
-        # own forward loss. A normalized-loss reference would just compare x
-        # against itself, so show prompt curves and their initial scatter only.
         axis.autoscale_view()
+        figure.tight_layout()
+        _atomic_save_figures(figure, destinations)
+    finally:
+        plt.close(figure)
+
+
+def _render_loss_timestep_figure(
+    *, valid: pd.DataFrame, destinations: Sequence[Path]
+) -> None:
+    """Compare raw forward losses with the noise ratio from one validated source."""
+    if valid.empty or valid.duplicated(["record_id", "step_index"]).any():
+        raise ExperimentError(
+            "loss-timestep figure requires one source row per prompt and timestep"
+        )
+    schedule = (
+        valid[["timestep", "snr_t"]]
+        .drop_duplicates()
+        .sort_values("timestep", kind="stable")
+    )
+    timesteps = schedule["timestep"].to_numpy(dtype=float)
+    noise_ratios = schedule["snr_t"].to_numpy(dtype=float)
+    figure, axis = plt.subplots(figsize=FIGURE_SIZE)
+    try:
+        color_norm = Normalize(
+            vmin=SSCD_COLOR_RANGE[0], vmax=SSCD_COLOR_RANGE[1], clip=True
+        )
+        segments: list[np.ndarray] = []
+        scores: list[float] = []
+        for _record_id, group in valid.groupby("record_id", sort=False):
+            ordered = group.sort_values("timestep", kind="stable")
+            # The CSV loss is E_epsilon ||epsilon - epsilon_t||^2: no /d,
+            # square root, noise-ratio normalization, or recovery substitution.
+            segments.append(
+                ordered[["timestep", "conditional_loss"]].to_numpy(dtype=float)
+            )
+            scores.append(float(ordered["mean_target_sscd"].iloc[0]))
+        observations = LineCollection(
+            segments,
+            cmap="viridis",
+            norm=color_norm,
+            linewidths=OBSERVATION_LINE_WIDTH,
+            alpha=LOSS_TIMESTEP_LINE_ALPHA,
+            zorder=2,
+        )
+        observations.set_array(np.asarray(scores, dtype=float))
+        axis.add_collection(observations)
+        axis.plot(
+            timesteps,
+            noise_ratios,
+            color="black",
+            linestyle="--",
+            linewidth=1.0,
+            alpha=1.0,
+            zorder=3,
+            label=r"$\mathrm{SNR}_t$",
+        )
+        _add_sscd_colorbar(figure, axis, color_norm, np.asarray(scores, dtype=float))
+        _set_recovery_axis_scale(
+            axis,
+            np.concatenate(
+                [valid["conditional_loss"].to_numpy(dtype=float), noise_ratios]
+            ),
+        )
+        axis.autoscale_view()
+        terminal_timestep = float(timesteps[-1])
+        if terminal_timestep > 0.0:
+            # Label the image-side and noise-side endpoints symbolically while
+            # preserving every logged coordinate; do not fabricate limit data.
+            axis.set_xlim(0.0, terminal_timestep)
+            axis.set_xticks([0.0, terminal_timestep], labels=[r"$0$", r"$T$"])
+        else:
+            # A t=0-only cache has no distinct terminal-noise endpoint.
+            axis.set_xticks([0.0], labels=[r"$0$"])
+        axis.xaxis.set_minor_locator(NullLocator())
+        if axis.get_yscale() == "log":
+            axis.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0,), numticks=7))
+            axis.yaxis.set_minor_formatter(NullFormatter())
+        axis.set_xlabel(r"$t$")
+        axis.set_ylabel(r"$\mathcal{L}_t(c)$")
+        axis.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
+        axis.grid(True, which="both", alpha=0.18, linewidth=0.6)
+        axis.legend(loc="lower left", fontsize=LEGEND_FONT_SIZE, frameon=False)
         figure.tight_layout()
         _atomic_save_figures(figure, destinations)
     finally:
@@ -2158,7 +2262,7 @@ def plot_saved_results(
     evaluation_source: str | None = None,
     expected_configuration: Mapping[str, object] | None = None,
 ) -> None:
-    """Reload selected measurements for the initial scatter and trajectory overlay."""
+    """Reload selected measurements for recovery and forward-loss figures."""
 
     source = Path(csv_path)
     frame = pd.read_csv(source)
@@ -2189,16 +2293,27 @@ def plot_saved_results(
         else None
     )
     metric_columns = (
+        "timestep",
+        "conditional_loss",
         "snr_t",
         "normalized_loss_rmse",
         "recovery_rmse",
         "mean_target_sscd",
     )
+    varying_sscd = validated.groupby(["record_id", "evaluation_source"], sort=False)[
+        "mean_target_sscd"
+    ].nunique(dropna=False)
+    if varying_sscd.gt(1).any():
+        raise ExperimentError(
+            "saved CSV mean_target_sscd differs across timesteps for the same prompt"
+        )
     for source_name in requested:
         selected = validated.loc[validated["evaluation_source"].eq(source_name)].copy()
         # A [0, 1] colorbar does not make SSCD a probability. Keep valid
         # negative cosine scores; Normalize clips only their displayed colors.
         valid_domains = {
+            "timestep": selected["timestep"].ge(0.0),
+            "conditional_loss": selected["conditional_loss"].ge(0.0),
             "snr_t": selected["snr_t"].gt(0.0),
             "normalized_loss_rmse": selected["normalized_loss_rmse"].ge(0.0),
             "recovery_rmse": selected["recovery_rmse"].ge(0.0),
@@ -2240,6 +2355,17 @@ def plot_saved_results(
                     destinations=_figure_paths(output_directory, source_name),
                     initial=initial,
                 )
+    # Both recovery sources reuse exactly the same forward loss. Draw each
+    # prompt once, without averaging or duplicating the source copies.
+    loss_rows = validated.loc[validated["evaluation_source"].eq(requested[0])].copy()
+    with matplotlib.rc_context(PLOT_STYLE):
+        _render_loss_timestep_figure(
+            valid=loss_rows,
+            destinations=tuple(
+                Path(output_directory) / filename
+                for filename in LOSS_TIMESTEP_FIGURE_FILENAMES
+            ),
+        )
     _remove_noise_sweep_outputs(output_directory)
 
 

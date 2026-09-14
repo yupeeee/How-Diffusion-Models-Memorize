@@ -1572,7 +1572,7 @@ def test_figure_uses_log_snr_bands_viridis_and_opaque_colorbar(
         assert tuple(figure.get_size_inches()) == pytest.approx((4.0, 4.0))
         assert len(figure.axes) == 2
         axis, colorbar_axis = figure.axes
-        assert axis.get_xlabel() == r"$\alpha_t^2/\sigma_t^2$"
+        assert axis.get_xlabel() == r"$\mathrm{SNR}_t$"
         assert axis.get_xscale() == "log"
         assert axis.get_title() == ""
         assert ylabel_fragment in axis.get_ylabel()

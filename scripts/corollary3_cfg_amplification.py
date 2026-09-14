@@ -2623,7 +2623,7 @@ def _render_figure(
             axis.set_xscale("log")
             axis.xaxis.set_major_locator(LogLocator(base=10, subs=(1,), numticks=7))
             axis.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
-            axis.set_xlabel(r"$\alpha_t^2/\sigma_t^2$")
+            axis.set_xlabel(r"$\mathrm{SNR}_t$")
             axis.grid(True, which="both", alpha=0.18, linewidth=0.6)
             if metric == COEFFICIENT_METRIC:
                 if centering_mode == CENTERING_MU_HAT:

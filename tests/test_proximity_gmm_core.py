@@ -11,6 +11,7 @@ import pytest
 from utils.data.proximity_gmm import (
     COMPONENT_NAMES,
     DEFAULT_REG_COVAR,
+    GaussianMixtureFit,
     _fit_from_labels,
     _kmeans_two,
     _maximization,
@@ -78,7 +79,11 @@ def test_fit_parameters_and_posteriors_are_valid_and_reproducible() -> None:
     np.testing.assert_allclose(fit.responsibilities.sum(axis=1), 1.0)
     assert np.all((0.0 <= fit.responsibilities) & (fit.responsibilities <= 1.0))
     for covariance in fit.covariances:
+        np.testing.assert_allclose(covariance, covariance.T, rtol=0.0, atol=1e-12)
         np.linalg.cholesky(covariance)
+        assert np.linalg.eigvalsh(covariance).min() >= (
+            DEFAULT_REG_COVAR * (1.0 - 1e-10)
+        )
 
     responsibilities, log_likelihood = expectation(
         features, fit.weights, fit.means, fit.covariances
@@ -89,10 +94,15 @@ def test_fit_parameters_and_posteriors_are_valid_and_reproducible() -> None:
     means, covariances = raw_parameters(fit, feature_mean, feature_scale)
     assert means[0, 1] < means[1, 1]
     assert covariances.shape == (2, 2, 2)
-    np.testing.assert_array_equal(fit.covariances[:, 0, 1], 0.0)
-    np.testing.assert_array_equal(fit.covariances[:, 1, 0], 0.0)
-    np.testing.assert_array_equal(covariances[:, 0, 1], 0.0)
-    np.testing.assert_array_equal(covariances[:, 1, 0], 0.0)
+    assert np.any(np.abs(fit.covariances[:, 0, 1]) > 1e-6)
+    np.testing.assert_allclose(
+        covariances,
+        fit.covariances * feature_scale[None, :, None] * feature_scale[None, None, :],
+    )
+    np.testing.assert_allclose(
+        covariances[:, 0, 1],
+        fit.covariances[:, 0, 1] * feature_scale.prod(),
+    )
 
 
 def test_standardization_produces_centered_unit_variance_features() -> None:
@@ -144,8 +154,16 @@ def test_fit_rejects_unstandardized_and_semantically_degenerate_input() -> None:
         fit_gaussian_mixture(features)
 
 
-def test_diagonal_maximization_uses_weighted_variances_and_existing_floor() -> None:
-    values = np.asarray([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0], [5.0, 0.0]])
+@pytest.mark.parametrize(
+    "values",
+    (
+        np.asarray([[1.0, 0.0], [2.0, 1.0], [3.0, 1.0], [4.0, 3.0], [5.0, 4.0]]),
+        np.asarray([[1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0], [5.0, 10.0]]),
+    ),
+)
+def test_full_maximization_uses_weighted_covariance_and_existing_eigenvalue_floor(
+    values: np.ndarray,
+) -> None:
     responsibilities = np.asarray(
         [[0.9, 0.1], [0.7, 0.3], [0.5, 0.5], [0.3, 0.7], [0.1, 0.9]]
     )
@@ -156,19 +174,36 @@ def test_diagonal_maximization_uses_weighted_variances_and_existing_floor() -> N
     )
     np.testing.assert_allclose(weights, [0.5, 0.5])
     for component in range(2):
-        expected_variance = np.average(
-            (values - means[component]) ** 2,
-            axis=0,
-            weights=responsibilities[:, component],
-        )
+        mass = responsibilities[:, component].sum()
+        expected_mean = (values * responsibilities[:, component, None]).sum(
+            axis=0
+        ) / mass
+        np.testing.assert_allclose(means[component], expected_mean)
+        delta = values - expected_mean
+        weighted_covariance = (
+            (delta.T * responsibilities[:, component]) @ delta
+        ) / mass
+        eigenvalues, eigenvectors = np.linalg.eigh(weighted_covariance)
+        expected_covariance = (
+            eigenvectors * np.maximum(eigenvalues, DEFAULT_REG_COVAR)
+        ) @ eigenvectors.T
         np.testing.assert_allclose(
-            covariances[component],
-            np.diag(np.maximum(expected_variance, DEFAULT_REG_COVAR)),
+            covariances[component], expected_covariance, rtol=1e-12, atol=1e-12
         )
-        assert covariances[component, 1, 1] == DEFAULT_REG_COVAR
+        assert abs(covariances[component, 0, 1]) > 0.1
+        np.testing.assert_allclose(
+            covariances[component], covariances[component].T, rtol=0.0, atol=1e-12
+        )
+        np.linalg.cholesky(covariances[component])
+        np.testing.assert_allclose(
+            np.linalg.eigvalsh(covariances[component]),
+            np.maximum(eigenvalues, DEFAULT_REG_COVAR),
+            rtol=1e-8,
+            atol=1e-12,
+        )
 
 
-def test_diagonal_fit_selects_highest_likelihood_deterministic_start() -> None:
+def test_full_fit_selects_highest_likelihood_deterministic_start() -> None:
     features, _, _ = standardize_features(_known_clouds())
     fits = [
         _fit_from_labels(
@@ -181,39 +216,67 @@ def test_diagonal_fit_selects_highest_likelihood_deterministic_start() -> None:
     expected = max(fits, key=lambda fit: fit.log_likelihood)
     actual = fit_gaussian_mixture(features)
     assert actual.log_likelihood == expected.log_likelihood
+    np.testing.assert_array_equal(actual.weights, expected.weights)
+    np.testing.assert_array_equal(actual.means, expected.means)
+    np.testing.assert_array_equal(actual.covariances, expected.covariances)
     np.testing.assert_array_equal(actual.responsibilities, expected.responsibilities)
 
 
-def test_diagonal_fit_reduces_tilted_high_mode_spillover_into_bottom_cloud() -> None:
-    rng = np.random.default_rng(92)
-    low = np.column_stack((rng.normal(150, 12, 600), rng.normal(0.06, 0.02, 600)))
-    high_scores = rng.normal(0.55, 0.18, 300)
-    high = np.column_stack(
-        (210 - 200 * high_scores + rng.normal(0, 10, 300), high_scores)
+def test_full_covariance_update_and_posteriors_rotate_with_features() -> None:
+    values = np.asarray(
+        [[1.0, 0.0], [2.0, 1.0], [3.0, 1.0], [4.0, 3.0], [5.0, 4.0]]
     )
-    bottom_tail = np.column_stack((rng.normal(195, 4, 20), rng.normal(0.1, 0.01, 20)))
-    features, _, _ = standardize_features(np.vstack((low, high, bottom_tail)))
-    diagonal = fit_gaussian_mixture(features)
-    diagonal_high = diagonal.responsibilities.argmax(axis=1) == 1
+    responsibilities = np.asarray(
+        [[0.9, 0.1], [0.7, 0.3], [0.5, 0.5], [0.3, 0.7], [0.1, 0.9]]
+    )
+    angle = np.pi / 5.0
+    rotation = np.asarray(
+        [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+    )
+    rotated_values = values @ rotation.T
+    weights, means, covariances = _maximization(
+        values, responsibilities, reg_covar=DEFAULT_REG_COVAR
+    )
+    rotated_weights, rotated_means, rotated_covariances = _maximization(
+        rotated_values, responsibilities, reg_covar=DEFAULT_REG_COVAR
+    )
+    np.testing.assert_allclose(rotated_weights, weights)
+    np.testing.assert_allclose(rotated_means, means @ rotation.T)
+    np.testing.assert_allclose(
+        rotated_covariances,
+        np.asarray([rotation @ covariance @ rotation.T for covariance in covariances]),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    posterior, likelihood = expectation(values, weights, means, covariances)
+    rotated_posterior, rotated_likelihood = expectation(
+        rotated_values, rotated_weights, rotated_means, rotated_covariances
+    )
+    np.testing.assert_allclose(rotated_posterior, posterior, rtol=1e-12, atol=1e-12)
+    assert rotated_likelihood == pytest.approx(likelihood, rel=1e-12, abs=1e-12)
 
-    # Low-score tail observations must not be assigned to the high component.
-    assert not diagonal_high[900:].any()
-    assert not diagonal_high[:600].any()
-    # Strong high observations remain high, even when a prompt has many low seeds.
-    assert diagonal_high[600:900][high_scores > 0.5].all()
-    intermittent_prompt = np.concatenate(
-        (diagonal_high[:19], diagonal_high[600:900][high_scores > 0.5][:1])
+
+def test_diagnostic_ellipse_rotates_with_off_diagonal_covariance() -> None:
+    from scripts import check_proximity_gmm as diagnostic
+
+    ellipse = diagnostic.covariance_ellipse(
+        np.asarray([2.0, 0.5]),
+        np.asarray([[4.0, 1.5], [1.5, 1.0]]),
+        component_index=0,
+        standard_deviations=1.0,
     )
-    assert intermittent_prompt.sum() == 1
-    assert intermittent_prompt.any()
+
+    assert not math.isclose(ellipse.angle % 90.0, 0.0, abs_tol=1e-12)
+    assert ellipse.width > ellipse.height > 0.0
 
 
 def _diagnostic_observations() -> pd.DataFrame:
     prompts = {
         "low": ((1.0, 0.08), (1.5, 0.11), (2.0, 0.07)),
-        "positive": ((7.0, 0.75), (8.0, 0.80), (9.0, 0.85)),
-        "constant": ((7.5, 0.82), (7.5, 0.82), (7.5, 0.82)),
-        "intermittent": ((1.2, 0.10), (2.1, 0.09), (8.4, 0.86)),
+        "positive": ((7.0, 0.60), (8.0, 0.64), (9.0, 0.68)),
+        "constant": ((7.5, 0.66), (7.5, 0.66), (7.5, 0.66)),
+        "intermittent": ((1.2, 0.10), (2.1, 0.09), (8.4, 0.69)),
+        "rescued": ((1.2, 0.10), (2.1, 0.09), (8.4, 0.86)),
         "incomplete": ((1.1, 0.06), (7.7, 0.83), (math.nan, math.nan)),
     }
     return pd.DataFrame(
@@ -236,7 +299,7 @@ def _diagnostic_observations() -> pd.DataFrame:
     )
 
 
-def test_diagnostic_uses_same_any_high_decision_without_a_correlation_gate() -> None:
+def test_diagnostic_uses_same_seed_majority_decision_without_a_correlation_gate() -> None:
     from scripts import check_proximity_gmm as diagnostic
     from utils.data.selection import _apply_gmm_decisions
 
@@ -253,9 +316,14 @@ def test_diagnostic_uses_same_any_high_decision_without_a_correlation_gate() -> 
     assert prompts.loc["positive", "gmm_selection_decision"] == "include"
     assert math.isnan(prompts.loc["constant", "computed_prompt_spearman"])
     assert prompts.loc["constant", "gmm_selection_decision"] == "include"
-    assert prompts.loc["intermittent", "gmm_selection_decision"] == "include"
+    assert prompts.loc["intermittent", "gmm_selection_decision"] == "discard"
     intermittent = annotated.loc[annotated["original_index"].eq("intermittent")]
     assert intermittent["gmm_component"].eq("high_sscd_mode").sum() == 1
+    assert intermittent["sscd"].le(0.75).all()
+    assert prompts.loc["rescued", "gmm_selection_decision"] == "include"
+    rescued = annotated.loc[annotated["original_index"].eq("rescued")]
+    assert rescued["gmm_component"].eq("low_sscd_mode").sum() == 2
+    assert rescued["sscd"].gt(0.75).sum() == 1
     assert prompts.loc["low", "gmm_selection_decision"] == "discard"
     assert prompts.loc["incomplete", "gmm_selection_decision"] == "unusable"
     assert annotated.loc[valid, "gmm_component"].isin(COMPONENT_NAMES).all()
@@ -275,6 +343,94 @@ def test_diagnostic_uses_same_any_high_decision_without_a_correlation_gate() -> 
         annotated.loc[complete, "gmm_selection_decision"].eq("include").to_numpy()
         == expected.loc[complete, "include_prompt"].to_numpy()
     ).all()
+
+
+def _diagnostic_posterior_fit(
+    low_probabilities: list[float],
+) -> GaussianMixtureFit:
+    low = np.asarray(low_probabilities, dtype=np.float64)
+    return GaussianMixtureFit(
+        weights=np.asarray([0.5, 0.5]),
+        means=np.asarray([[0.0, 0.0], [1.0, 1.0]]),
+        covariances=np.asarray([np.eye(2), np.eye(2)]),
+        responsibilities=np.column_stack((low, 1.0 - low)),
+        log_likelihood=0.0,
+        iterations=1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("low_probabilities", "maximum_sscd", "included"),
+    [
+        ([0.9, 0.8, 0.1], 0.75, False),
+        ([0.9, 0.1, 0.1], 0.75, True),
+        ([0.5, 0.1], 0.75, True),
+        ([0.5, 0.5, 0.1], 0.75, False),
+        ([0.5], 0.75, False),
+        ([0.49], 0.75, True),
+        ([0.9, 0.8, 0.1], np.nextafter(0.75, math.inf), True),
+        ([0.9, 0.8, 0.1], 0.9, True),
+    ],
+)
+def test_diagnostic_applies_shared_seed_majority_and_strict_high_sscd_override(
+    low_probabilities: list[float], maximum_sscd: float, included: bool
+) -> None:
+    from scripts import check_proximity_gmm as diagnostic
+    from utils.data.selection import _gmm_decision
+
+    count = len(low_probabilities)
+    scores = np.linspace(0.1, maximum_sscd, count)
+    frame = pd.DataFrame(
+        {
+            "original_index": ["positive"] * count,
+            "seed": np.arange(count),
+            "l2_norm": np.arange(count, dtype=np.float64) + 1.0,
+            "sscd": scores,
+            "observation_status": ["complete"] * count,
+        }
+    )
+    low = np.asarray(low_probabilities, dtype=np.float64)
+    fit = _diagnostic_posterior_fit(low_probabilities)
+    annotated = diagnostic.annotate(frame, fit, reg_covar=DEFAULT_REG_COVAR)
+
+    decision = _gmm_decision(low_probabilities, scores.tolist())
+    assert decision[0] is included
+    if maximum_sscd > 0.75:
+        assert decision[2] == "has_reference_seed_sscd_above_retention_threshold"
+    elif 2 * sum(value >= 0.5 for value in low_probabilities) <= count:
+        assert decision[2] == "no_low_sscd_mode_majority"
+    else:
+        assert decision[2] == "majority_reference_seeds_in_low_sscd_mode"
+    assert annotated["gmm_selection_decision"].eq(
+        "include" if included else "discard"
+    ).all()
+    np.testing.assert_array_equal(
+        annotated["gmm_component"].eq("low_sscd_mode"), low >= 0.5
+    )
+
+
+@pytest.mark.parametrize("invalid_status", ["missing", "complete"])
+def test_diagnostic_high_sscd_override_never_rescues_an_incomplete_or_invalid_prompt(
+    invalid_status: str,
+) -> None:
+    from scripts import check_proximity_gmm as diagnostic
+
+    frame = pd.DataFrame(
+        {
+            "original_index": ["incomplete"] * 3,
+            "seed": [3, 4, 5],
+            "l2_norm": [1.0, 2.0, 3.0],
+            "sscd": [0.1, 0.9, math.nan],
+            "observation_status": ["complete", "complete", invalid_status],
+        }
+    )
+    fit = _diagnostic_posterior_fit([0.9, 0.9])
+    annotated = diagnostic.annotate(frame, fit, reg_covar=DEFAULT_REG_COVAR)
+
+    assert annotated["gmm_selection_decision"].eq("unusable").all()
+    assert annotated.loc[:1, "gmm_component"].eq("low_sscd_mode").all()
+    assert annotated.loc[2, "gmm_component"] == ""
+    assert math.isnan(annotated.loc[2, "gmm_low_mode_probability"])
 
 
 def test_diagnostic_loader_keeps_valid_siblings_of_incomplete_prompts(tmp_path) -> None:
@@ -300,7 +456,7 @@ def test_diagnostic_loader_keeps_valid_siblings_of_incomplete_prompts(tmp_path) 
     assert seeds_per_prompt == 3
     assert incomplete_prompts == 1
     valid = diagnostic._valid_observations(loaded)
-    assert valid.sum() == 14
+    assert valid.sum() == 17
     incomplete = loaded["original_index"].eq("incomplete")
     assert valid.loc[incomplete].sum() == 2
     assert not loaded["include_prompt"].any()

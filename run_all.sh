@@ -27,8 +27,10 @@ usage() {
     cat <<'EOF'
 Usage: ./run_all.sh [OPTIONS]
 
-Run sdv1/sdv2/realvis x ddim/ddpm x zero/mu_hat with GMM selection
-(12 configurations). Explicit options narrow individual axes.
+Run sdv1/ddim, sdv1/ddpm, sdv2/ddim, and realvis/ddim, each with
+zero/mu_hat centering and GMM selection (8 configurations).
+Explicit model/scheduler options filter these supported pairs; requests with
+no matching pair fail before any stage. --scheduler ddpm selects sdv1 only.
 Generation, SSCD, and the shared baseline run once per model/scheduler;
 Theorem 1 runs once per model/scheduler because it does not depend on the center.
 Forward corruptions vs generated states also runs once, only for compatible
@@ -36,12 +38,13 @@ sdv1/DDIM, g=7.5, N=20, T>=9 configurations; other combinations are skipped.
 
 Options:
   --download            Run/resume shared Webster preparation once first
-  --plot                Only plot saved theory results and decoded-state galleries
+  --plot                Only plot saved proximity/theory results and decoded-state
+                        galleries
   --overwrite           Regenerate each shared trajectory/SSCD cache, Theorem 1
                         cache, and any required baseline once per model/scheduler;
                         also rebuild the compatible forward/state experiment cache
   --model MODEL         sdv1, sdv2, realvis, or all (default: all three)
-  --scheduler NAME      ddim, ddpm, or all (default: both schedulers)
+  --scheduler NAME      ddim, ddpm, or all (default: all supported pairs)
   --g FLOAT             Classifier-free guidance scale (default: 7.5)
   --T INTEGER           Inference steps per cached trajectory (default: 50)
   --N INTEGER           Experiment seeds 0..N-1; independent selection
@@ -100,9 +103,11 @@ an explicit numbered skip. Its --plot mode requires the decoded gallery cache;
 it never regenerates trajectories, scores, or decoded images.
 
 --plot never invokes generation, SSCD, selection rebuilding, or baseline
-computation. It requires the saved CSVs and matching provenance for the entire
-requested matrix, including precomputed decoded galleries for the compatible
-forward/state experiment. --plot cannot be combined with --download or --overwrite.
+computation. It rebuilds reference and experiment proximity figures from their
+frozen/saved CSVs, then plots the theory and compatible forward/state results.
+It requires matching saved provenance for the entire requested matrix, including
+precomputed decoded galleries for the compatible forward/state experiment.
+--plot cannot be combined with --download or --overwrite.
 Download tuning options apply only with --download. The PYTHON environment
 variable is honored by every wrapper. Any failed stage stops the matrix.
 EOF
@@ -235,15 +240,30 @@ while (($# > 0)); do
 done
 
 case "$MODEL" in
-    all) MODELS=(sdv1 sdv2 realvis) ;;
-    sdv1|sdv2|realvis) MODELS=("$MODEL") ;;
+    all|sdv1|sdv2|realvis) ;;
     *) invalid_value "--model" "$MODEL" ;;
 esac
 case "$SCHEDULER" in
-    all) SCHEDULERS=(ddim ddpm) ;;
-    ddim|ddpm) SCHEDULERS=("$SCHEDULER") ;;
+    all|ddim|ddpm) ;;
     *) invalid_value "--scheduler" "$SCHEDULER" ;;
 esac
+
+MODEL_SCHEDULER_PAIRS=()
+for pair in sdv1:ddim sdv1:ddpm sdv2:ddim realvis:ddim; do
+    pair_model="${pair%%:*}"
+    pair_scheduler="${pair#*:}"
+    if [[ "$MODEL" != "all" && "$MODEL" != "$pair_model" ]]; then
+        continue
+    fi
+    if [[ "$SCHEDULER" != "all" && "$SCHEDULER" != "$pair_scheduler" ]]; then
+        continue
+    fi
+    MODEL_SCHEDULER_PAIRS+=("$pair")
+done
+if ((${#MODEL_SCHEDULER_PAIRS[@]} == 0)); then
+    invalid_value "--model/--scheduler" \
+        "$MODEL/$SCHEDULER (no supported pair; choose sdv1/ddim, sdv1/ddpm, sdv2/ddim, or realvis/ddim)"
+fi
 [[ "$SELECTION_STRATEGY" == "gmm" ]] || invalid_value "--selection-strategy" "$SELECTION_STRATEGY"
 case "$CENTERING_MODE" in
     both) CENTERS=(zero mu_hat) ;;
@@ -307,6 +327,9 @@ run_stage() {
 run_model_scheduler() {
     local STAGE_INDEX=1
     local STAGE_TOTAL=$((2 + 2 * ${#CENTERS[@]}))
+    if ((PLOT_ONLY)); then
+        STAGE_TOTAL=$((STAGE_TOTAL + 2))
+    fi
     local selection="gmm"
     local center
     local COMMON_ARGUMENTS=(
@@ -349,7 +372,14 @@ run_model_scheduler() {
     fi
 
         RUN_CONTEXT="model $MODEL / scheduler $SCHEDULER / selection $selection"
-        if ((!PLOT_ONLY)); then
+        if ((PLOT_ONLY)); then
+            run_stage "Plotting frozen prompt selection with $selection" \
+                "$PROJECT_ROOT/compute_proximity.sh" "${REFERENCE_ARGUMENTS[@]}" \
+                --selection-strategy "$selection" --plot
+            run_stage "Plotting saved experiment proximity with $selection" \
+                "$PROJECT_ROOT/compute_proximity.sh" "${EXPERIMENT_ARGUMENTS[@]}" \
+                --selection-strategy "$selection" --plot
+        else
             run_stage "Rebuilding prompt selection with $selection from $NUM_SEEDS-seed reference evidence" \
                 "$PROJECT_ROOT/compute_proximity.sh" "${REFERENCE_ARGUMENTS[@]}" \
                 --selection-strategy "$selection" --overwrite
@@ -399,9 +429,10 @@ run_model_scheduler() {
 }
 
 cd "$PROJECT_ROOT"
-MATRIX_SIZE=$((${#MODELS[@]} * ${#SCHEDULERS[@]} * ${#CENTERS[@]}))
-printf 'Experiment matrix: %s models x %s schedulers x %s centers x 1 selection (%s configurations)\n' \
-    "${#MODELS[@]}" "${#SCHEDULERS[@]}" "${#CENTERS[@]}" "$MATRIX_SIZE"
+PAIR_TOTAL=${#MODEL_SCHEDULER_PAIRS[@]}
+MATRIX_SIZE=$((PAIR_TOTAL * ${#CENTERS[@]}))
+printf 'Experiment matrix: %s model/scheduler pairs x %s centers x 1 selection (%s configurations)\n' \
+    "$PAIR_TOTAL" "${#CENTERS[@]}" "$MATRIX_SIZE"
 
 if ((DOWNLOAD_WEBSTER)); then
     printf '[setup] Preparing Webster data once for the entire matrix\n'
@@ -421,13 +452,12 @@ fi
 
 trap 'status=$?; printf "run_all.sh: pipeline failed for %s (exit %s)\n" "$RUN_CONTEXT" "$status" >&2; exit "$status"' ERR
 PAIR_INDEX=0
-PAIR_TOTAL=$((${#MODELS[@]} * ${#SCHEDULERS[@]}))
-for MODEL in "${MODELS[@]}"; do
-    for SCHEDULER in "${SCHEDULERS[@]}"; do
-        PAIR_INDEX=$((PAIR_INDEX + 1))
-        RUN_CONTEXT="model $MODEL / scheduler $SCHEDULER"
-        printf '\nModel/scheduler %s/%s: %s / %s\n' "$PAIR_INDEX" "$PAIR_TOTAL" "$MODEL" "$SCHEDULER"
-        run_model_scheduler
-    done
+for pair in "${MODEL_SCHEDULER_PAIRS[@]}"; do
+    MODEL="${pair%%:*}"
+    SCHEDULER="${pair#*:}"
+    PAIR_INDEX=$((PAIR_INDEX + 1))
+    RUN_CONTEXT="model $MODEL / scheduler $SCHEDULER"
+    printf '\nModel/scheduler %s/%s: %s / %s\n' "$PAIR_INDEX" "$PAIR_TOTAL" "$MODEL" "$SCHEDULER"
+    run_model_scheduler
 done
 printf 'Experiment matrix complete (%s configurations).\n' "$MATRIX_SIZE"

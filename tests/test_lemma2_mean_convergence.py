@@ -2035,7 +2035,7 @@ def test_trajectory_figure_has_sscd_colored_curves_bands_and_marker_free_median(
     assert isinstance(axis.xaxis.get_minor_formatter(), NullFormatter)
     major_ticks = axis.xaxis.get_major_locator().tick_values(0.0058, 585.862)
     assert np.isclose(major_ticks, 1e-2).any()
-    assert axis.get_xlabel() == r"$\alpha_t^2/\sigma_t^2$"
+    assert axis.get_xlabel() == r"$\mathrm{SNR}_t$"
     assert r"\widehat{\boldsymbol{\mu}}" in axis.get_ylabel()
     assert r"\|" in axis.get_ylabel()
     assert r"\|_2" not in axis.get_ylabel()

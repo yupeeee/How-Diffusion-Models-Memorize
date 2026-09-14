@@ -60,6 +60,38 @@ EXPECTED_COLUMNS = (
 SELECTION_HASH = "c" * 64
 
 
+def _assert_primary_median(
+    axis: object,
+    *,
+    x_values: Sequence[float],
+    y_values: Sequence[float],
+) -> None:
+    assert len(axis.lines) == 1
+    median = axis.lines[0]
+    order = np.argsort(np.asarray(x_values, dtype=float), kind="stable")
+    sorted_x = np.asarray(x_values, dtype=float)[order]
+    sorted_y = np.asarray(y_values, dtype=float)[order]
+    bins = np.array_split(np.arange(len(sorted_x)), min(10, len(sorted_x)))
+    expected_x = np.asarray([np.median(sorted_x[index]) for index in bins])
+    expected_y = np.asarray([np.median(sorted_y[index]) for index in bins])
+    np.testing.assert_allclose(median.get_xdata(), expected_x)
+    np.testing.assert_allclose(median.get_ydata(), expected_y)
+    assert median.get_color() == "black"
+    assert median.get_linestyle() == "-"
+    assert median.get_linewidth() == pytest.approx(1.35)
+    assert matplotlib.colors.to_rgba(
+        median.get_color(), median.get_alpha()
+    )[-1] == pytest.approx(1.0)
+    assert median.get_zorder() == 3
+    assert median.get_label() == "Median"
+    legend = axis.get_legend()
+    assert legend is not None
+    assert [text.get_text() for text in legend.get_texts()] == ["Median"]
+    assert all(text.get_fontsize() == 10 for text in legend.get_texts())
+    assert legend.get_frame_on() is False
+    assert legend._loc == 4  # Lower right.
+
+
 def _parameters(timesteps: Sequence[int]) -> tuple[experiment.TerminalParameters, ...]:
     return tuple(
         experiment.TerminalParameters(
@@ -252,6 +284,12 @@ def test_cli_schema_defaults_and_output_names_are_exact() -> None:
         "theorem1_loss_recovery.pdf",
         "theorem1_loss_recovery_trajectory.png",
         "theorem1_loss_recovery_trajectory.pdf",
+        "theorem1_loss_vs_timestep.png",
+        "theorem1_loss_vs_timestep.pdf",
+    )
+    assert experiment.LOSS_TIMESTEP_FIGURE_FILENAMES == (
+        "theorem1_loss_vs_timestep.png",
+        "theorem1_loss_vs_timestep.pdf",
     )
 
 
@@ -2013,6 +2051,9 @@ def test_trajectory_sweep_keeps_exact_zero_coordinates(
     monkeypatch.setattr(
         experiment, "_render_initial_loss_recovery", lambda **_kwargs: None
     )
+    monkeypatch.setattr(
+        experiment, "_render_loss_timestep_figure", lambda **_kwargs: None
+    )
     experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="trajectory")
     assert len(axes) == 1
     axis = axes[0]
@@ -2036,6 +2077,8 @@ def test_trajectory_sweep_keeps_exact_zero_coordinates(
     assert len(segments) == 1
     np.testing.assert_array_equal(segments[0][:, 0], losses)
     np.testing.assert_array_equal(segments[0][:, 1], recoveries)
+    assert axis.get_xlim()[0] <= min(losses)
+    assert axis.get_xlim()[1] >= max(losses)
     if 0.0 in losses:
         assert axis.get_xlim()[0] <= 0.0 <= axis.get_xlim()[1]
     if 0.0 in recoveries:
@@ -2139,6 +2182,9 @@ def test_initial_loss_recovery_scatter_reloads_only_gaussian_initial_measurement
     monkeypatch.setattr(experiment.pd, "read_csv", read_csv_spy)
     monkeypatch.setattr(experiment.plt, "subplots", subplots_spy)
     monkeypatch.setattr(experiment, "_render_pair_figure", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        experiment, "_render_loss_timestep_figure", lambda **_kwargs: None
+    )
     experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="both")
 
     assert read_paths == [csv_path]
@@ -2153,15 +2199,21 @@ def test_initial_loss_recovery_scatter_reloads_only_gaussian_initial_measurement
     assert captured["font_family"] == ("STIXGeneral",)
     assert captured["mathtext_fontset"] == "stix"
     assert axis.get_title() == ""
-    assert not axis.lines  # No identity line or median curve.
+    _assert_primary_median(
+        axis,
+        x_values=[0.5, 2.0, 8.0],
+        y_values=[3.0, 0.25, 1.5],
+    )
+    assert not np.allclose(axis.lines[0].get_xdata(), 1.0 / math.sqrt(4))
     assert not axis.texts
-    assert axis.get_legend() is None
     assert axis.get_xscale() == axis.get_yscale() == "log"
     for coordinate in (axis.xaxis, axis.yaxis):
         locator = coordinate.get_major_locator()
         formatter = coordinate.get_major_formatter()
         assert isinstance(locator, LogLocator)
-        np.testing.assert_array_equal(locator._subs, [1.0, 2.0, 5.0])
+        lower, upper = coordinate.get_view_interval()
+        expected_subs = [1.0] if math.log10(upper / lower) > 1.0 else [1.0, 2.0, 5.0]
+        np.testing.assert_array_equal(locator._subs, expected_subs)
         assert locator.numticks == 7
         assert isinstance(formatter, LogFormatterSciNotation)
         assert formatter.labelOnlyBase is False
@@ -2173,7 +2225,7 @@ def test_initial_loss_recovery_scatter_reloads_only_gaussian_initial_measurement
     assert all(label.get_fontsize() == 12 for label in axis.get_xticklabels())
     assert all(label.get_fontsize() == 12 for label in axis.get_yticklabels())
     assert axis.get_xlabel() == (
-        r"$\sqrt{\mathcal{L}_T(c)/[d(\alpha_T^2/\sigma_T^2)]}$"
+        r"$\sqrt{\mathcal{L}_T(c)/[d\,\mathrm{SNR}_T]}$"
     )
     assert axis.get_ylabel() == (
         r"$\sqrt{\mathbb{E}_{\mathbf{x}_T,\boldsymbol{\xi}}"
@@ -2205,6 +2257,22 @@ def test_initial_loss_recovery_scatter_reloads_only_gaussian_initial_measurement
     meshes = [item for item in colorbar.collections if isinstance(item, QuadMesh)]
     assert len(meshes) == 1
     assert meshes[0].get_alpha() == 1.0
+
+
+def test_binned_medians_use_x_sorted_equal_count_prompt_bins() -> None:
+    x_values = np.arange(12.0, 0.0, -1.0)
+    y_values = 100.0 - x_values
+
+    median_x, median_y = experiment._binned_medians(x_values, y_values)
+
+    np.testing.assert_array_equal(
+        median_x,
+        [1.5, 3.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    )
+    np.testing.assert_array_equal(
+        median_y,
+        [98.5, 96.5, 95.0, 94.0, 93.0, 92.0, 91.0, 90.0, 89.0, 88.0],
+    )
 
 
 @pytest.mark.parametrize(
@@ -2257,14 +2325,78 @@ def test_initial_loss_recovery_keeps_exact_zero_coordinates(
     axis = captured["axis"]
     assert axis.get_xscale() == xscale
     assert axis.get_yscale() == yscale
-    assert not axis.lines
+    _assert_primary_median(axis, x_values=losses, y_values=recoveries)
     offsets = np.asarray(axis.collections[0].get_offsets(), dtype=float)
     np.testing.assert_array_equal(offsets[:, 0], losses)
     np.testing.assert_array_equal(offsets[:, 1], recoveries)
+    assert axis.get_xlim()[0] <= min(losses)
+    assert axis.get_xlim()[1] >= max(losses)
     if 0.0 in losses:
         assert axis.get_xlim()[0] <= 0.0 <= axis.get_xlim()[1]
     if 0.0 in recoveries:
         assert axis.get_ylim()[0] <= 0.0 <= axis.get_ylim()[1]
+
+
+@pytest.mark.parametrize("latent_dimension", [16384, 4])
+def test_initial_loss_recovery_limits_do_not_expand_to_latent_dimension_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    latent_dimension: int,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            _row(
+                f"record-{index}",
+                normalized_loss_rmse=loss,
+                recovery_rmse=recovery,
+                mean_target_sscd=score,
+            )
+            for index, (loss, recovery, score) in enumerate(
+                [(1.0, 3.0, 0.2), (2.0, 4.0, 0.8)]
+            )
+        ],
+        columns=EXPECTED_COLUMNS,
+    )
+    frame["latent_dimension"] = latent_dimension
+    frame["conditional_loss"] = (
+        frame["normalized_loss_mse"] * latent_dimension * frame["snr_t"]
+    )
+    original = frame.copy(deep=True)
+    captured = {}
+    real_subplots = experiment.plt.subplots
+
+    def capture(*args: object, **kwargs: object):
+        figure, axis = real_subplots(*args, **kwargs)
+        captured["axis"] = axis
+        return figure, axis
+
+    monkeypatch.setattr(experiment.plt, "subplots", capture)
+    monkeypatch.setattr(experiment, "_atomic_save_figures", lambda *_args: None)
+    experiment._render_initial_loss_recovery(
+        valid=frame, destinations=experiment._figure_paths(tmp_path, "gaussian")
+    )
+
+    pd.testing.assert_frame_equal(frame, original)
+    axis = captured["axis"]
+    _assert_primary_median(
+        axis,
+        x_values=[1.0, 2.0],
+        y_values=[3.0, 4.0],
+    )
+    assert axis.get_xscale() == axis.get_yscale() == "log"
+    np.testing.assert_array_equal(
+        axis.xaxis.get_major_locator()._subs, [1.0, 2.0, 5.0]
+    )
+    assert axis.xaxis.get_major_locator().numticks == 7
+    assert isinstance(axis.xaxis.get_minor_formatter(), NullFormatter)
+    assert all(label.get_text() == "" for label in axis.xaxis.get_minorticklabels())
+    np.testing.assert_array_equal(axis.yaxis.get_major_locator()._subs, [1.0, 2.0, 5.0])
+    assert axis.get_xlim()[0] > 1.0 / math.sqrt(latent_dimension)
+    assert axis.get_xlim()[1] >= 2.0
+    np.testing.assert_array_equal(
+        axis.collections[0].get_offsets(), [[1.0, 3.0], [2.0, 4.0]]
+    )
+    assert math.log10(axis.get_xlim()[1] / axis.get_xlim()[0]) <= 1.0
 
 
 def test_trajectory_only_plot_never_creates_initial_loss_recovery_scatter(
@@ -2381,6 +2513,9 @@ def test_plot_reloads_csv_and_draws_trajectory_with_matching_primary_points(
         return figure, axis
 
     monkeypatch.setattr(experiment.plt, "subplots", subplots_spy)
+    monkeypatch.setattr(
+        experiment, "_render_loss_timestep_figure", lambda **_kwargs: None
+    )
     experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="both")
 
     assert reads == [csv_path]
@@ -2466,15 +2601,16 @@ def test_plot_reloads_csv_and_draws_trajectory_with_matching_primary_points(
     assert axis.get_xlim()[0] <= plotted_x.min()
     assert axis.get_xlim()[1] >= plotted_x.max()
     assert not axis.lines
+    assert axis.get_legend() is None
     assert len(axis.collections) == 2  # Prompt curves and initial points, no bands.
     assert axis.get_ylim()[1] >= overlay_xy[:, 1].max()
 
     assert len(axis.texts) == 0
     assert axis.get_xlabel() == (
-        r"$\sqrt{\mathcal{L}_t(c)/[d(\alpha_t^2/\sigma_t^2)]}$"
+        r"$\sqrt{\mathcal{L}_t(c)/[d\,\mathrm{SNR}_t]}$"
     )
     assert r"\frac" not in axis.get_xlabel()
-    assert "SNR" not in axis.get_xlabel()
+    assert r"\mathrm{SNR}_t" in axis.get_xlabel()
     assert axis.get_ylabel() == experiment._source_ylabel("trajectory")
     for source in ("gaussian", "trajectory"):
         label = experiment._source_ylabel(source)
@@ -2494,8 +2630,6 @@ def test_plot_reloads_csv_and_draws_trajectory_with_matching_primary_points(
         r"\mathbf{x}^{\star}\|^2]/d}$"
     )
     assert "recovery_rmse" not in axis.get_ylabel()
-
-    assert axis.get_legend() is None
 
     colorbar_axes = [plot_axis for plot_axis in figure.axes if plot_axis is not axis]
     assert len(colorbar_axes) == 1
@@ -2655,6 +2789,9 @@ def test_plot_single_timestep_keeps_one_unjoined_observation_segment(
         return figure, axis
 
     monkeypatch.setattr(experiment.plt, "subplots", subplots_spy)
+    monkeypatch.setattr(
+        experiment, "_render_loss_timestep_figure", lambda **_kwargs: None
+    )
     experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="trajectory")
 
     axis = captured["axis"]
@@ -2666,6 +2803,410 @@ def test_plot_single_timestep_keeps_one_unjoined_observation_segment(
     assert len(observations) == 1
     assert len(observations[0].get_segments()) == 1
     assert observations[0].get_segments()[0].shape == (1, 2)
+
+
+@pytest.mark.parametrize(
+    "source_mode,expected_source",
+    [("gaussian", "gaussian"), ("trajectory", "trajectory"), ("both", "gaussian")],
+)
+def test_loss_timestep_plot_routes_full_grid_once_without_source_duplication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_mode: str,
+    expected_source: str,
+) -> None:
+    sources = ("gaussian", "trajectory") if source_mode == "both" else (source_mode,)
+    rows = [
+        _row(
+            record,
+            normalized_loss_rmse=1.0 + step,
+            recovery_rmse=2.0 if source == "gaussian" else 20.0,
+            mean_target_sscd=score,
+            step_index=step,
+            num_inference_steps=3,
+            evaluation_source=source,
+        )
+        for record, score in (("one", 0.1), ("two", 0.9))
+        for step in range(3)
+        for source in sources
+    ]
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame(rows[::-1], columns=EXPECTED_COLUMNS).to_csv(csv_path, index=False)
+    original_csv = csv_path.read_bytes()
+    captured = []
+    reads = []
+    real_read_csv = experiment.pd.read_csv
+
+    def read_csv(path: Path, *args: object, **kwargs: object) -> pd.DataFrame:
+        reads.append(Path(path))
+        return real_read_csv(path, *args, **kwargs)
+
+    def capture(*, valid: pd.DataFrame, destinations: object) -> None:
+        captured.append((valid.copy(), tuple(destinations)))
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("loss-timestep plotting must use saved losses, not model inference")
+
+    monkeypatch.setattr(experiment.pd, "read_csv", read_csv)
+    monkeypatch.setattr(
+        experiment, "_render_initial_loss_recovery", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(experiment, "_render_pair_figure", lambda **_kwargs: None)
+    monkeypatch.setattr(experiment, "_render_loss_timestep_figure", capture)
+    monkeypatch.setattr(experiment, "load_model_components", forbidden)
+    monkeypatch.setattr(experiment, "preflight_model_components", forbidden)
+    monkeypatch.setattr(experiment, "_measure_conditional_loss", forbidden)
+    monkeypatch.setattr(
+        experiment, "_reconstruct_generation_initial_latents", forbidden
+    )
+    experiment.plot_saved_results(csv_path, tmp_path, evaluation_source=source_mode)
+
+    assert reads == [csv_path]
+    assert csv_path.read_bytes() == original_csv
+    assert len(captured) == 1
+    frame, destinations = captured[0]
+    assert len(frame) == 6
+    assert set(frame["record_id"]) == {"one", "two"}
+    assert set(frame["step_index"]) == {0, 1, 2}
+    assert frame["evaluation_source"].eq(expected_source).all()
+    assert not frame.duplicated(["record_id", "timestep"]).any()
+    assert destinations == tuple(
+        tmp_path / name for name in experiment.LOSS_TIMESTEP_FIGURE_FILENAMES
+    )
+
+
+def test_loss_timestep_plot_reloads_raw_losses_and_actual_scheduler_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timesteps = (981, 417, 7)
+    prompt_losses = {
+        "selected-low": (0.012, 0.38, 2.0),
+        "selected-high": (0.004, 0.16, 0.7),
+        "selected-negative-sscd": (0.2, 0.8, 4.0),
+    }
+    prompt_scores = {
+        "selected-low": 0.1,
+        "selected-high": 0.95,
+        "selected-negative-sscd": -0.05,
+    }
+    rows = []
+    for record, losses in prompt_losses.items():
+        for step, (timestep, loss) in enumerate(zip(timesteps, losses, strict=True)):
+            for source in ("gaussian", "trajectory"):
+                row = _row(
+                    record,
+                    normalized_loss_rmse=1.0,
+                    recovery_rmse=9.0 if source == "gaussian" else 90.0,
+                    mean_target_sscd=prompt_scores[record],
+                    step_index=step,
+                    num_inference_steps=3,
+                    evaluation_source=source,
+                )
+                row["timestep"] = timestep
+                row["conditional_loss"] = loss
+                row["normalized_loss_mse"] = loss / (
+                    float(row["latent_dimension"]) * float(row["snr_t"])
+                )
+                row["normalized_loss_rmse"] = math.sqrt(
+                    float(row["normalized_loss_mse"])
+                )
+                rows.append(row)
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame(rows, columns=EXPECTED_COLUMNS).sample(
+        frac=1.0, random_state=19
+    ).to_csv(csv_path, index=False)
+    original_csv = csv_path.read_bytes()
+    captured = {}
+    savefig_calls = []
+    real_subplots = experiment.plt.subplots
+
+    def capture(*args: object, **kwargs: object):
+        figure, axis = real_subplots(*args, **kwargs)
+        real_savefig = figure.savefig
+
+        def savefig(*save_args: object, **save_kwargs: object) -> object:
+            savefig_calls.append(dict(save_kwargs))
+            return real_savefig(*save_args, **save_kwargs)
+
+        monkeypatch.setattr(figure, "savefig", savefig)
+        captured.update(
+            figure=figure,
+            axis=axis,
+            font_family=tuple(experiment.matplotlib.rcParams["font.family"]),
+            mathtext_fontset=experiment.matplotlib.rcParams["mathtext.fontset"],
+        )
+        return figure, axis
+
+    monkeypatch.setattr(experiment.plt, "subplots", capture)
+    monkeypatch.setattr(
+        experiment, "_render_initial_loss_recovery", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(experiment, "_render_pair_figure", lambda **_kwargs: None)
+    experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="both")
+
+    assert csv_path.read_bytes() == original_csv
+    png_path, pdf_path = tuple(
+        tmp_path / name for name in experiment.LOSS_TIMESTEP_FIGURE_FILENAMES
+    )
+    assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
+    assert set(tmp_path.iterdir()) == {csv_path, png_path, pdf_path}
+    figure, axis = captured["figure"], captured["axis"]
+    assert len(figure.axes) == 2  # One scientific panel plus SSCD colorbar.
+    np.testing.assert_allclose(figure.get_size_inches(), [4.0, 4.0])
+    assert captured["font_family"] == ("STIXGeneral",)
+    assert captured["mathtext_fontset"] == "stix"
+    assert axis.get_xlabel() == r"$t$"
+    assert axis.get_ylabel() == r"$\mathcal{L}_t(c)$"
+    assert axis.get_xscale() == "linear"
+    assert axis.get_yscale() == "log"
+    assert not axis.xaxis_inverted()
+    assert axis.get_title() == ""
+    assert not axis.texts
+    assert axis.xaxis.label.get_fontsize() == 15
+    assert axis.yaxis.label.get_fontsize() == 15
+    assert axis.xaxis.label.get_fontfamily() == ["STIXGeneral"]
+    assert axis.yaxis.label.get_fontfamily() == ["STIXGeneral"]
+    assert all(label.get_fontsize() == 12 for label in axis.get_xticklabels())
+    assert all(label.get_fontsize() == 12 for label in axis.get_yticklabels())
+
+    assert len(axis.collections) == 1  # Prompt lines, no scatter or bands.
+    observations = axis.collections[0]
+    assert isinstance(observations, LineCollection)
+    assert observations.cmap.name == "viridis"
+    assert observations.norm.vmin == 0.0
+    assert observations.norm.vmax == 1.0
+    assert observations.norm.clip is True
+    assert observations.get_alpha() == pytest.approx(
+        experiment.LOSS_TIMESTEP_LINE_ALPHA
+    )
+    assert observations.get_alpha() == pytest.approx(0.35)
+    assert observations.get_alpha() < experiment.OBSERVATION_LINE_ALPHA
+    np.testing.assert_allclose(
+        observations.get_linewidths(), [experiment.OBSERVATION_LINE_WIDTH]
+    )
+    segments = observations.get_segments()
+    colors = np.asarray(observations.get_array(), dtype=float)
+    assert len(segments) == len(colors) == len(prompt_losses)
+    np.testing.assert_allclose(np.sort(colors), sorted(prompt_scores.values()))
+    for record, losses in prompt_losses.items():
+        index = int(np.flatnonzero(np.isclose(colors, prompt_scores[record]))[0])
+        np.testing.assert_allclose(segments[index][:, 0], timesteps[::-1])
+        np.testing.assert_allclose(segments[index][:, 1], losses[::-1])
+        assert np.all(np.diff(segments[index][:, 0]) > 0)
+    np.testing.assert_allclose(axis.get_xlim(), [0.0, max(timesteps)])
+    np.testing.assert_allclose(axis.get_xticks(), [0.0, max(timesteps)])
+    assert [label.get_text() for label in axis.get_xticklabels()] == [r"$0$", r"$T$"]
+    assert len(axis.get_xticks(minor=True)) == 0
+
+    assert (
+        len(axis.lines) == 1
+    )  # Scheduler ratio reference, never fitted or normalized.
+    reference = axis.lines[0]
+    np.testing.assert_allclose(reference.get_xdata(), timesteps[::-1])
+    expected_snr = [
+        float(row["snr_t"])
+        for row in rows
+        if row["record_id"] == "selected-low" and row["evaluation_source"] == "gaussian"
+    ][::-1]
+    np.testing.assert_allclose(reference.get_ydata(), expected_snr)
+    assert reference.get_color() == "black"
+    assert reference.get_linestyle() == "--"
+    assert reference.get_linewidth() == 1.0
+    assert reference.get_alpha() == 1.0
+    label = r"$\mathrm{SNR}_t$"
+    assert reference.get_label() == label
+    legend = axis.get_legend()
+    assert legend is not None
+    assert [text.get_text() for text in legend.get_texts()] == [label]
+    assert all(text.get_fontsize() == 10 for text in legend.get_texts())
+    assert legend.get_frame_on() is False
+    assert legend._loc == 3
+    plotted_values = [
+        *expected_snr,
+        *(value for values in prompt_losses.values() for value in values),
+    ]
+    assert axis.get_ylim()[0] <= min(plotted_values)
+    assert axis.get_ylim()[1] >= max(plotted_values)
+
+    colorbar = next(item for item in figure.axes if item is not axis)
+    assert colorbar.get_ylabel() == "SSCD"
+    np.testing.assert_allclose(colorbar.get_ylim(), [0.0, 1.0])
+    assert colorbar.yaxis.label.get_fontsize() == 15
+    assert colorbar.yaxis.label.get_fontfamily() == ["STIXGeneral"]
+    assert all(label.get_fontsize() == 12 for label in colorbar.get_yticklabels())
+    meshes = [item for item in colorbar.collections if isinstance(item, QuadMesh)]
+    assert len(meshes) == 1
+    assert meshes[0].get_alpha() == 1.0
+    figure.canvas.draw()
+    np.testing.assert_allclose(meshes[0].get_facecolors()[:, 3], 1.0)
+    assert savefig_calls == [
+        {"format": extension, "bbox_inches": "tight", "pad_inches": 0.05, "dpi": 150}
+        for extension in ("png", "pdf")
+    ]
+
+
+@pytest.mark.parametrize("loss", [math.nan, math.inf, -math.inf, -0.1])
+def test_loss_timestep_plot_rejects_invalid_raw_loss(
+    tmp_path: Path,
+    loss: float,
+) -> None:
+    row = _row(
+        "invalid-loss",
+        normalized_loss_rmse=1.0,
+        recovery_rmse=2.0,
+        mean_target_sscd=0.5,
+    )
+    row["conditional_loss"] = loss
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame([row], columns=EXPECTED_COLUMNS).to_csv(csv_path, index=False)
+    with pytest.raises(experiment.ExperimentError, match="conditional_loss"):
+        experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="gaussian")
+    assert list(tmp_path.iterdir()) == [csv_path]
+
+
+@pytest.mark.parametrize("source_mode", ["gaussian", "trajectory", "both"])
+def test_loss_timestep_plot_rejects_prompt_color_changing_between_timesteps(
+    tmp_path: Path,
+    source_mode: str,
+) -> None:
+    sources = ("gaussian", "trajectory") if source_mode == "both" else (source_mode,)
+    rows = [
+        _row(
+            "changing-sscd",
+            normalized_loss_rmse=1.0,
+            recovery_rmse=2.0,
+            mean_target_sscd=score,
+            step_index=step,
+            num_inference_steps=2,
+            evaluation_source=source,
+        )
+        for source in sources
+        for step, score in enumerate((0.2, 0.8))
+    ]
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame(rows, columns=EXPECTED_COLUMNS).to_csv(csv_path, index=False)
+    original_csv = csv_path.read_bytes()
+    with pytest.raises(experiment.ExperimentError, match="SSCD|sscd"):
+        experiment.plot_saved_results(csv_path, tmp_path, evaluation_source=source_mode)
+    assert csv_path.read_bytes() == original_csv
+
+
+@pytest.mark.parametrize(
+    "losses,expected_scale",
+    [([0.0, 2.0], "symlog"), ([0.0, 0.0], "symlog"), ([0.0], "symlog"), ([2.0], "log")],
+)
+def test_loss_timestep_plot_preserves_zero_losses_and_single_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    losses: list[float],
+    expected_scale: str,
+) -> None:
+    rows = [
+        _row(
+            "selected",
+            normalized_loss_rmse=loss,
+            recovery_rmse=2.0,
+            mean_target_sscd=0.5,
+            step_index=step,
+            num_inference_steps=len(losses),
+            evaluation_source="trajectory",
+        )
+        for step, loss in enumerate(losses)
+    ]
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame(rows[::-1], columns=EXPECTED_COLUMNS).to_csv(csv_path, index=False)
+    captured = {}
+    real_subplots = experiment.plt.subplots
+
+    def capture(*args: object, **kwargs: object):
+        figure, axis = real_subplots(*args, **kwargs)
+        captured["axis"] = axis
+        return figure, axis
+
+    monkeypatch.setattr(experiment.plt, "subplots", capture)
+    monkeypatch.setattr(
+        experiment, "_render_initial_loss_recovery", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(experiment, "_render_pair_figure", lambda **_kwargs: None)
+    monkeypatch.setattr(experiment, "_atomic_save_figures", lambda *_args: None)
+    experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="trajectory")
+    axis = captured["axis"]
+    terminal_timestep = max(float(row["timestep"]) for row in rows)
+    np.testing.assert_allclose(axis.get_xlim(), [0.0, terminal_timestep])
+    np.testing.assert_allclose(axis.get_xticks(), [0.0, terminal_timestep])
+    assert [label.get_text() for label in axis.get_xticklabels()] == [r"$0$", r"$T$"]
+    assert len(axis.get_xticks(minor=True)) == 0
+    assert all(label.get_fontsize() == 12 for label in axis.get_xticklabels())
+    assert axis.get_yscale() == expected_scale
+    assert axis.get_xscale() == "linear"
+    observations = [
+        item for item in axis.collections if isinstance(item, LineCollection)
+    ]
+    assert len(observations) == 1
+    segments = observations[0].get_segments()
+    assert len(segments) == 1
+    expected = [
+        [float(row["timestep"]), float(row["conditional_loss"])] for row in rows[::-1]
+    ]
+    np.testing.assert_allclose(segments[0], expected)
+    np.testing.assert_allclose(
+        axis.lines[0].get_ydata(), [float(row["snr_t"]) for row in rows[::-1]]
+    )
+    if 0.0 in losses:
+        assert axis.get_ylim()[0] <= 0.0 <= axis.get_ylim()[1]
+    assert np.isfinite(axis.get_xlim()).all()
+    assert np.isfinite(axis.get_ylim()).all()
+
+
+def test_loss_timestep_plot_with_only_zero_timestep_does_not_invent_terminal_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _row(
+        "selected",
+        normalized_loss_rmse=1.0,
+        recovery_rmse=2.0,
+        mean_target_sscd=0.5,
+        evaluation_source="trajectory",
+    )
+    row["timestep"] = 0
+    csv_path = tmp_path / experiment.CSV_NAME
+    pd.DataFrame([row], columns=EXPECTED_COLUMNS).to_csv(csv_path, index=False)
+    original_csv = csv_path.read_bytes()
+    captured = {}
+    real_subplots = experiment.plt.subplots
+
+    def capture(*args: object, **kwargs: object):
+        figure, axis = real_subplots(*args, **kwargs)
+        captured["axis"] = axis
+        return figure, axis
+
+    monkeypatch.setattr(experiment.plt, "subplots", capture)
+    monkeypatch.setattr(experiment, "_render_pair_figure", lambda **_kwargs: None)
+    monkeypatch.setattr(experiment, "_atomic_save_figures", lambda *_args: None)
+    experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="trajectory")
+
+    assert csv_path.read_bytes() == original_csv
+    axis = captured["axis"]
+    np.testing.assert_allclose(axis.get_xticks(), [0.0])
+    assert [label.get_text() for label in axis.get_xticklabels()] == [r"$0$"]
+    assert all(label.get_fontsize() == 12 for label in axis.get_xticklabels())
+    assert len(axis.get_xticks(minor=True)) == 0
+    assert np.isfinite(axis.get_xlim()).all()
+    assert axis.get_xlim()[0] < axis.get_xlim()[1]
+    assert axis.get_xlim()[0] <= 0.0 <= axis.get_xlim()[1]
+    observations = [
+        item for item in axis.collections if isinstance(item, LineCollection)
+    ]
+    assert len(observations) == 1
+    np.testing.assert_allclose(
+        observations[0].get_segments()[0], [[0.0, float(row["conditional_loss"])]]
+    )
+    assert len(axis.lines) == 1
+    np.testing.assert_allclose(axis.lines[0].get_xdata(), [0.0])
+    np.testing.assert_allclose(axis.lines[0].get_ydata(), [float(row["snr_t"])])
 
 
 def test_failed_figure_staging_preserves_both_outputs_and_removes_staged_files(
@@ -2885,6 +3426,7 @@ def test_plot_uses_saved_csv_without_loading_diffusion_model(
     assert {path.name for path in output.iterdir()} == {
         experiment.CSV_NAME,
         *(path.name for path in experiment._figure_paths(output, "gaussian")),
+        *experiment.LOSS_TIMESTEP_FIGURE_FILENAMES,
     }
 
 

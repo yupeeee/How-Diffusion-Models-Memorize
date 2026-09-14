@@ -1,11 +1,13 @@
 """Freeze whole-prompt GMM selection from terminal-L2/SSCD reference evidence.
 
 Selection uses all reference seeds N--2N-1, where N is the experiment seed
-count. The diagonal-covariance GMM fits every valid reference observation and
-assigns each to exactly one of two components. A complete prompt is kept if any
-seed belongs to the high-SSCD component; posteriors are not averaged into a second
-selection gate. Webster kind and within-prompt Spearman correlation are descriptive
-audit metadata and never affect the selection.
+count. The full-covariance GMM fits every valid reference observation and
+assigns each to exactly one of two components. A complete prompt is discarded
+only if strictly more than half its reference seeds belong to the low-SSCD
+component and none has SSCD strictly above 0.75. An exact half/half split is
+kept. Posteriors are not averaged into a second selection gate. Webster kind
+and within-prompt Spearman correlation are descriptive audit metadata and
+never affect the selection.
 """
 
 from __future__ import annotations
@@ -54,8 +56,9 @@ from utils.experiments.cache import generation_log_relative_path
 
 DEFAULT_SELECTION_STRATEGY = "gmm"
 SELECTION_STRATEGIES = ("gmm",)
+HIGH_SSCD_RETENTION_THRESHOLD = 0.75
 SELECTION_POLICIES = {
-    "gmm": "prompt_gmm_any_high_component_diagonal_covariance_v3",
+    "gmm": "prompt_gmm_low_component_majority_sscd_override_full_covariance",
 }
 INCLUDED_PROXIMITY_RULE = "included_proximity_rule"
 DISCARDED_PROXIMITY_RULE = "discarded_proximity_rule"
@@ -697,10 +700,14 @@ def compute_target_pair_selection_hash(
 def _strategy_contract(selection_strategy: str) -> dict[str, object]:
     normalize_selection_strategy(selection_strategy)
     return {
-        "selection_metric": "two_component_diagonal_covariance_gmm(l2_norm,sscd)",
+        "selection_metric": "two_component_full_covariance_gmm(l2_norm,sscd)",
         "fit_population": "all_complete_reference_observations",
-        "prompt_reduction": "any(gmm_component == high_sscd_mode)",
-        "include_when": "any(gmm_low_mode_probability < 0.5)",
+        "prompt_reduction": "count(gmm_component == low_sscd_mode)",
+        "sscd_retention_threshold": HIGH_SSCD_RETENTION_THRESHOLD,
+        "include_when": (
+            "any(sscd > sscd_retention_threshold) or "
+            "2 * count(gmm_low_mode_probability >= 0.5) <= num_reference_seeds"
+        ),
     }
 
 
@@ -830,24 +837,36 @@ def _prompt_spearman(observations: Sequence[Mapping[str, object]]) -> float:
 
 def _gmm_decision(
     low_mode_probabilities: Sequence[float],
+    sscd_scores: Sequence[float],
 ) -> tuple[bool, str, str]:
     probabilities = [float(value) for value in low_mode_probabilities]
     if not probabilities or any(
         not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in probabilities
     ):
         raise TargetPairSelectionError("GMM low-mode probabilities are invalid")
-    # An exact posterior tie belongs to the first (low-SSCD) component.
-    # A high-component seed must not be voted away by other seeds.
-    if any(value < 0.5 for value in probabilities):
+    scores = [float(value) for value in sscd_scores]
+    if len(scores) != len(probabilities) or any(
+        not math.isfinite(value) for value in scores
+    ):
+        raise TargetPairSelectionError("GMM SSCD scores are invalid or misaligned")
+    if any(value > HIGH_SSCD_RETENTION_THRESHOLD for value in scores):
         return (
             True,
             INCLUDED_PROXIMITY_RULE,
-            "has_high_sscd_mode_seed",
+            "has_reference_seed_sscd_above_retention_threshold",
+        )
+    # A posterior tie assigns that seed to low; a prompt-level tie is retained.
+    low_seed_count = sum(value >= 0.5 for value in probabilities)
+    if 2 * low_seed_count <= len(probabilities):
+        return (
+            True,
+            INCLUDED_PROXIMITY_RULE,
+            "no_low_sscd_mode_majority",
         )
     return (
         False,
         DISCARDED_PROXIMITY_RULE,
-        "all_reference_seeds_in_low_sscd_mode",
+        "majority_reference_seeds_in_low_sscd_mode",
     )
 
 
@@ -890,7 +909,8 @@ def _apply_gmm_decisions(
     for index in usable_prompts:
         positions = frame.index[frame["original_index"].eq(index)].tolist()
         include, status, reason = _gmm_decision(
-            [float(low_probability.loc[position]) for position in positions]
+            [float(low_probability.loc[position]) for position in positions],
+            frame.loc[positions, "sscd"].tolist(),
         )
         frame.loc[positions, "include_prompt"] = include
         frame.loc[positions, "selection_status"] = status
@@ -904,7 +924,7 @@ def _apply_gmm_decisions(
         "feature_scale": [float(value) for value in feature_scale],
         "component_names": list(COMPONENT_NAMES),
         "num_components": 2,
-        "covariance_type": "diag",
+        "covariance_type": "full",
         "initialization": INITIALIZATION_NAME,
         "reg_covar": DEFAULT_REG_COVAR,
         "max_iterations": MAX_ITERATIONS,
@@ -1157,7 +1177,13 @@ def _validate_prompt_group(
         math.isnan(value) or value < 0.0 or value > 1.0 for value in low_probability
     ):
         raise TargetPairSelectionError(f"Prompt {index} has an invalid GMM posterior")
-    _require_prompt_decision(index, first, *_gmm_decision(low_probability))
+    _require_prompt_decision(
+        index,
+        first,
+        *_gmm_decision(
+            low_probability, [float(row["sscd"]) for row in observations]
+        ),
+    )
 
 
 def _require_prompt_decision(
@@ -1213,7 +1239,7 @@ def _validate_gmm_decisions(
         "standardization_ddof": 0,
         "component_names": list(COMPONENT_NAMES),
         "num_components": 2,
-        "covariance_type": "diag",
+        "covariance_type": "full",
         "initialization": INITIALIZATION_NAME,
         "reg_covar": DEFAULT_REG_COVAR,
         "max_iterations": MAX_ITERATIONS,
@@ -1262,8 +1288,6 @@ def _validate_gmm_decisions(
     ):
         raise TargetPairSelectionError("GMM fit parameters are invalid")
     for covariance in covariances:
-        if not np.array_equal(covariance, np.diag(np.diag(covariance))):
-            raise TargetPairSelectionError("GMM covariance is not diagonal")
         if not np.allclose(covariance, covariance.T, rtol=0.0, atol=1e-12):
             raise TargetPairSelectionError("GMM covariance is not symmetric")
         try:
@@ -1338,7 +1362,8 @@ def _validate_gmm_decisions(
             continue
         positions = [int(position) for position in group.index]
         include, status, reason = _gmm_decision(
-            [float(expected_low.loc[position]) for position in positions]
+            [float(expected_low.loc[position]) for position in positions],
+            group["sscd"].tolist(),
         )
         _require_prompt_decision(str(index), group.iloc[0], include, status, reason)
 

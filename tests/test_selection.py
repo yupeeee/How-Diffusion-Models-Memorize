@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -262,8 +263,9 @@ def test_reference_contract_is_dynamic_and_has_no_fixed_seed_split(
 ) -> None:
     assert DEFAULT_SELECTION_STRATEGY == "gmm"
     assert SELECTION_STRATEGIES == ("gmm",)
+    assert selection_module.HIGH_SSCD_RETENTION_THRESHOLD == 0.75
     assert SELECTION_POLICIES == {
-        "gmm": "prompt_gmm_any_high_component_diagonal_covariance_v3",
+        "gmm": "prompt_gmm_low_component_majority_sscd_override_full_covariance",
     }
     assert (
         inspect.signature(build_target_pair_selection)
@@ -419,7 +421,7 @@ def test_seed_count_must_leave_room_for_the_full_reference_block(
     )
 
 
-def test_gmm_retains_every_high_component_seed_without_a_prompt_average_gate(
+def test_gmm_retains_high_sscd_seed_even_with_a_low_component_majority(
     tmp_path: Path,
 ) -> None:
     records = _records(kinds=("MV", "N", "TV", "RV"))
@@ -442,53 +444,188 @@ def test_gmm_retains_every_high_component_seed_without_a_prompt_average_gate(
     assert bool(prompts.loc["10002", "include_prompt"])
     for index, prompt in prompts.iterrows():
         rows = selection.frame.loc[selection.frame["original_index"].eq(index)]
-        has_high_seed = rows["gmm_component"].eq("high_sscd_mode").any()
-        assert bool(prompt["include_prompt"]) is bool(has_high_seed)
+        low_seed_count = rows["gmm_component"].eq("low_sscd_mode").sum()
+        has_high_sscd = rows["sscd"].gt(0.75).any()
+        assert bool(prompt["include_prompt"]) is bool(
+            has_high_sscd or 2 * low_seed_count <= len(rows)
+        )
         assert rows["gmm_component"].isin({"low_sscd_mode", "high_sscd_mode"}).all()
         assert rows["gmm_low_mode_probability"].between(0.0, 1.0).all()
     intermittent_rows = selection.frame.loc[
         selection.frame["original_index"].eq("10000")
     ]
     assert intermittent_rows["gmm_low_mode_probability"].mean() > 0.5
+    assert intermittent_rows["gmm_component"].eq("low_sscd_mode").sum() == 2
     assert intermittent_rows["include_prompt"].all()
-    assert selection.configuration["gmm_fit"]["covariance_type"] == "diag"
+    assert intermittent_rows["selection_reason"].eq(
+        "has_reference_seed_sscd_above_retention_threshold"
+    ).all()
+    assert selection.configuration["gmm_fit"]["covariance_type"] == "full"
+    assert any(
+        abs(covariance[0][1]) > 1e-6
+        for covariance in selection.configuration["gmm_fit"]["covariances_standardized"]
+    )
     for covariance in selection.configuration["gmm_fit"]["covariances_standardized"]:
-        assert covariance[0][1] == covariance[1][0] == 0.0
+        np.testing.assert_allclose(covariance, np.asarray(covariance).T, atol=1e-12)
+        np.linalg.cholesky(covariance)
     assert selection.configuration["selection_metric"] == (
-        "two_component_diagonal_covariance_gmm(l2_norm,sscd)"
+        "two_component_full_covariance_gmm(l2_norm,sscd)"
     )
     assert selection.configuration["prompt_reduction"] == (
-        "any(gmm_component == high_sscd_mode)"
+        "count(gmm_component == low_sscd_mode)"
     )
+    assert selection.configuration["sscd_retention_threshold"] == 0.75
     assert selection.configuration["include_when"] == (
-        "any(gmm_low_mode_probability < 0.5)"
+        "any(sscd > sscd_retention_threshold) or "
+        "2 * count(gmm_low_mode_probability >= 0.5) <= num_reference_seeds"
     )
 
 
 @pytest.mark.parametrize(
-    "probabilities", ([0.0, 0.999998], [0.0, 1.0], [1.0] * 19 + [0.01])
+    ("num_seeds", "low_seed_count", "include"),
+    (
+        (1, 0, True),
+        (1, 1, False),
+        (2, 1, True),
+        (2, 2, False),
+        (3, 1, True),
+        (3, 2, False),
+        (4, 2, True),
+        (4, 3, False),
+        (5, 2, True),
+        (5, 3, False),
+        (20, 10, True),
+        (20, 11, False),
+        (20, 19, False),
+    ),
 )
-def test_gmm_keeps_a_high_component_seed_even_in_a_low_component_majority(
-    probabilities: list[float],
+def test_gmm_low_component_majority_boundary_for_even_and_odd_seed_counts(
+    num_seeds: int,
+    low_seed_count: int,
+    include: bool,
 ) -> None:
-    assert selection_module._gmm_decision(probabilities) == (
-        True,
-        INCLUDED_PROXIMITY_RULE,
-        "has_high_sscd_mode_seed",
+    probabilities = [0.8] * low_seed_count + [0.2] * (num_seeds - low_seed_count)
+    assert selection_module._gmm_decision(probabilities, [0.2] * num_seeds) == (
+        include,
+        INCLUDED_PROXIMITY_RULE if include else DISCARDED_PROXIMITY_RULE,
+        (
+            "no_low_sscd_mode_majority"
+            if include
+            else "majority_reference_seeds_in_low_sscd_mode"
+        ),
     )
 
 
-@pytest.mark.parametrize("probabilities", ([0.5, 0.5], [0.9, 1.0]))
-def test_gmm_low_component_includes_posterior_ties(probabilities: list[float]) -> None:
-    assert selection_module._gmm_decision(probabilities) == (
-        False,
-        DISCARDED_PROXIMITY_RULE,
-        "all_reference_seeds_in_low_sscd_mode",
+@pytest.mark.parametrize(
+    ("probabilities", "include"),
+    (
+        ([0.5, 0.49], True),
+        ([0.5, 0.5], False),
+        ([0.5, 0.5, 0.49], False),
+        ([0.5, 0.49, 0.49], True),
+    ),
+)
+def test_gmm_posterior_ties_hard_assign_to_the_low_component(
+    probabilities: list[float],
+    include: bool,
+) -> None:
+    assert selection_module._gmm_decision(
+        probabilities, [0.2] * len(probabilities)
+    ) == (
+        include,
+        INCLUDED_PROXIMITY_RULE if include else DISCARDED_PROXIMITY_RULE,
+        (
+            "no_low_sscd_mode_majority"
+            if include
+            else "majority_reference_seeds_in_low_sscd_mode"
+        ),
     )
+
+
+@pytest.mark.parametrize(
+    ("probabilities", "include"),
+    (
+        ([0.5, 0.5, 0.0], False),
+        ([1.0, 0.49, 0.49], True),
+        ([1.0, 1.0, 0.49, 0.49], True),
+    ),
+)
+def test_gmm_prompt_gate_counts_assignments_instead_of_averaging_posteriors(
+    probabilities: list[float],
+    include: bool,
+) -> None:
+    assert bool(np.mean(probabilities) <= 0.5) is not include
+    assert selection_module._gmm_decision(
+        probabilities, [0.2] * len(probabilities)
+    ) == (
+        include,
+        INCLUDED_PROXIMITY_RULE if include else DISCARDED_PROXIMITY_RULE,
+        (
+            "no_low_sscd_mode_majority"
+            if include
+            else "majority_reference_seeds_in_low_sscd_mode"
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("maximum_sscd", "include"),
+    (
+        (0.69, False),
+        (0.7, False),
+        (0.74, False),
+        (0.75, False),
+        (float(np.nextafter(0.75, 1.0)), True),
+        (0.95, True),
+    ),
+)
+def test_gmm_high_sscd_override_is_strict_and_rescues_all_low_assignments(
+    maximum_sscd: float,
+    include: bool,
+) -> None:
+    assert selection_module._gmm_decision(
+        [1.0, 1.0, 1.0], [0.1, maximum_sscd, 0.2]
+    ) == (
+        include,
+        INCLUDED_PROXIMITY_RULE if include else DISCARDED_PROXIMITY_RULE,
+        (
+            "has_reference_seed_sscd_above_retention_threshold"
+            if include
+            else "majority_reference_seeds_in_low_sscd_mode"
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("probabilities", "scores"),
+    (
+        ([], []),
+        ([0.2], [0.95, 0.1]),
+        ([0.2, 0.2], [0.95]),
+        ([math.nan, 0.2], [0.95, 0.1]),
+        ([1.1, 0.2], [0.95, 0.1]),
+        ([0.2, 0.2], [0.95, math.nan]),
+        ([0.2, 0.2], [0.95, math.inf]),
+    ),
+)
+def test_gmm_high_sscd_override_does_not_rescue_malformed_evidence(
+    probabilities: list[float],
+    scores: list[float],
+) -> None:
+    with pytest.raises(TargetPairSelectionError):
+        selection_module._gmm_decision(probabilities, scores)
 
 
 @pytest.mark.parametrize("selection_strategy", SELECTION_STRATEGIES)
-@pytest.mark.parametrize("invalid_policy", (None, "not-the-current-policy"))
+@pytest.mark.parametrize(
+    "invalid_policy",
+    (
+        None,
+        "not-the-current-policy",
+        "prompt_gmm_any_high_component_full_covariance",
+        "prompt_gmm_low_component_majority_full_covariance",
+    ),
+)
 def test_selection_rejects_mismatched_contract(
     tmp_path: Path, selection_strategy: str, invalid_policy: str | None
 ) -> None:
@@ -513,6 +650,7 @@ def test_gmm_fits_and_assigns_valid_seeds_even_in_an_incomplete_prompt(
     records = _records(kinds=("MV", "N", "TV", "RV", "N"))
     complete = _gmm_paired(records.iloc[:4])
     incomplete = _paired(records.iloc[[4]]).iloc[1:].copy()
+    incomplete.loc[incomplete.index[0], "sscd"] = 0.95
     selection = _build(
         tmp_path,
         selection_strategy="gmm",
@@ -524,8 +662,10 @@ def test_gmm_fits_and_assigns_valid_seeds_even_in_an_incomplete_prompt(
 
     assert prompt["selection_status"] == UNUSABLE_REFERENCE_OBSERVATIONS
     assert not bool(prompt["include_prompt"])
+    assert prompt["selection_reason"].startswith("invalid_reference_observations:")
     valid = rows["observation_status"].eq("complete")
     assert valid.sum() == 2
+    assert rows.loc[valid, "sscd"].gt(0.75).any()
     assert (
         rows.loc[valid, "gmm_component"].isin({"low_sscd_mode", "high_sscd_mode"}).all()
     )
@@ -555,7 +695,7 @@ def test_gmm_does_not_use_undefined_spearman_as_a_decision_gate(
     assert math.isnan(prompt["prompt_spearman"])
     assert not bool(prompt["include_prompt"])
     assert prompt["selection_status"] == DISCARDED_PROXIMITY_RULE
-    assert prompt["selection_reason"] == "all_reference_seeds_in_low_sscd_mode"
+    assert prompt["selection_reason"] == "majority_reference_seeds_in_low_sscd_mode"
 
 
 def test_gmm_selection_is_category_blind(tmp_path: Path) -> None:
@@ -602,7 +742,7 @@ def test_gmm_load_rejects_tampered_posterior(tmp_path: Path) -> None:
         load_target_pair_selection(tmp_path, **_identity(), selection_strategy="gmm")
 
 
-def test_gmm_load_rejects_nondiagonal_covariance(tmp_path: Path) -> None:
+def test_gmm_load_rejects_nonsymmetric_covariance(tmp_path: Path) -> None:
     records = _records(kinds=("MV", "N", "TV", "RV"))
     selection = _build(
         tmp_path,
@@ -612,8 +752,8 @@ def test_gmm_load_rejects_nondiagonal_covariance(tmp_path: Path) -> None:
     )
     fit = json.loads(json.dumps(selection.configuration["gmm_fit"]))
     covariance = fit["covariances_standardized"][0]
-    covariance[0][1] = covariance[1][0] = 1e-8
-    with pytest.raises(TargetPairSelectionError, match="covariance is not diagonal"):
+    covariance[0][1] += 1e-4
+    with pytest.raises(TargetPairSelectionError, match="covariance is not symmetric"):
         selection_module._validate_gmm_decisions(selection.frame, fit, "gmm")
 
 
@@ -665,10 +805,15 @@ def test_single_csv_is_seed_level_and_points_to_dynamic_montage_tiles(
     assert "generated_image_tile_columns" not in config
     assert (
         config["selection_metric"]
-        == "two_component_diagonal_covariance_gmm(l2_norm,sscd)"
+        == "two_component_full_covariance_gmm(l2_norm,sscd)"
     )
-    assert config["prompt_reduction"] == "any(gmm_component == high_sscd_mode)"
-    assert config["include_when"] == "any(gmm_low_mode_probability < 0.5)"
+    assert config["gmm_fit"]["covariance_type"] == "full"
+    assert config["prompt_reduction"] == "count(gmm_component == low_sscd_mode)"
+    assert config["sscd_retention_threshold"] == 0.75
+    assert config["include_when"] == (
+        "any(sscd > sscd_retention_threshold) or "
+        "2 * count(gmm_low_mode_probability >= 0.5) <= num_reference_seeds"
+    )
     assert config["kind_affects_selection"] is False
     assert "schema_version" not in config
     assert "threshold" not in config
@@ -713,6 +858,7 @@ def test_bad_reference_evidence_is_logged_and_never_included(
 ) -> None:
     records = _records(kinds=("MV", "N", "TV", "RV"))
     paired = _gmm_paired(records)
+    paired.loc[1, "sscd"] = 0.95
     if case == "missing":
         paired = paired.drop(index=0).reset_index(drop=True)
     elif case == "duplicate":
@@ -731,6 +877,7 @@ def test_bad_reference_evidence_is_logged_and_never_included(
     assert "10000" not in selection.included_indices
     assert "10000" in selection.excluded_indices
     assert prompt["selection_status"] == UNUSABLE_REFERENCE_OBSERVATIONS
+    assert prompt["selection_reason"].startswith("invalid_reference_observations:")
     assert math.isnan(prompt["prompt_spearman"])
     assert len(selection.frame) == DEFAULT_NUM_SEEDS * len(records)
     failures = selection.frame.loc[selection.frame["observation_status"].ne("complete")]
@@ -741,8 +888,8 @@ def test_bad_reference_evidence_is_logged_and_never_included(
 def test_apply_selection_filters_whole_prompts_not_seeds(tmp_path: Path) -> None:
     records = _records(kinds=("MV", "N", "TV", "RV"))
     paired = _gmm_paired(records)
-    # One high observation is enough to retain every experiment seed for its prompt.
-    paired.loc[0, ["l2_norm", "sscd"]] = (7.4, 0.80)
+    # A retained prompt keeps every experiment seed, never just its high-SSCD seeds.
+    paired.loc[[0, 1], ["l2_norm", "sscd"]] = (7.4, 0.80)
     selection = _build(tmp_path, records=records, paired=paired)
     experiment = pd.DataFrame(
         {

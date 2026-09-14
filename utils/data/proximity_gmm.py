@@ -82,10 +82,14 @@ def _maximization(
     covariances = np.empty((2, values.shape[1], values.shape[1]), dtype=np.float64)
     for component in range(2):
         delta = values - means[component]
-        variances = (
-            np.square(delta).T @ responsibilities[:, component]
+        covariance = (
+            (delta.T * responsibilities[:, component]) @ delta
         ) / component_mass[component]
-        covariances[component] = np.diag(np.maximum(variances, reg_covar))
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        # Floor variance along the fitted principal axes without fixing their angle.
+        covariances[component] = (
+            eigenvectors * np.maximum(eigenvalues, reg_covar)
+        ) @ eigenvectors.T
     return weights, means, covariances
 
 
@@ -152,7 +156,7 @@ def fit_gaussian_mixture(
     *,
     reg_covar: float = DEFAULT_REG_COVAR,
 ) -> GaussianMixtureFit:
-    """Fit the diagonal-covariance two-component GMM ordered by SSCD mean.
+    """Fit the full-covariance two-component GMM ordered by SSCD mean.
 
     Select the largest converged likelihood from the deterministic
     first-PC initialization and an SSCD-only k-means initialization. These
@@ -184,7 +188,8 @@ def fit_gaussian_mixture(
             errors.append(str(error))
     if not fits:
         raise ValueError(
-            "Gaussian diagonal EM failed for all deterministic initializations: "
+            "Gaussian full-covariance EM failed for all deterministic "
+            "initializations: "
             + "; ".join(errors)
         )
     return max(fits, key=lambda fit: fit.log_likelihood)

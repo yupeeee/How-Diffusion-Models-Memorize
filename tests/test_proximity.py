@@ -6,9 +6,11 @@ import ast
 import inspect
 import io
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 from PIL import Image
@@ -63,7 +65,11 @@ def test_compute_proximity_parser_supports_overwrite_and_gmm_only() -> None:
     defaults = parser.parse_args([])
     assert defaults.selection_strategy == "gmm"
     assert defaults.overwrite is False
+    assert defaults.plot is False
     assert parser.parse_args(["--overwrite"]).overwrite is True
+    assert parser.parse_args(["--plot"]).plot is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--plot", "--overwrite"])
     assert (
         parser.parse_args(["--selection-strategy", "gmm"]).selection_strategy == "gmm"
     )
@@ -76,6 +82,65 @@ def test_compute_proximity_parser_supports_overwrite_and_gmm_only() -> None:
         .default
         is inspect.Parameter.empty
     )
+
+
+def test_compute_proximity_plot_dispatches_to_read_only_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import compute_proximity as compute_proximity_script
+
+    calls: list[dict[str, object]] = []
+    result = SimpleNamespace(
+        paths=SimpleNamespace(summary_json=tmp_path / "summary.json"),
+        exit_code=0,
+    )
+
+    def plot(_root: Path, **arguments: object) -> object:
+        calls.append(arguments)
+        return result
+
+    monkeypatch.setattr(compute_proximity_script, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(proximity_module, "plot_proximity", plot)
+    monkeypatch.setattr(
+        proximity_module,
+        "run_proximity",
+        lambda *_args, **_kwargs: pytest.fail("--plot must not dispatch computation"),
+    )
+
+    assert (
+        compute_proximity_script.main(
+            [
+                "--plot",
+                "--model",
+                "sdv2",
+                "--scheduler",
+                "ddpm",
+                "--g",
+                "3.25",
+                "--T",
+                "17",
+                "--N",
+                "7",
+                "--seed-start",
+                "7",
+                "--selection-strategy",
+                "gmm",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "model_name": "sdv2",
+            "scheduler_name": "ddpm",
+            "guidance_scale": 3.25,
+            "num_inference_steps": 17,
+            "num_seeds": 7,
+            "seed_start": 7,
+            "selection_strategy": "gmm",
+        }
+    ]
 
 
 def test_proximity_progress_remains_visible_when_stderr_is_captured(
@@ -196,6 +261,16 @@ def test_output_paths_do_not_define_a_per_prompt_proximity_cache(
         tmp_path.resolve() / "logs" / RUN_NAME / "reference_S20_N20",
         tmp_path.resolve() / "data/webster/selection/sdv1/reference_S20_N20",
     )
+    reference_outputs = proximity_module._reference_output_paths(
+        tmp_path.resolve(),
+        tmp_path.resolve() / "logs" / RUN_NAME / "reference_S20_N20",
+        model_name="sdv1",
+        scheduler_name="ddim",
+        guidance_scale=7.5,
+        num_inference_steps=50,
+        num_seeds=20,
+        selection_strategy="gmm",
+    )
 
     assert paths.output_directory == (
         tmp_path.resolve() / "outputs" / RUN_NAME / "proximity/experiment_S0_N20"
@@ -215,6 +290,10 @@ def test_output_paths_do_not_define_a_per_prompt_proximity_cache(
     assert paths.run_config_json.name == "run_config.json"
     assert reference.run_config_json.name == "config.json"
     assert reference.summary_json.name == "summary.json"
+    assert reference_outputs.output_directory == (
+        tmp_path.resolve() / "outputs" / RUN_NAME / "proximity/reference_S20_N20"
+    )
+    assert reference_outputs.output_directory != reference.output_directory
     assert not hasattr(paths, "records_directory")
     assert not hasattr(paths, "result_path")
 
@@ -386,6 +465,130 @@ def test_missing_prerequisites_report_seed_aware_commands(
     )
 
 
+def test_reference_plot_proximity_uses_only_frozen_selection_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "selection"
+    directory.mkdir()
+    summary = {
+        "complete": True,
+        "selection_hash": "a" * 64,
+        "selection_strategy": "gmm",
+    }
+    artifacts = {
+        "selection.csv": b"immutable selection table",
+        "config.json": b"immutable selection configuration",
+        "summary.json": json.dumps(summary).encode(),
+    }
+    for filename, contents in artifacts.items():
+        (directory / filename).write_bytes(contents)
+    before = {
+        filename: ((directory / filename).read_bytes(), (directory / filename).stat())
+        for filename in artifacts
+    }
+    frame = pd.DataFrame({"sentinel": [1]})
+    configuration = {"selection_hash": "a" * 64}
+    selection = SimpleNamespace(
+        sha256="a" * 64,
+        frame=frame,
+        configuration=configuration,
+    )
+    loaded: list[dict[str, object]] = []
+
+    def load_selection(_root: Path, **identity: object) -> object:
+        loaded.append(identity)
+        return selection
+
+    monkeypatch.setattr(
+        selection_module,
+        "target_pair_selection_directory",
+        lambda *_args, **_kwargs: directory,
+    )
+    monkeypatch.setattr(selection_module, "load_target_pair_selection", load_selection)
+    for name in (
+        "generation_paths",
+        "require_generation_run",
+        "list_completed_records",
+        "_load_sscd_config",
+        "reference_completion_fingerprint",
+        "_write_examples",
+    ):
+        monkeypatch.setattr(
+            proximity_module,
+            name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(
+                f"reference plot-only must not call {_name}"
+            ),
+        )
+    plotted: list[tuple[str, object, object]] = []
+
+    def plot_selection(
+        path: str | Path, *, output_directory: str | Path
+    ) -> plotting_module.AnalysisStatistics:
+        output = Path(output_directory)
+        plotted.append(("scatter", Path(path), output))
+        output.mkdir(parents=True)
+        for filename in plotting_module.PROXIMITY_FIGURE_FILENAMES:
+            (output / filename).write_bytes(b"scatter figure")
+        return plotting_module.AnalysisStatistics(1, 1, 1, 1.0, -1.0)
+
+    def plot_gmm(
+        path: str | Path, *, frame: pd.DataFrame, configuration: object
+    ) -> None:
+        output = Path(path)
+        plotted.append(("gmm", output, (frame, configuration)))
+        for filename in plotting_module.SELECTION_GMM_FIGURES.values():
+            (output / filename).write_bytes(b"GMM figure")
+
+    monkeypatch.setattr(proximity_module, "write_selection_figure", plot_selection)
+    monkeypatch.setattr(proximity_module, "write_gmm_fit_figure", plot_gmm)
+
+    result = proximity_module.plot_proximity(
+        tmp_path,
+        **_run_args(
+            model_name="sdv2",
+            scheduler_name="ddpm",
+            guidance_scale=3.25,
+            num_inference_steps=17,
+            num_seeds=7,
+            seed_start=7,
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert result.paths.output_directory == directory
+    output = (
+        tmp_path
+        / "outputs/sdv2_ddpm_g3.25_T17_N7/proximity/reference_S7_N7"
+    )
+    assert loaded == [
+        {
+            "model_name": "sdv2",
+            "scheduler_name": "ddpm",
+            "guidance_scale": 3.25,
+            "num_inference_steps": 17,
+            "num_seeds": 7,
+            "selection_strategy": "gmm",
+        }
+    ]
+    assert plotted == [
+        ("scatter", directory, output),
+        ("gmm", output, (frame, configuration)),
+    ]
+    for filename, (contents, stat) in before.items():
+        path = directory / filename
+        assert path.read_bytes() == contents
+        assert path.stat().st_mtime_ns == stat.st_mtime_ns
+        assert path.stat().st_ctime_ns == stat.st_ctime_ns
+    assert {path.name for path in directory.iterdir()} == set(artifacts)
+    assert {path.name for path in output.iterdir()} == set(
+        plotting_module.SELECTION_FIGURE_FILENAMES
+    )
+    assert not (output / "examples").exists()
+    assert not (tmp_path / "logs").exists()
+
+
 def test_experiment_loads_only_the_n_matched_frozen_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -553,9 +756,9 @@ def _selection(indices: tuple[str, ...]) -> SimpleNamespace:
                     else "discarded_proximity_rule"
                 ),
                 "selection_reason": (
-                    "has_high_sscd_mode_seed"
+                    "no_low_sscd_mode_majority"
                     if index == "1"
-                    else "all_reference_seeds_in_low_sscd_mode"
+                    else "majority_reference_seeds_in_low_sscd_mode"
                 ),
             }
             for index in indices
@@ -569,6 +772,219 @@ def _selection(indices: tuple[str, ...]) -> SimpleNamespace:
         },
         sha256="c" * 64,
     )
+
+
+def _saved_experiment_plot_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, object], ProximityPaths, SimpleNamespace]:
+    arguments = _run_args(num_seeds=2)
+    selection = _selection(("1", "2"))
+    generation_run = tmp_path / proximity_module.generation_log_relative_path(
+        **arguments
+    )
+    run_name = proximity_module.generation_run_name(**arguments)
+    paths = ProximityPaths.build(
+        tmp_path.resolve(),
+        generation_run,
+        output_run_name=run_name,
+        role="experiment",
+        seed_start=0,
+        num_seeds=2,
+        selection_strategy="gmm",
+    )
+    generation = {
+        "scientific_config_hash": "a" * 64,
+        "scientific_config": {
+            "model_cli_name": "sdv1",
+            "scheduler": {"name": "ddim"},
+            "guidance_scale": 7.5,
+            "num_inference_steps": 50,
+            "num_seeds": 2,
+            "seeds": [0, 1],
+        },
+    }
+    configuration = proximity_module._analysis_configuration(
+        paths,
+        run_name,
+        generation,
+        {"configuration_hash": "b" * 64},
+        selection,
+    )
+    paths.output_directory.mkdir(parents=True)
+    atomic_write_json(paths.run_config_json, configuration)
+    analysis = _annotate_selection(
+        pd.concat([_observations("1"), _observations("2")], ignore_index=True),
+        selection,
+    )
+    write_analysis_outputs(paths.output_directory, analysis=analysis)
+    return arguments, paths, selection
+
+
+def test_experiment_plot_proximity_reads_only_saved_contract_and_renders_figures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments, paths, selection = _saved_experiment_plot_fixture(tmp_path)
+    frozen = tmp_path / "frozen-selection"
+    frozen.mkdir()
+    for filename in ("selection.csv", "config.json", "summary.json"):
+        (frozen / filename).write_bytes(f"immutable {filename}".encode())
+    paths.summary_json.write_bytes(b"unrelated saved summary")
+    unrelated = paths.output_directory / "notes.txt"
+    unrelated.write_bytes(b"preserve me")
+    watched = tuple(
+        path
+        for directory in (frozen, paths.output_directory)
+        for path in directory.iterdir()
+        if path.is_file()
+    )
+    before = {path: (path.read_bytes(), path.stat()) for path in watched}
+
+    loaded: list[dict[str, object]] = []
+
+    def load_selection(_root: Path, **identity: object) -> object:
+        loaded.append(identity)
+        return selection
+
+    monkeypatch.setattr(selection_module, "load_target_pair_selection", load_selection)
+    json_reads: list[Path] = []
+    real_read_json = proximity_module.read_json
+
+    def read_json(path: str | Path) -> object:
+        normalized = Path(path)
+        json_reads.append(normalized)
+        if normalized != paths.run_config_json:
+            pytest.fail(f"experiment plot-only unexpectedly read JSON: {normalized}")
+        return real_read_json(normalized)
+
+    monkeypatch.setattr(proximity_module, "read_json", read_json)
+    csv_reads: list[Path] = []
+    real_read_csv = proximity_module.pd.read_csv
+
+    def read_csv(path: str | Path, **options: object) -> pd.DataFrame:
+        normalized = Path(path)
+        csv_reads.append(normalized)
+        if normalized != paths.output_directory / "proximity.csv":
+            pytest.fail(f"experiment plot-only unexpectedly read CSV: {normalized}")
+        return real_read_csv(normalized, **options)
+
+    monkeypatch.setattr(proximity_module.pd, "read_csv", read_csv)
+    for name in (
+        "generation_paths",
+        "require_generation_run",
+        "list_completed_records",
+        "_load_sscd_config",
+        "reference_completion_fingerprint",
+        "_write_examples",
+        "write_analysis_outputs",
+        "write_selection_figure",
+        "write_gmm_fit_figure",
+        "atomic_write_bytes",
+        "atomic_write_frame_csv",
+        "atomic_write_json",
+    ):
+        monkeypatch.setattr(
+            proximity_module,
+            name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(
+                f"experiment plot-only must not call {_name}"
+            ),
+        )
+    rendered: list[Path] = []
+    statistics = plotting_module.AnalysisStatistics(1, 1, 1, 1.0, -1.0)
+
+    def render(directory: str | Path) -> plotting_module.AnalysisStatistics:
+        rendered.append(Path(directory))
+        return statistics
+
+    monkeypatch.setattr(proximity_module, "write_saved_analysis_figures", render)
+
+    result = proximity_module.plot_proximity(tmp_path, **arguments)
+
+    assert result.exit_code == 0
+    assert result.paths == paths
+    assert loaded == [
+        {
+            "model_name": "sdv1",
+            "scheduler_name": "ddim",
+            "guidance_scale": 7.5,
+            "num_inference_steps": 50,
+            "num_seeds": 2,
+            "selection_strategy": "gmm",
+        }
+    ]
+    assert json_reads == [paths.run_config_json]
+    assert csv_reads == [paths.output_directory / "proximity.csv"]
+    assert rendered == [paths.output_directory]
+    assert result.values == {
+        "complete": True,
+        "plot_only": True,
+        "selection_hash": "c" * 64,
+        "prompt_spearman_summary": statistics.as_dict(),
+    }
+    assert set(watched) == {
+        path
+        for directory in (frozen, paths.output_directory)
+        for path in directory.iterdir()
+        if path.is_file()
+    }
+    for path, (contents, stat) in before.items():
+        assert path.read_bytes() == contents
+        assert path.stat().st_mtime_ns == stat.st_mtime_ns
+        assert path.stat().st_ctime_ns == stat.st_ctime_ns
+    assert unrelated.read_bytes() == b"preserve me"
+    assert not paths.generation_run.exists()
+
+
+def test_experiment_plot_proximity_rejects_incompatible_selection_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments, paths, selection = _saved_experiment_plot_fixture(tmp_path)
+    configuration = json.loads(paths.run_config_json.read_text(encoding="utf-8"))
+    configuration["selection_hash"] = "d" * 64
+    atomic_write_json(paths.run_config_json, configuration)
+    monkeypatch.setattr(
+        selection_module,
+        "load_target_pair_selection",
+        lambda *_args, **_kwargs: selection,
+    )
+    monkeypatch.setattr(
+        proximity_module,
+        "write_saved_analysis_figures",
+        lambda *_args, **_kwargs: pytest.fail(
+            "incompatible saved provenance must be rejected before rendering"
+        ),
+    )
+
+    with pytest.raises(ProximityError, match="differs at: selection_hash"):
+        proximity_module.plot_proximity(tmp_path, **arguments)
+
+
+def test_experiment_plot_proximity_rejects_table_different_from_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments, paths, selection = _saved_experiment_plot_fixture(tmp_path)
+    table_path = paths.output_directory / "proximity.csv"
+    table = pd.read_csv(table_path, keep_default_na=False)
+    table.loc[table["original_index"].eq(1), "prompt"] = "changed prompt"
+    table.to_csv(table_path, index=False)
+    monkeypatch.setattr(
+        selection_module,
+        "load_target_pair_selection",
+        lambda *_args, **_kwargs: selection,
+    )
+    monkeypatch.setattr(
+        proximity_module,
+        "write_saved_analysis_figures",
+        lambda *_args, **_kwargs: pytest.fail(
+            "incompatible saved table must be rejected before rendering"
+        ),
+    )
+
+    with pytest.raises(ProximityError, match="frozen selection differ at prompt"):
+        proximity_module.plot_proximity(tmp_path, **arguments)
 
 
 def test_experiment_rows_receive_frozen_whole_prompt_decisions() -> None:
@@ -613,6 +1029,8 @@ def test_frozen_reference_fast_path_does_not_touch_tensors(
         "generation": {"count": 1, "sha256": "b" * 64},
         "sscd": {"count": 1, "sha256": "c" * 64},
     }
+    loaded_frame = pd.DataFrame({"sentinel": [1]})
+    loaded_configuration = {"reference_completion_fingerprint": fingerprint}
 
     def selection_directory(_root: Path, **identity: object) -> Path:
         path_identities.append(identity)
@@ -622,7 +1040,8 @@ def test_frozen_reference_fast_path_does_not_touch_tensors(
         load_identities.append(identity)
         return SimpleNamespace(
             sha256="a" * 64,
-            configuration={"reference_completion_fingerprint": fingerprint},
+            frame=loaded_frame,
+            configuration=loaded_configuration,
         )
 
     monkeypatch.setattr(
@@ -640,13 +1059,26 @@ def test_frozen_reference_fast_path_does_not_touch_tensors(
         "reference_completion_fingerprint",
         completion_fingerprint,
     )
-    plotted: list[Path] = []
+    plotted: list[tuple[Path, Path]] = []
 
-    def plot_selection(directory: str | Path) -> plotting_module.AnalysisStatistics:
-        plotted.append(Path(directory))
+    def plot_selection(
+        directory: str | Path, *, output_directory: str | Path
+    ) -> plotting_module.AnalysisStatistics:
+        plotted.append((Path(directory), Path(output_directory)))
         return plotting_module.AnalysisStatistics(1, 1, 1, 1.0, -1.0)
 
     monkeypatch.setattr(proximity_module, "write_selection_figure", plot_selection)
+    gmm_plotted: list[tuple[Path, pd.DataFrame, object]] = []
+
+    def plot_gmm(
+        directory: str | Path,
+        *,
+        frame: pd.DataFrame,
+        configuration: object,
+    ) -> None:
+        gmm_plotted.append((Path(directory), frame, configuration))
+
+    monkeypatch.setattr(proximity_module, "write_gmm_fit_figure", plot_gmm)
     exported: list[tuple[ProximityPaths, Path, int]] = []
 
     def write_examples(
@@ -668,12 +1100,27 @@ def test_frozen_reference_fast_path_does_not_touch_tensors(
     assert result is not None
     assert result.exit_code == 0
     assert result.paths.output_directory == directory
-    assert plotted == [directory]
+    output = (
+        tmp_path
+        / "outputs/sdv1_ddpm_g3.25_T17_N7/proximity/reference_S7_N7"
+    )
+    assert result.values == summary
+    assert result.paths.summary_json == directory / "summary.json"
+    assert plotted == [(directory, output)]
+    assert len(gmm_plotted) == 1
+    gmm_directory, gmm_frame, gmm_configuration = gmm_plotted[0]
+    assert gmm_directory == output
+    assert gmm_frame is loaded_frame
+    assert gmm_configuration is loaded_configuration
     assert [identity["selection_strategy"] for identity in path_identities] == ["gmm"]
     assert [identity["selection_strategy"] for identity in load_identities] == ["gmm"]
     assert fingerprint_runs == [tmp_path / "reference"]
-    assert exported == [(result.paths, directory / "selection.csv", 7)]
-    assert not (tmp_path / "outputs").exists()
+    assert len(exported) == 1
+    output_paths, table_path, exported_seeds = exported[0]
+    assert output_paths.output_directory == output
+    assert output_paths.generation_run == tmp_path / "reference"
+    assert table_path == directory / "selection.csv"
+    assert exported_seeds == 7
 
 
 def test_frozen_reference_rejects_changed_markers_before_plotting(
@@ -700,6 +1147,7 @@ def test_frozen_reference_rejects_changed_markers_before_plotting(
         "load_target_pair_selection",
         lambda *_args, **_kwargs: SimpleNamespace(
             sha256="d" * 64,
+            frame=pd.DataFrame({"sentinel": [1]}),
             configuration={"reference_completion_fingerprint": stored},
         ),
     )
@@ -713,6 +1161,12 @@ def test_frozen_reference_rejects_changed_markers_before_plotting(
         proximity_module,
         "write_selection_figure",
         lambda path: plotted.append(Path(path)),
+    )
+    gmm_plotted: list[Path] = []
+    monkeypatch.setattr(
+        proximity_module,
+        "write_gmm_fit_figure",
+        lambda path, **_kwargs: gmm_plotted.append(Path(path)),
     )
 
     with pytest.raises(ProximityError) as captured:
@@ -728,6 +1182,7 @@ def test_frozen_reference_rejects_changed_markers_before_plotting(
         )
 
     assert plotted == []
+    assert gmm_plotted == []
     assert directory.is_dir()
     message = str(captured.value)
     assert "changed marker groups: generation" in message
@@ -965,6 +1420,43 @@ def test_configuration_never_accepts_a_different_contract(tmp_path: Path) -> Non
     assert json.loads(path.read_text(encoding="utf-8")) == replacement
 
 
+def test_saved_analysis_plotting_regenerates_figures_without_rewriting_csv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = _annotate_selection(
+        pd.concat([_observations("1"), _observations("2")], ignore_index=True),
+        _selection(("1", "2")),
+    )
+    expected = write_analysis_outputs(tmp_path, analysis=analysis)
+    csv_path = tmp_path / "proximity.csv"
+    csv_contents = csv_path.read_bytes()
+    csv_stat = csv_path.stat()
+    for filename in plotting_module.PROXIMITY_FIGURE_FILENAMES:
+        (tmp_path / filename).unlink()
+    monkeypatch.setattr(
+        plotting_module,
+        "atomic_write_frame_csv",
+        lambda *_args, **_kwargs: pytest.fail(
+            "saved-analysis plotting must not rewrite proximity.csv"
+        ),
+    )
+
+    actual = plotting_module.write_saved_analysis_figures(tmp_path)
+
+    assert actual == expected
+    assert csv_path.read_bytes() == csv_contents
+    assert csv_path.stat().st_mtime_ns == csv_stat.st_mtime_ns
+    assert csv_path.stat().st_ctime_ns == csv_stat.st_ctime_ns
+    assert {
+        path.name for path in tmp_path.iterdir()
+    } == {"proximity.csv", *plotting_module.PROXIMITY_FIGURE_FILENAMES}
+    for filename in plotting_module.PROXIMITY_FIGURE_FILENAMES:
+        artifact = tmp_path / filename
+        header = b"%PDF" if artifact.suffix == ".pdf" else b"\x89PNG"
+        assert artifact.read_bytes().startswith(header)
+
+
 def test_figure_catalog_and_failure_cleanup_cover_only_four_known_outputs(
     tmp_path: Path,
 ) -> None:
@@ -993,6 +1485,163 @@ def test_figure_catalog_and_failure_cleanup_cover_only_four_known_outputs(
 
     assert unrelated.read_bytes() == b"keep"
     assert {path.name for path in tmp_path.iterdir()} == {"proximity.csv"}
+
+
+def _gmm_figure_inputs() -> tuple[pd.DataFrame, dict[str, object]]:
+    frame = pd.DataFrame(
+        {
+            "original_index": ["low", "low", "high", "high", "incomplete", "incomplete"],
+            "l2_norm": [1.0, 2.0, 4.0, 5.0, 2.5, float("nan")],
+            "sscd": [0.1, 0.2, 0.8, 0.7, 0.2, float("nan")],
+            "observation_status": [
+                "complete",
+                "complete",
+                "complete",
+                "complete",
+                "complete",
+                "missing",
+            ],
+            "gmm_component": [
+                "low_sscd_mode",
+                "low_sscd_mode",
+                "high_sscd_mode",
+                "high_sscd_mode",
+                "low_sscd_mode",
+                "",
+            ],
+        }
+    )
+    configuration: dict[str, object] = {
+        "gmm_fit": {
+            "feature_names": ["l2_norm", "sscd"],
+            "component_names": ["low_sscd_mode", "high_sscd_mode"],
+            "covariance_type": "full",
+            "feature_mean": [10.0, 0.5],
+            "feature_scale": [2.0, 0.25],
+            "means_standardized": [[-1.0, -1.0], [1.0, 1.0]],
+            "covariances_standardized": [
+                [[1.0, 0.6], [0.6, 0.5]],
+                [[0.7, -0.3], [-0.3, 0.4]],
+            ],
+            "usable_observation_count": 5,
+        }
+    }
+    return frame, configuration
+
+
+def test_gmm_fit_figure_writes_png_pdf_from_all_fitted_reference_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from matplotlib.collections import PathCollection
+    from matplotlib.patches import Ellipse
+
+    frame, configuration = _gmm_figure_inputs()
+    captured: list[object] = []
+    real_publish = plotting_module._publish_figures
+
+    def publish(output: Path, figures: object) -> None:
+        items = tuple(figures)  # type: ignore[arg-type]
+        captured.extend(figure for figure, _filenames in items)
+        real_publish(output, items)
+
+    monkeypatch.setattr(plotting_module, "_publish_figures", publish)
+    plotting_module.write_gmm_fit_figure(
+        tmp_path,
+        frame=frame,
+        configuration=configuration,
+    )
+
+    assert plotting_module.SELECTION_FIGURE_FILENAMES == (
+        *plotting_module.PROXIMITY_FIGURE_FILENAMES,
+        plotting_module.SELECTION_GMM_FIGURES["png"],
+        plotting_module.SELECTION_GMM_FIGURES["pdf"],
+    )
+    assert {path.name for path in tmp_path.iterdir()} == set(
+        plotting_module.SELECTION_GMM_FIGURES.values()
+    )
+    assert not any(
+        path.is_dir() or path.name.startswith(".") for path in tmp_path.iterdir()
+    )
+    for file_format, filename in plotting_module.SELECTION_GMM_FIGURES.items():
+        header = b"%PDF" if file_format == "pdf" else b"\x89PNG"
+        assert (tmp_path / filename).read_bytes().startswith(header)
+
+    assert len(captured) == 1
+    axis = captured[0].axes[0]  # type: ignore[union-attr]
+    scatter_groups = [
+        collection
+        for collection in axis.collections
+        if isinstance(collection, PathCollection)
+    ]
+    assert len(scatter_groups) == 2
+    fitted = frame.loc[frame["observation_status"].eq("complete")]
+    expected_groups = {
+        frozenset(
+            map(
+                tuple,
+                fitted.loc[
+                    fitted["gmm_component"].eq(component), ["l2_norm", "sscd"]
+                ].to_numpy(dtype=np.float64),
+            )
+        )
+        for component in ("low_sscd_mode", "high_sscd_mode")
+    }
+    observed_groups = {
+        frozenset(map(tuple, collection.get_offsets().tolist()))
+        for collection in scatter_groups
+    }
+    assert observed_groups == expected_groups
+    assert (2.5, 0.2) in set().union(*observed_groups)
+
+    fit = configuration["gmm_fit"]
+    assert isinstance(fit, dict)
+    feature_mean = np.asarray(fit["feature_mean"], dtype=np.float64)
+    feature_scale = np.asarray(fit["feature_scale"], dtype=np.float64)
+    means = feature_mean + np.asarray(
+        fit["means_standardized"], dtype=np.float64
+    ) * feature_scale
+    covariances = (
+        np.asarray(fit["covariances_standardized"], dtype=np.float64)
+        * feature_scale[None, :, None]
+        * feature_scale[None, None, :]
+    )
+    assert np.all(np.abs(covariances[:, 0, 1]) > 1e-6)
+    ellipses = [patch for patch in axis.patches if isinstance(patch, Ellipse)]
+    assert len(ellipses) == 4
+    for component_index in range(2):
+        one_sigma, two_sigma = ellipses[2 * component_index : 2 * component_index + 2]
+        np.testing.assert_allclose(one_sigma.center, means[component_index])
+        np.testing.assert_allclose(two_sigma.center, means[component_index])
+        assert two_sigma.width == pytest.approx(2.0 * one_sigma.width)
+        assert two_sigma.height == pytest.approx(2.0 * one_sigma.height)
+    assert all(
+        not math.isclose(ellipse.angle % 90.0, 0.0, abs_tol=1e-10)
+        for ellipse in ellipses
+    )
+
+
+def test_gmm_fit_figure_rejects_invalid_configuration_without_writing(
+    tmp_path: Path,
+) -> None:
+    frame, configuration = _gmm_figure_inputs()
+    malformed = json.loads(json.dumps(configuration))
+    malformed["gmm_fit"]["means_standardized"] = [[0.0, 0.0]]
+    nonsymmetric = json.loads(json.dumps(configuration))
+    nonsymmetric["gmm_fit"]["covariances_standardized"][0][0][1] += 0.1
+
+    for name, invalid, message in (
+        ("malformed", malformed, "GMM fit arrays are invalid"),
+        ("nonsymmetric", nonsymmetric, "covariance is not symmetric"),
+    ):
+        output = tmp_path / name
+        with pytest.raises(plotting_module.PlottingError, match=message):
+            plotting_module.write_gmm_fit_figure(
+                output,
+                frame=frame,
+                configuration=invalid,
+            )
+        assert not output.exists()
 
 
 def test_figure_publication_stages_every_format_before_replacing_destinations(
@@ -1158,10 +1807,10 @@ def test_selection_figure_publishes_selected_and_completed_finite_group_views(
                 "unusable_reference_observations",
             ],
             "selection_reason": [
-                "has_high_sscd_mode_seed",
-                "has_high_sscd_mode_seed",
-                "all_reference_seeds_in_low_sscd_mode",
-                "all_reference_seeds_in_low_sscd_mode",
+                "no_low_sscd_mode_majority",
+                "no_low_sscd_mode_majority",
+                "majority_reference_seeds_in_low_sscd_mode",
+                "majority_reference_seeds_in_low_sscd_mode",
                 "cache_error",
                 "cache_error",
                 "cache_error",
@@ -1193,7 +1842,8 @@ def test_selection_figure_publishes_selected_and_completed_finite_group_views(
     monkeypatch.setattr(plotting_module.pd, "read_csv", read_csv_spy)
     monkeypatch.setattr(plotting_module, "_scatter_figure", scatter_spy)
 
-    statistics = write_selection_figure(tmp_path)
+    output = tmp_path / "derived"
+    statistics = write_selection_figure(tmp_path, output_directory=output)
 
     assert statistics.as_dict() == {
         "total_selected_prompts": 1,
@@ -1222,20 +1872,20 @@ def test_selection_figure_publishes_selected_and_completed_finite_group_views(
     ]
     assert selected_axes.texts[0].get_text().startswith("#prompts: 1\n")
     assert all_axes.texts[0].get_text().startswith("#prompts: 2\n")
-    assert {path.name for path in tmp_path.iterdir()} == {
-        "selection.csv",
-        *plotting_module.PROXIMITY_FIGURE_FILENAMES,
-    }
-    assert not any(path.is_dir() for path in tmp_path.iterdir())
-    assert (tmp_path / "proximity_vs_sscd.png").read_bytes().startswith(b"\x89PNG")
-    assert (tmp_path / "proximity_vs_sscd.pdf").read_bytes().startswith(b"%PDF")
+    assert {path.name for path in tmp_path.iterdir()} == {"selection.csv", "derived"}
+    assert {path.name for path in output.iterdir()} == set(
+        plotting_module.PROXIMITY_FIGURE_FILENAMES
+    )
+    assert not any(path.is_dir() for path in output.iterdir())
+    assert (output / "proximity_vs_sscd.png").read_bytes().startswith(b"\x89PNG")
+    assert (output / "proximity_vs_sscd.pdf").read_bytes().startswith(b"%PDF")
     assert (
-        (tmp_path / "proximity_vs_sscd_all_prompts.png")
+        (output / "proximity_vs_sscd_all_prompts.png")
         .read_bytes()
         .startswith(b"\x89PNG")
     )
     assert (
-        (tmp_path / "proximity_vs_sscd_all_prompts.pdf")
+        (output / "proximity_vs_sscd_all_prompts.pdf")
         .read_bytes()
         .startswith(b"%PDF")
     )
@@ -1252,8 +1902,10 @@ def test_selection_figure_requires_observation_status(tmp_path: Path) -> None:
         }
     ).to_csv(tmp_path / "selection.csv", index=False)
 
+    output = tmp_path / "derived"
     with pytest.raises(plotting_module.PlottingError, match="observation_status"):
-        write_selection_figure(tmp_path)
+        write_selection_figure(tmp_path, output_directory=output)
+    assert not output.exists()
 
 
 def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
@@ -1319,14 +1971,14 @@ def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
                 False,
             ],
             "selection_reason": [
-                "has_high_sscd_mode_seed",
-                "has_high_sscd_mode_seed",
-                "has_high_sscd_mode_seed",
-                "has_high_sscd_mode_seed",
-                "has_high_sscd_mode_seed",
-                "has_high_sscd_mode_seed",
-                "all_reference_seeds_in_low_sscd_mode",
-                "all_reference_seeds_in_low_sscd_mode",
+                "no_low_sscd_mode_majority",
+                "no_low_sscd_mode_majority",
+                "no_low_sscd_mode_majority",
+                "no_low_sscd_mode_majority",
+                "no_low_sscd_mode_majority",
+                "no_low_sscd_mode_majority",
+                "majority_reference_seeds_in_low_sscd_mode",
+                "majority_reference_seeds_in_low_sscd_mode",
             ],
         }
     )

@@ -43,6 +43,7 @@ from .cache import (
     CompletedGenerationRecord,
     GenerationCacheError,
     GenerationPaths,
+    generation_log_relative_path,
     generation_paths,
     list_completed_records,
     require_generation_run,
@@ -50,9 +51,12 @@ from .cache import (
 )
 from .plotting import (
     AnalysisStatistics,
+    EXPERIMENT_SPEARMAN_COLUMN,
     PROXIMITY_FIGURE_FILENAMES,
     PROXIMITY_FIGURES,
     write_analysis_outputs,
+    write_gmm_fit_figure,
+    write_saved_analysis_figures,
     write_selection_figure,
 )
 
@@ -472,6 +476,288 @@ def run_proximity(
     return ProximitySummary(paths, values)
 
 
+def plot_proximity(
+    project_root: str | Path,
+    *,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+    seed_start: int,
+    selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
+) -> ProximitySummary:
+    """Regenerate only figures from immutable selection and analysis logs."""
+
+    from utils.data.selection import (
+        load_target_pair_selection,
+        target_pair_selection_directory,
+    )
+
+    root = Path(project_root).expanduser().resolve()
+    strategy = normalize_selection_strategy(selection_strategy)
+    arguments = {
+        "model_name": model_name,
+        "scheduler_name": scheduler_name,
+        "guidance_scale": guidance_scale,
+        "num_inference_steps": num_inference_steps,
+        "num_seeds": num_seeds,
+        "seed_start": seed_start,
+    }
+    role = _seed_role(**arguments)
+    selection_identity = {
+        "model_name": model_name,
+        "scheduler_name": scheduler_name,
+        "guidance_scale": guidance_scale,
+        "num_inference_steps": num_inference_steps,
+        "num_seeds": num_seeds,
+        "selection_strategy": strategy,
+    }
+    selection = load_target_pair_selection(root, **selection_identity)
+    generation_run = root / generation_log_relative_path(**arguments)
+
+    if role == "reference":
+        directory = target_pair_selection_directory(root, **selection_identity)
+        paths = ProximityPaths.frozen_selection(root, generation_run, directory)
+        outputs = _reference_output_paths(
+            root,
+            generation_run,
+            model_name=model_name,
+            scheduler_name=scheduler_name,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            num_seeds=num_seeds,
+            selection_strategy=strategy,
+        )
+        write_selection_figure(
+            directory,
+            output_directory=outputs.output_directory,
+        )
+        write_gmm_fit_figure(
+            outputs.output_directory,
+            frame=selection.frame,
+            configuration=selection.configuration,
+        )
+        return ProximitySummary(
+            paths,
+            {
+                "complete": True,
+                "plot_only": True,
+                "selection_hash": selection.sha256,
+            },
+        )
+
+    run_name = generation_run_name(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start,
+    )
+    parent_name = generation_run_name(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start=0,
+    )
+    paths = ProximityPaths.build(
+        root,
+        generation_run,
+        output_run_name=parent_name,
+        role=role,
+        seed_start=seed_start,
+        num_seeds=num_seeds,
+        selection_strategy=strategy,
+    )
+    configuration = _load_saved_analysis_configuration(paths.run_config_json)
+    _validate_saved_analysis_configuration(
+        configuration,
+        paths=paths,
+        run_name=run_name,
+        model_name=model_name,
+        scheduler_name=scheduler_name,
+        guidance_scale=guidance_scale,
+        num_inference_steps=num_inference_steps,
+        num_seeds=num_seeds,
+        selection=selection,
+        selection_strategy=strategy,
+    )
+    analysis = _load_saved_analysis(paths.output_directory / "proximity.csv")
+    _validate_saved_analysis(
+        analysis,
+        selection=selection,
+        model_name=model_name,
+        num_seeds=num_seeds,
+        selection_strategy=strategy,
+    )
+    statistics = write_saved_analysis_figures(paths.output_directory)
+    return ProximitySummary(
+        paths,
+        {
+            "complete": True,
+            "plot_only": True,
+            "selection_hash": selection.sha256,
+            "prompt_spearman_summary": statistics.as_dict(),
+        },
+    )
+
+
+def _reference_output_paths(
+    root: Path,
+    generation_run: Path,
+    *,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+    selection_strategy: str,
+) -> ProximityPaths:
+    parent_name = generation_run_name(
+        model_name,
+        scheduler_name,
+        guidance_scale,
+        num_inference_steps,
+        num_seeds,
+        seed_start=0,
+    )
+    return ProximityPaths.build(
+        root,
+        generation_run,
+        output_run_name=parent_name,
+        role="reference",
+        seed_start=num_seeds,
+        num_seeds=num_seeds,
+        selection_strategy=selection_strategy,
+    )
+
+
+def _load_saved_analysis_configuration(path: Path) -> Mapping[str, object]:
+    if not path.is_file() or path.is_symlink():
+        raise ProximityError(f"saved proximity configuration is missing or unsafe: {path}")
+    try:
+        return read_json(path)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ProximityError(
+            f"cannot read saved proximity configuration {path}: {error}"
+        ) from error
+
+
+def _validate_saved_analysis_configuration(
+    configuration: Mapping[str, object],
+    *,
+    paths: ProximityPaths,
+    run_name: str,
+    model_name: str,
+    scheduler_name: str,
+    guidance_scale: float,
+    num_inference_steps: int,
+    num_seeds: int,
+    selection: Any,
+    selection_strategy: str,
+) -> None:
+    expected = {
+        "analysis": "proximity",
+        "source": "validated_generation_and_sscd_caches_only",
+        "run_name": run_name,
+        "generation_run_path": _display_path(
+            paths.generation_run, paths.project_root
+        ),
+        "selection_policy": selection.configuration["selection_policy"],
+        "selection_strategy": selection_strategy,
+        "selection_hash": selection.sha256,
+        "model_name": model_name,
+        "scheduler_name": scheduler_name,
+        "guidance_scale": guidance_scale,
+        "num_inference_steps": num_inference_steps,
+        "num_seeds": num_seeds,
+        "seeds": list(range(num_seeds)),
+        "terminal_latent_index": -1,
+        "distance": "euclidean_l2",
+        "outputs": {
+            "table": "proximity.csv",
+            "figures": _figure_filename_catalog(),
+        },
+    }
+    hash_fields = (
+        "generation_scientific_config_hash",
+        "sscd_configuration_hash",
+    )
+    expected_keys = {*expected, *hash_fields}
+    if set(configuration) != expected_keys:
+        raise ProximityError("saved proximity configuration has an invalid contract")
+    wrong = [
+        key
+        for key, value in expected.items()
+        if canonical_json(configuration.get(key)) != canonical_json(value)
+    ]
+    if wrong:
+        raise ProximityError(
+            "saved proximity configuration differs at: " + ", ".join(wrong)
+        )
+    if any(not _sha256(configuration.get(key)) for key in hash_fields):
+        raise ProximityError("saved proximity configuration hash is invalid")
+
+
+def _load_saved_analysis(path: Path) -> pd.DataFrame:
+    if not path.is_file() or path.is_symlink():
+        raise ProximityError(f"saved proximity table is missing or unsafe: {path}")
+    try:
+        frame = pd.read_csv(
+            path,
+            dtype={
+                "original_index": str,
+                "record_id": str,
+                "prompt": str,
+                "kind": str,
+                "target_image_sha256": str,
+                "generated_image_path": str,
+            },
+            keep_default_na=False,
+            float_precision="round_trip",
+        )
+    except (OSError, TypeError, ValueError) as error:
+        raise ProximityError(f"cannot read saved proximity table {path}: {error}") from error
+    expected = (*ANALYSIS_COLUMNS, EXPERIMENT_SPEARMAN_COLUMN)
+    if tuple(frame.columns) != expected:
+        raise ProximityError("saved proximity table has an invalid schema")
+    return frame
+
+
+def _validate_saved_analysis(
+    frame: pd.DataFrame,
+    *,
+    selection: Any,
+    model_name: str,
+    num_seeds: int,
+    selection_strategy: str,
+) -> None:
+    if frame.empty:
+        raise ProximityError("saved proximity table is empty")
+    if not frame["model_name"].eq(model_name).all():
+        raise ProximityError("saved proximity table model differs")
+    if not frame["selection_strategy"].eq(selection_strategy).all():
+        raise ProximityError("saved proximity table selection strategy differs")
+    expected_seeds = list(range(num_seeds))
+    for index, rows in frame.groupby("original_index", sort=False, dropna=False):
+        seeds = pd.to_numeric(rows["seed"], errors="coerce").tolist()
+        if seeds != expected_seeds:
+            raise ProximityError(
+                f"saved proximity seeds are incomplete or unordered: {index}"
+            )
+    annotated = _annotate_selection(
+        frame.loc[:, OBSERVATION_COLUMNS],
+        selection,
+        require_complete=True,
+    )
+    saved = frame.loc[:, ANALYSIS_COLUMNS].reset_index(drop=True)
+    if not saved.equals(annotated):
+        raise ProximityError("saved proximity table differs from frozen selection")
+
+
 def _frozen_reference_result(
     root: Path,
     generation_run: Path,
@@ -554,8 +840,30 @@ def _frozen_reference_result(
     summary = read_json(paths.summary_json)
     if summary.get("selection_hash") != selection.sha256:
         raise ProximityError("frozen selection summary hash differs")
-    write_selection_figure(directory)
-    _write_examples(paths, table_path=directory / "selection.csv", num_seeds=num_seeds)
+    outputs = _reference_output_paths(
+        root,
+        generation_run,
+        model_name=model_name,
+        scheduler_name=scheduler_name,
+        guidance_scale=guidance_scale,
+        num_inference_steps=num_inference_steps,
+        num_seeds=num_seeds,
+        selection_strategy=selection_strategy,
+    )
+    write_selection_figure(
+        directory,
+        output_directory=outputs.output_directory,
+    )
+    write_gmm_fit_figure(
+        outputs.output_directory,
+        frame=selection.frame,
+        configuration=selection.configuration,
+    )
+    _write_examples(
+        outputs,
+        table_path=directory / "selection.csv",
+        num_seeds=num_seeds,
+    )
     return ProximitySummary(paths, summary)
 
 
