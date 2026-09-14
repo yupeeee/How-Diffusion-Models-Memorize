@@ -31,7 +31,7 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from matplotlib.ticker import (
-    LogFormatterSciNotation,
+    Formatter,
     LogLocator,
     NullLocator,
     NullFormatter,
@@ -182,6 +182,7 @@ SSCD_COLOR_RANGE = (0.0, 1.0)
 FIGURE_SIZE = (4.0, 4.0)
 TEXT_FONT_SIZE = 15
 AXIS_NUMBER_FONT_SIZE = 12
+AXIS_MULTIPLIER_FONT_SIZE = 10
 LEGEND_FONT_SIZE = 10
 OBSERVATION_LINE_ALPHA = 0.68
 LOSS_TIMESTEP_LINE_ALPHA = 0.35
@@ -1756,6 +1757,61 @@ def _set_recovery_axis_scale(
         set_scale("linear")
 
 
+class _SharedScientificFormatter(Formatter):
+    """Use one visible-tick exponent without rounding small log ticks to zero."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.exponent = 0
+
+    def set_locs(self, locs: Sequence[float]) -> None:
+        super().set_locs(locs)
+        visible = np.asarray(locs, dtype=float)
+        visible = visible[np.isfinite(visible)]
+        if self.axis is not None:
+            lower, upper = sorted(self.axis.get_view_interval())
+            visible = visible[
+                ((visible >= lower) | np.isclose(visible, lower, rtol=1e-12, atol=0.0))
+                & (
+                    (visible <= upper)
+                    | np.isclose(visible, upper, rtol=1e-12, atol=0.0)
+                )
+            ]
+        nonzero = np.abs(visible[visible != 0.0])
+        self.exponent = 0
+        if nonzero.size:
+            logarithm = math.log10(float(nonzero.min()))
+            nearest = round(logarithm)
+            if math.isclose(logarithm, nearest, rel_tol=0.0, abs_tol=1e-12):
+                logarithm = float(nearest)
+            # Keep the numeric scaling factor finite and nonzero.
+            self.exponent = max(-323, min(308, math.floor(logarithm)))
+
+    def __call__(self, value: float, pos: int | None = None) -> str:
+        if not math.isfinite(value):
+            return ""
+        scaled = value / (10.0**self.exponent)
+        coefficient = np.format_float_positional(
+            scaled, precision=8, unique=False, fractional=False, trim="-"
+        )
+        return rf"$\mathdefault{{{self.fix_minus(coefficient)}}}$"
+
+    def get_offset(self) -> str:
+        if self.exponent == 0:
+            return ""
+        return rf"$\times 10^{{{self.exponent}}}$"
+
+
+def _set_shared_scientific_format(axis: Any) -> None:
+    """Keep the existing scales/locators and put their multiplier at each end."""
+    for coordinate in (axis.xaxis, axis.yaxis):
+        coordinate.set_major_formatter(_SharedScientificFormatter())
+        coordinate.set_minor_formatter(NullFormatter())
+        coordinate.get_offset_text().set_fontsize(AXIS_MULTIPLIER_FONT_SIZE)
+    # Leave room for the native x-axis multiplier above the long equation label.
+    axis.xaxis.labelpad = max(axis.xaxis.labelpad, 18)
+
+
 def _add_sscd_colorbar(
     figure: Any,
     axis: Any,
@@ -1831,18 +1887,11 @@ def _render_initial_loss_recovery(
                 coordinate.set_major_locator(
                     LogLocator(base=10, subs=tick_subs, numticks=7)
                 )
-                coordinate.set_major_formatter(
-                    LogFormatterSciNotation(
-                        base=10,
-                        labelOnlyBase=False,
-                        minor_thresholds=(math.inf, math.inf),
-                    )
-                )
-                coordinate.set_minor_formatter(NullFormatter())
         axis.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
         axis.set_xlabel(INITIAL_LOSS_XLABEL)
         axis.set_ylabel(INITIAL_RECOVERY_YLABEL)
         axis.grid(True, which="both", alpha=0.18, linewidth=0.6)
+        _set_shared_scientific_format(axis)
         # The theorem is not a finite-noise RMSE equality; do not imply y = x.
         figure.tight_layout()
         _atomic_save_figures(figure, destinations)
@@ -1934,20 +1983,13 @@ def _render_pair_figure(
         )
         if axis.get_xscale() == "log":
             axis.xaxis.set_major_locator(LogLocator(base=10, subs=(1.0,), numticks=7))
-            axis.xaxis.set_major_formatter(
-                LogFormatterSciNotation(
-                    base=10,
-                    labelOnlyBase=False,
-                    minor_thresholds=(math.inf, math.inf),
-                )
-            )
-            axis.xaxis.set_minor_formatter(NullFormatter())
         axis.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
         axis.set_xlabel(SWEEP_LOSS_XLABEL)
         axis.set_ylabel(_source_ylabel(evaluation_source))
         axis.grid(True, which="both", alpha=0.18, linewidth=0.6)
 
         axis.autoscale_view()
+        _set_shared_scientific_format(axis)
         figure.tight_layout()
         _atomic_save_figures(figure, destinations)
     finally:

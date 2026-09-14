@@ -17,7 +17,7 @@ from matplotlib.collections import (
     PathCollection,
     QuadMesh,
 )
-from matplotlib.ticker import LogFormatterSciNotation, LogLocator, NullFormatter
+from matplotlib.ticker import FixedLocator, LogLocator, NullFormatter
 import numpy as np
 import pandas as pd
 import pytest
@@ -79,9 +79,9 @@ def _assert_primary_median(
     assert median.get_color() == "black"
     assert median.get_linestyle() == "-"
     assert median.get_linewidth() == pytest.approx(1.35)
-    assert matplotlib.colors.to_rgba(
-        median.get_color(), median.get_alpha()
-    )[-1] == pytest.approx(1.0)
+    assert matplotlib.colors.to_rgba(median.get_color(), median.get_alpha())[
+        -1
+    ] == pytest.approx(1.0)
     assert median.get_zorder() == 3
     assert median.get_label() == "Median"
     legend = axis.get_legend()
@@ -90,6 +90,25 @@ def _assert_primary_median(
     assert all(text.get_fontsize() == 10 for text in legend.get_texts())
     assert legend.get_frame_on() is False
     assert legend._loc == 4  # Lower right.
+
+
+def _assert_shared_scientific_axes(axis: object) -> None:
+    for coordinate in (axis.xaxis, axis.yaxis):
+        formatter = coordinate.get_major_formatter()
+        assert isinstance(formatter, experiment._SharedScientificFormatter)
+        formatter.set_locs(coordinate.get_majorticklocs())
+        expected_offset = (
+            rf"$\times 10^{{{formatter.exponent}}}$" if formatter.exponent else ""
+        )
+        assert formatter.get_offset() == expected_offset
+        assert coordinate.get_offset_text().get_fontsize() == 10
+        assert experiment.AXIS_MULTIPLIER_FONT_SIZE == 10
+        assert isinstance(coordinate.get_minor_formatter(), NullFormatter)
+        assert all(label.get_text() == "" for label in coordinate.get_minorticklabels())
+        for label in coordinate.get_ticklabels():
+            assert r"\times" not in label.get_text()
+            assert "^{" not in label.get_text()
+    assert not axis.texts
 
 
 def _parameters(timesteps: Sequence[int]) -> tuple[experiment.TerminalParameters, ...]:
@@ -2059,6 +2078,7 @@ def test_trajectory_sweep_keeps_exact_zero_coordinates(
     axis = axes[0]
     assert axis.get_xscale() == xscale
     assert axis.get_yscale() == yscale
+    _assert_shared_scientific_axes(axis)
     assert not axis.lines
     assert axis.get_legend() is None
     assert len(axis.collections) == 2
@@ -2206,6 +2226,7 @@ def test_initial_loss_recovery_scatter_reloads_only_gaussian_initial_measurement
     )
     assert not np.allclose(axis.lines[0].get_xdata(), 1.0 / math.sqrt(4))
     assert not axis.texts
+    _assert_shared_scientific_axes(axis)
     assert axis.get_xscale() == axis.get_yscale() == "log"
     for coordinate in (axis.xaxis, axis.yaxis):
         locator = coordinate.get_major_locator()
@@ -2215,18 +2236,15 @@ def test_initial_loss_recovery_scatter_reloads_only_gaussian_initial_measurement
         expected_subs = [1.0] if math.log10(upper / lower) > 1.0 else [1.0, 2.0, 5.0]
         np.testing.assert_array_equal(locator._subs, expected_subs)
         assert locator.numticks == 7
-        assert isinstance(formatter, LogFormatterSciNotation)
-        assert formatter.labelOnlyBase is False
-        assert formatter.minor_thresholds == (math.inf, math.inf)
+        assert isinstance(formatter, experiment._SharedScientificFormatter)
+        assert coordinate.get_offset_text().get_fontsize() == 10
         assert isinstance(coordinate.get_minor_formatter(), NullFormatter)
         assert all(label.get_text() == "" for label in coordinate.get_minorticklabels())
     assert axis.xaxis.label.get_fontsize() == 15
     assert axis.yaxis.label.get_fontsize() == 15
     assert all(label.get_fontsize() == 12 for label in axis.get_xticklabels())
     assert all(label.get_fontsize() == 12 for label in axis.get_yticklabels())
-    assert axis.get_xlabel() == (
-        r"$\sqrt{\mathcal{L}_T(c)/[d\,\mathrm{SNR}_T]}$"
-    )
+    assert axis.get_xlabel() == (r"$\sqrt{\mathcal{L}_T(c)/[d\,\mathrm{SNR}_T]}$")
     assert axis.get_ylabel() == (
         r"$\sqrt{\mathbb{E}_{\mathbf{x}_T,\boldsymbol{\xi}}"
         r"[\|\widehat{\mathbf{x}}_{0\mid T,c}(\mathbf{x}_T)-"
@@ -2257,6 +2275,191 @@ def test_initial_loss_recovery_scatter_reloads_only_gaussian_initial_measurement
     meshes = [item for item in colorbar.collections if isinstance(item, QuadMesh)]
     assert len(meshes) == 1
     assert meshes[0].get_alpha() == 1.0
+
+
+@pytest.mark.parametrize(
+    ("ticks", "limits", "visible_values", "coefficients", "exponent"),
+    [
+        (
+            [0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0],
+            (0.19, 1.01),
+            [0.2, 0.5, 1.0],
+            ["2", "5", "10"],
+            -1,
+        ),
+        (
+            [1e-4, 1e-3, 1e-2, 0.1, 1.0, 10.0, 100.0],
+            (1e-4, 100.0),
+            [1e-4, 1e-3, 1e-2, 0.1, 1.0, 10.0, 100.0],
+            ["1", "10", "100", "1000", "10000", "100000", "1000000"],
+            -4,
+        ),
+        ([1.0, 2.0, 5.0], (0.9, 5.1), [1.0, 2.0, 5.0], ["1", "2", "5"], 0),
+        ([0.0], (-1.0, 1.0), [0.0], ["0"], 0),
+        (
+            [0.0, 0.2, 0.5, 1.0],
+            (0.0, 1.0),
+            [0.0, 0.2, 0.5, 1.0],
+            ["0", "2", "5", "10"],
+            -1,
+        ),
+        (
+            [np.nextafter(0.1, 0.0), 0.2, 0.5],
+            (0.09, 0.51),
+            [np.nextafter(0.1, 0.0), 0.2, 0.5],
+            ["1", "2", "5"],
+            -1,
+        ),
+        (
+            [100.0, 200.0, 500.0],
+            (99.0, 501.0),
+            [100.0, 200.0, 500.0],
+            ["1", "2", "5"],
+            2,
+        ),
+        (
+            [0.00012, 0.00456, 100.0],
+            (0.0001, 100.0),
+            [0.00012, 0.00456, 100.0],
+            ["1.2", "45.6", "1000000"],
+            -4,
+        ),
+        (
+            [math.nan, -math.inf, 0.0, 0.2, 0.5, 1.0, math.inf],
+            (0.0, 1.0),
+            [0.0, 0.2, 0.5, 1.0],
+            ["0", "2", "5", "10"],
+            -1,
+        ),
+        ([], (-1.0, 1.0), [0.0], ["0"], 0),
+    ],
+    ids=[
+        "visible-ticks-ignore-off-view-padding",
+        "six-decades-never-round-nonzero-to-zero",
+        "no-multiplier-for-exponent-zero",
+        "all-zero",
+        "zero-and-positive",
+        "near-power-roundoff",
+        "positive-exponent",
+        "fractional-coefficients-across-decades",
+        "nonfinite-and-zero-do-not-select-exponent",
+        "empty-locations",
+    ],
+)
+def test_shared_scientific_formatter_uses_one_visible_tick_exponent(
+    ticks: list[float],
+    limits: tuple[float, float],
+    visible_values: list[float],
+    coefficients: list[str],
+    exponent: int,
+) -> None:
+    figure, axis = experiment.plt.subplots()
+    try:
+        axis.set_xlim(*limits)
+        formatter = experiment._SharedScientificFormatter()
+        axis.xaxis.set_major_formatter(formatter)
+        formatter.set_locs(np.asarray(ticks, dtype=float))
+        assert formatter.exponent == exponent
+        expected_offset = rf"$\times 10^{{{exponent}}}$" if exponent else ""
+        assert formatter.get_offset() == expected_offset
+        assert [formatter(value) for value in visible_values] == [
+            rf"$\mathdefault{{{coefficient}}}$" for coefficient in coefficients
+        ]
+        assert all(
+            formatter(value) != r"$\mathdefault{0}$"
+            for value in visible_values
+            if value != 0.0
+        )
+        assert not axis.texts
+    finally:
+        experiment.plt.close(figure)
+
+
+def test_shared_scientific_formatter_refreshes_exponent_when_view_changes() -> None:
+    figure, axis = experiment.plt.subplots()
+    try:
+        ticks = np.asarray([0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0])
+        formatter = experiment._SharedScientificFormatter()
+        axis.xaxis.set_major_formatter(formatter)
+        axis.set_xlim(0.19, 1.01)
+        formatter.set_locs(ticks)
+        assert formatter.exponent == -1
+        assert formatter(0.5) == r"$\mathdefault{5}$"
+
+        axis.set_xlim(0.9, 5.1)
+        formatter.set_locs(ticks)
+        assert formatter.exponent == 0
+        assert formatter.get_offset() == ""
+        assert formatter(1.0) == r"$\mathdefault{1}$"
+
+        axis.set_xlim(1.01, 0.19)
+        formatter.set_locs(ticks)
+        assert formatter.exponent == -1
+        assert formatter.get_offset() == r"$\times 10^{-1}$"
+    finally:
+        experiment.plt.close(figure)
+
+
+@pytest.mark.parametrize(
+    ("values", "limits", "ticks", "expected_scale", "expected_offset"),
+    [
+        (
+            [0.2, 0.5, 1.0],
+            (0.19, 1.01),
+            [0.1, 0.2, 0.5, 1.0, 2.0],
+            "log",
+            r"$\times 10^{-1}$",
+        ),
+        (
+            [0.0, 0.2, 0.5, 1.0],
+            (0.0, 1.01),
+            [0.0, 0.2, 0.5, 1.0],
+            "symlog",
+            r"$\times 10^{-1}$",
+        ),
+        ([0.0, 0.0], (-1.0, 1.0), [0.0], "linear", ""),
+    ],
+)
+def test_shared_scientific_format_preserves_axes_data_locators_and_native_offsets(
+    values: list[float],
+    limits: tuple[float, float],
+    ticks: list[float],
+    expected_scale: str,
+    expected_offset: str,
+) -> None:
+    with experiment.matplotlib.rc_context(experiment.PLOT_STYLE):
+        figure, axis = experiment.plt.subplots()
+        try:
+            points = np.asarray(values, dtype=float)
+            line = axis.plot(points, points)[0]
+            experiment._set_recovery_axis_scale(axis, points, coordinate="x")
+            experiment._set_recovery_axis_scale(axis, points)
+            axis.set_xlim(*limits)
+            axis.set_ylim(*limits)
+            x_locator = FixedLocator(ticks)
+            y_locator = FixedLocator(ticks)
+            axis.xaxis.set_major_locator(x_locator)
+            axis.yaxis.set_major_locator(y_locator)
+            experiment._set_shared_scientific_format(axis)
+            figure.canvas.draw()
+
+            assert axis.get_xscale() == axis.get_yscale() == expected_scale
+            assert axis.xaxis.get_major_locator() is x_locator
+            assert axis.yaxis.get_major_locator() is y_locator
+            np.testing.assert_array_equal(axis.get_xlim(), limits)
+            np.testing.assert_array_equal(axis.get_ylim(), limits)
+            np.testing.assert_array_equal(line.get_xdata(), points)
+            np.testing.assert_array_equal(line.get_ydata(), points)
+            _assert_shared_scientific_axes(axis)
+            for coordinate in (axis.xaxis, axis.yaxis):
+                assert coordinate.get_offset_text().get_text() == expected_offset
+                assert coordinate.get_offset_text().get_fontfamily() == ["STIXGeneral"]
+                assert coordinate.get_offset_text().get_fontsize() == 10
+            assert len(figure.axes) == 1
+            assert not axis.texts
+            assert axis.get_legend() is None
+        finally:
+            experiment.plt.close(figure)
 
 
 def test_binned_medians_use_x_sorted_equal_count_prompt_bins() -> None:
@@ -2325,6 +2528,7 @@ def test_initial_loss_recovery_keeps_exact_zero_coordinates(
     axis = captured["axis"]
     assert axis.get_xscale() == xscale
     assert axis.get_yscale() == yscale
+    _assert_shared_scientific_axes(axis)
     _assert_primary_median(axis, x_values=losses, y_values=recoveries)
     offsets = np.asarray(axis.collections[0].get_offsets(), dtype=float)
     np.testing.assert_array_equal(offsets[:, 0], losses)
@@ -2384,9 +2588,7 @@ def test_initial_loss_recovery_limits_do_not_expand_to_latent_dimension_referenc
         y_values=[3.0, 4.0],
     )
     assert axis.get_xscale() == axis.get_yscale() == "log"
-    np.testing.assert_array_equal(
-        axis.xaxis.get_major_locator()._subs, [1.0, 2.0, 5.0]
-    )
+    np.testing.assert_array_equal(axis.xaxis.get_major_locator()._subs, [1.0, 2.0, 5.0])
     assert axis.xaxis.get_major_locator().numticks == 7
     assert isinstance(axis.xaxis.get_minor_formatter(), NullFormatter)
     assert all(label.get_text() == "" for label in axis.xaxis.get_minorticklabels())
@@ -2473,6 +2675,7 @@ def test_plot_reloads_csv_and_draws_trajectory_with_matching_primary_points(
     pd.DataFrame(list(reversed(valid_rows)), columns=EXPECTED_COLUMNS).to_csv(
         csv_path, index=False
     )
+    original_csv = csv_path.read_bytes()
 
     real_read_csv = pd.read_csv
     reads: list[Path] = []
@@ -2519,6 +2722,7 @@ def test_plot_reloads_csv_and_draws_trajectory_with_matching_primary_points(
     experiment.plot_saved_results(csv_path, tmp_path, evaluation_source="both")
 
     assert reads == [csv_path]
+    assert csv_path.read_bytes() == original_csv
     assert len(primary_frames) == 1
     png_path, pdf_path = experiment._figure_paths(tmp_path, "trajectory")
     assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
@@ -2606,9 +2810,8 @@ def test_plot_reloads_csv_and_draws_trajectory_with_matching_primary_points(
     assert axis.get_ylim()[1] >= overlay_xy[:, 1].max()
 
     assert len(axis.texts) == 0
-    assert axis.get_xlabel() == (
-        r"$\sqrt{\mathcal{L}_t(c)/[d\,\mathrm{SNR}_t]}$"
-    )
+    _assert_shared_scientific_axes(axis)
+    assert axis.get_xlabel() == (r"$\sqrt{\mathcal{L}_t(c)/[d\,\mathrm{SNR}_t]}$")
     assert r"\frac" not in axis.get_xlabel()
     assert r"\mathrm{SNR}_t" in axis.get_xlabel()
     assert axis.get_ylabel() == experiment._source_ylabel("trajectory")
