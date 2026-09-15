@@ -19,6 +19,7 @@ from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Ellipse  # noqa: E402
+from mpl_toolkits.axes_grid1 import make_axes_locatable  # noqa: E402
 import numpy as np
 import pandas as pd
 
@@ -37,6 +38,7 @@ __all__ = [
     "add_sscd_colorbar",
     "category_legend_label",
     "covariance_ellipse",
+    "publish_figures",
     "write_analysis_outputs",
     "write_gmm_fit_figure",
     "write_saved_analysis_figures",
@@ -774,12 +776,18 @@ def add_sscd_colorbar(
     axis: object,
     values: pd.Series | np.ndarray,
 ) -> object:
-    """Add the shared opaque [0, 1] SSCD colorbar."""
+    """Add an opaque [0, 1] SSCD colorbar aligned to the drawn plot height."""
 
     norm = Normalize(vmin=SSCD_COLOR_RANGE[0], vmax=SSCD_COLOR_RANGE[1], clip=True)
     mappable = ScalarMappable(norm=norm, cmap="viridis")
     mappable.set_array(np.asarray(values, dtype=np.float64))
-    colorbar = figure.colorbar(mappable, ax=axis)
+    # A regular figure colorbar follows the allocated subplot rectangle, which
+    # can be taller than an equal-aspect scatter. Share the axes divider so the
+    # colorbar tracks the actual plot box in both raster and vector exports.
+    divider = make_axes_locatable(axis)
+    colorbar_axis = divider.append_axes("right", size="5%", pad=0.1)
+    colorbar_axis.set_label("<colorbar>")
+    colorbar = figure.colorbar(mappable, cax=colorbar_axis)
     if colorbar.solids is not None:
         colorbar.solids.set_alpha(COLORBAR_ALPHA)
     colorbar.set_label("SSCD", fontsize=TEXT_FONT_SIZE)
@@ -805,6 +813,55 @@ def _summary_text(statistics: AnalysisStatistics) -> str:
         f"({fraction})\n"
         rf"Median $\rho$: {median}"
     )
+
+
+def publish_figures(
+    output: Path,
+    figures: Sequence[tuple[Figure, Mapping[str, str]]],
+) -> None:
+    """Publish PNG/PDF pairs through the existing recoverable transaction.
+
+    Nested output names must be safe relative same-stem PNG/PDF pairs. The
+    established proximity entry points keep their original private publisher
+    and behavior. Callers own figure lifetime and must close figures in finally.
+    """
+    output = Path(output).absolute()
+    destinations: set[Path] = set()
+    parents: set[Path] = {output}
+    for _figure, filenames in figures:
+        if set(filenames) != set(_FIGURE_FORMATS):
+            raise PlottingError("figure publication requires one PNG and one PDF")
+        paths = {}
+        for file_format in _FIGURE_FORMATS:
+            relative = Path(filenames[file_format])
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or relative.suffix != "." + file_format
+                or not relative.stem
+            ):
+                raise PlottingError(f"unsafe figure destination: {relative}")
+            destination = output / relative
+            if destination in destinations:
+                raise PlottingError(f"duplicate figure destination: {relative}")
+            if destination.is_symlink():
+                raise PlottingError(f"symlink figure destination: {destination}")
+            if destination.exists() and not destination.is_file():
+                raise PlottingError(f"figure destination is not a file: {destination}")
+            destinations.add(destination)
+            parents.add(destination.parent)
+            paths[file_format] = relative.with_suffix("")
+        if paths["png"] != paths["pdf"]:
+            raise PlottingError("PNG and PDF figure destinations must share a stem")
+    for parent in parents:
+        for ancestor in (parent, *parent.parents):
+            if ancestor.is_symlink():
+                raise PlottingError(f"symlink figure parent: {ancestor}")
+            if ancestor.exists() and not ancestor.is_dir():
+                raise PlottingError(f"figure parent is not a directory: {ancestor}")
+    for parent in sorted(parents, key=lambda path: len(path.parts)):
+        parent.mkdir(parents=True, exist_ok=True)
+    _publish_figures(output, figures)
 
 
 def _publish_figures(

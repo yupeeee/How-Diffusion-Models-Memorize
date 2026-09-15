@@ -1,191 +1,104 @@
 # How Diffusion Models Memorize
 
-Diffusion memorization experiments from preserved generation, SSCD and proximity
-artifacts. The theory layer performs tensor reductions without loading models,
-and regenerates figures from saved scalar tables.
+Diffusion memorization experiments using preserved generation, SSCD, and proximity caches. The default pipeline finishes with the fixed paper figures: **four main figures, eight core appendix figures, and two terminal appendix figures when applicable**.
 
 ## Run
 
-From the repository root, in your Python environment:
-
 ```bash
 python -m pip install -r requirements.txt
-./run_all.sh --download
+./run_all.sh --download                       # Prepare data and run/resume the pipeline
+./run_all.sh                                  # Resume all supported configurations
+./run_all.sh --model sdv1 --scheduler ddim     # One configuration
+./run_all.sh --recompute-experiments           # Analysis only; reuse protected caches
+./run_all.sh --plot                           # Saved proximity + main and appendix figures
+./run_all.sh --plot --diagnostics             # Also export saved optional diagnostics
 ```
 
-Defaults remain **20 seeds, 50 steps, guidance 7.5, GMM selection**. The supported
-matrix is SDv1/DDIM, SDv1/DDPM, SDv2/DDIM and RealVis/DDIM. Experiment seeds are
-`0..N-1`; frozen selection uses reference seeds `N..2N-1`. Every experiment seed
-of each selected prompt is retained, including unsuccessful reproductions.
+Defaults remain guidance 7.5, 50 updates, 20 evaluation seeds, and GMM selection. Supported pairs are SDv1/DDIM, SDv1/DDPM, SDv2/DDIM, and RealVis/DDIM. Evaluation uses seeds `0..N-1`; frozen reference selection uses `N..2N-1`. Every evaluation seed of each retained prompt remains included. `--model`, `--scheduler`, `--g`, `--T`, and `--N` select a configuration. All wrappers honor `PYTHON`.
+
+Normal runs preserve download, generation, SSCD, and proximity resume behavior. `--recompute-experiments` bypasses those stages and updates derived analysis only. Theory analysis never loads learned models. `--plot` reads saved compact theory CSVs and small manifests, plus the existing saved proximity inputs; it does not run a reducer, fit a center, evaluate candidate posteriors, integrate paths, deserialize raw tensors, or hash raw trajectories. It preflights the entire requested matrix and reports the exact analysis command if inputs are missing or obsolete.
+
+`--overwrite` retains its explicit upstream regeneration meaning; it is not needed for analysis updates. Plot mode rejects `--download`, `--overwrite`, and `--recompute-experiments`. The default paper suite ignores historical saved `main`/`candidates` selections. `--figure-suite paper` is an optional alias; the old suite options are retired from the runner.
+
+## Devices and scientific configuration
 
 ```bash
-# Resume upstream stages, reduce compatible caches once, then plot saved tables
-./run_all.sh
-
-# Analyze one supported pair
-./run_all.sh --model sdv1 --scheduler ddim
-
-# Regenerate all designated theory and existing proximity figures from saved data
-./run_all.sh --plot
-./run_all.sh --model sdv1 --scheduler ddim --plot
-
-# Also render saved optional injection and applicable terminal-terms diagnostics
-./run_all.sh --plot --include-diagnostics
-
-# Rebuild derived theory only; bypass every upstream executable
-./run_all.sh --recompute-experiments
-
-# Limit theory reduction to two GPUs, using generation's device convention
 CUDA_VISIBLE_DEVICES=0,1 ./run_all.sh --recompute-experiments --device auto
-
-# Run one theory configuration on a specific GPU
 ./theory_validation.sh --model sdv1 --scheduler ddim --device cuda:0
-
-# Plot a copied scalar bundle without model weights or raw tensor payloads
-./theory_validation.sh --bundle /path/to/analysis_hash --plot
-
-./run_all.sh --help
+PYTHON=/path/to/python ./run_all.sh --plot
 ```
 
-`--recompute-experiments` requires existing generation, SSCD, frozen selection and
-proximity artifacts; missing prerequisites are errors. It never forces upstream
-cache regeneration. Root `--overwrite` retains its explicit upstream meaning:
-regenerate generation/SSCD caches and rebuild downstream analyses.
-`--plot` rejects `--download`, `--overwrite` and `--recompute-experiments`.
-The entire requested plot matrix is validated before figures are written.
+Theory follows generation's device convention: `auto` uses all visible CUDA devices, with CPU fallback; `cpu`, `cuda`, or `cuda:N` selects one device. Whole records are distributed to workers sharing the fixed center and candidate law. The parent owns the single progress bar across devices; completed record shards are reusable. Sensitive arithmetic uses float64. Plot mode starts no device workers. Endpoint-only paper measurements do not wait for path quadrature; integrated diagnostics remain separately resumable.
 
-Use `--center reference-initial` (default), `zero`, or `cached-baseline`. The default
-center is the mean initial unconditional clean estimate over unique reference
-seeds, fixed across prompts and timesteps. It is held out from experiment seeds,
-but shares the protected selection seed bank; it is not the known data mean.
-`zero` is a sensitivity diagnostic. `cached-baseline` requires
-`--cached-baseline PATH` to a compatible existing independently inferred baseline;
-no center mode triggers new inference. Deprecated `--use-mu` retains only that
-independent-baseline meaning, and `--no-mu` means `zero`.
+The default `--center reference-initial` uses the fixed mean of initial unconditional estimates from unique reference seeds. It is an independently identified model-output center, not the unknown training-data mean. `--center zero` is a sensitivity configuration. `--center cached-baseline --cached-baseline PATH` requires an existing compatible independent baseline and performs no inference. Deprecated `--use-mu` and `--no-mu` retain those existing meanings. Changing the active scientific configuration requires explicit analysis recomputation, which archives the previous derived paper bundle.
 
-Change run identity with `--N`, `--T` and `--g`. Finite negative or nonstandard
-guidance remains valid for algebraic analysis; manuscript assumptions are recorded
-separately. Theory uses generation's device convention: `--device auto` (the
-default) uses every CUDA GPU visible to PyTorch, with CPU fallback when CUDA is
-unavailable. `--device cuda` or `cuda:N` selects one GPU; `--device cpu` forces CPU.
-Use `CUDA_VISIBLE_DEVICES` to select a GPU subset. Whole prompt records are divided
-among devices, with at most one process per GPU and no more processes than selected
-records. Each worker uses the same fixed center and candidate support, saves atomic
-record shards, and the parent validates and assembles the scalar bundle. Completed
-record shards are reused on resume, even if the number of GPUs changes. To resume
-one configuration without forcing a rebuild, use `./theory_validation.sh --model
-sdv1 --scheduler ddim --device auto`. Reference-cache consistency checks also use
-parallel CPU readers; trajectory transfers and scalar copies are batched. The
-bundle manifest records each worker's device, assigned prompts, process ID,
-completion status and duration. A single `[Theory] Records` tqdm bar combines
-progress across all devices, with reduced, resumed and failed prompt counts.
-`--plot` and `--validate-only` do not initialize
-GPUs or reduction workers. Every wrapper honors `PYTHON`; for example,
-`PYTHON=/path/to/python ./run_all.sh --plot`.
+An independently supplied raw latent L2 tolerance can be recorded with `--target-error-tolerance VALUE`. The corresponding coordinate error is L2 divided by `sqrt(d)`; an already computed RMSE must not be divided again. The SSCD threshold 0.75 is never a latent tolerance.
 
-## Evidence and outputs
+## Paper outputs
 
-The registry maps seven manuscript results and emits **four default figures**:
+Canonical outputs follow the proximity run/seed-role convention:
 
-| Figure | Measurement and scope |
-| --- | --- |
-| `initial_recovery` | Paired conditional/unconditional target RMSE at the saved initialization; finite-noise recovery, not the forward-loss premise or a zero-SNR limit |
-| `unconditional_center` | Initial-only ECDF of unique evaluation-seed distances from the fixed reference center; model-output dispersion, not data-mean convergence |
-| `posterior_feedback` | Actual Equation-15 candidate-reference variation and Proposition-5 margin versus matched log-probability gain; estimated condition coverage under the declared candidate law |
-| `target_synchronization` | Prompt-balanced conditional/unconditional median errors and interquartile bands in fixed terminal `SSCD > 0.75` / `<= 0.75` groups; paired joint diagnostics remain in tables |
+```text
+outputs/sdv1_ddim_g7.5_T50_N20/theory/experiment_S0_N20/
+  run_config.json             # Scientific identity and source provenance
+  summary.json, audit.json    # Measurements, counts, numerical/applicability checks
+  figure_manifest.json        # Actual output hashes and status of every requested figure
+  figure_captions.md          # Formulas, weighting, snapshots, and band definitions
+  initial.csv, terminal.csv, failed.csv
+  logical_tables.json        # Authoritative existing trajectory/feedback shard references
+  plot_data/*.csv             # Compact immutable inputs; sufficient for rendering
+  audit_data/*.csv            # Terminal, reference-tail, coverage, and offending-row audits
+  main/*.png, main/*.pdf
+  appendix/*.png, appendix/*.pdf
+  diagnostics/               # Figure exports only when requested
+```
 
-`--include-diagnostics` adds initial `target_injection` and, only when the exact
-terminal clean-update condition applies, `terminal_terms`. Matched displacement
-remains vector/replay numerical QA with no figure. The old operational endpoint
-scatter is retired. No fallback figure disguises an unavailable quantity.
+Main figures:
 
-The candidate bank is frozen from all valid complete cached targets in the
-configuration's declared experiment run before selection, with equal mass on
-exact distinct latent atoms and retained record/image aliases. It is not the
-unknown training law. Equation 15 is integrated analytically on that candidate
-mixture; no learned branch is evaluated on counterfactual states. Adaptive
-quadrature records tolerances, budgets, uncertainty and saturation. Condition
-coverage is **numerically estimated**, with unresolved rows preserved. Negative
-gains and zero coverage remain visible. The actual training posterior, training
-mean, forward loss, and single-target training assumption remain unidentified.
+- `initial_recovery`
+- `initial_unconditional_concentration`
+- `posterior_feedback_positive_fraction`
+- `target_synchronization`
 
-Each run publishes `outputs/<run>/theory_v2/<analysis_hash>/`. The directory name
-is retained for discovery compatibility; the current scalar schema is **3** and
-formula version is **cache-theory-3.0-proposition5**. Old feedback tables lacking
-V are rejected with an analysis-only recomputation command. A version change
-invalidates derived analysis, never protected trajectories or SSCD.
+Core appendix figures:
 
-Bundles contain the registry, source identities/hashes, schedule, center/support
-metadata, atomic per-record Parquet shards, initial/endpoint tables, six saved
-figure tables, per-step/per-prompt/phase summaries, and
-`applicability_report.json`. Figures have PNG/PDF and caption/formula sidecars;
-the managed figure manifest records numerical exclusions, coverage and scales.
-Only obsolete pipeline-owned figure files are archived; unrelated files remain.
-Forced recomputation stages its result until success, preserving the previous
-complete scientific result on failure.
+- `initial_recovery_within_prompt`
+- `initial_target_retrieval_rank`
+- `posterior_feedback_initial_comparison`
+- `posterior_feedback_normalized_gain`
+- `posterior_feedback_increasing_profile_fraction`
+- `branch_gap`
+- `joint_target_recovery_early`
+- `joint_target_recovery_late`
 
-Normal analysis publishes scalars and invokes the same renderer as `--plot`.
-Plot-only never reads raw tensors, recomputes posteriors/quadrature, refits the
-center/support, or invokes inference. Numerical and style identities are separate.
-Keep the bundle's JSON, CSV and Parquet files for standalone plotting; auxiliary
-center/support tensors are not needed. See the [implementation audit](implementation_audit.md),
-[statement registry](docs/theory/statement_registry.json), and
-[formula/schema dictionary](docs/theory/quantity_dictionary.md).
+Conditional appendix figures are `terminal_error_terms` and `terminal_bound_tightness`. They require a structurally clean terminal update and successful numeric reconstruction; absence has a precise manifest reason. For T=50, joint-recovery snapshots remain k=10 and k=48. A very short run may alias coincident snapshots rather than export duplicates.
 
-An independently supplied raw latent L2 tolerance can be recorded with
-`--target-error-tolerance VALUE` during analysis, and the same option selects
-that saved analysis during root plotting. It enables observed-grid entry/censor
-summaries and the applicable terminal sufficient region using `VALUE/sqrt(d)`.
-The pipeline never chooses a tolerance from SSCD or measured outcomes.
+Each figure has one data axes and a same-stem PNG/single-page PDF pair. Figures use the shared proximity publisher, STIX typography, fixed SSCD coloring, and the reviewed gold/purple outcome colors. Conditional curves are solid and unconditional curves dashed. Descriptive IQRs and numerical-sign ambiguity bands have distinct saved definitions. Raw signed values and tails remain in the analysis.
 
-Linear branch reductions use bounded seed/time blocks. Candidate posterior
-calculations cache target geometry and a support Gram matrix per worker; segment
-logits are affine, and node/query chunks bound working memory. No reconstructed
-clean-estimate trajectory or query-by-node-by-candidate-by-latent array is saved.
+Large source tables remain at their validated `theory_candidates/<hash>/` locations; new underlying shared reductions use `theory_measurements/<hash>/`. The active runner creates no `theory_v2` outputs. Scientific source data and old audit records are preserved. Only hash-verified, renderer-owned obsolete figures may be archived. Role locks, staged publication, and paired export rollback prevent half-published bundles.
 
-Protected trajectories, predictions and scores remain under `logs/`; recovered
-data and frozen selections remain under `data/webster/`. Dataset preparation,
-prompt eligibility, generation, SSCD and proximity scientific contracts are
-preserved.
+## Reuse and audit
 
-The old theorem, independent baseline, forward-corruption and decoded-gallery
-wrappers remain explicitly invokable **legacy utilities**. They are absent from
-the default theory pipeline. Options for fresh Gaussian sweeps or independent
-loss draws (`--evaluation-source`, `--num-loss-seeds`, `--loss-seed`, and
-`--num-baseline-seeds`) fail with a migration message in the new pipeline.
+A portable paper bundle can be re-rendered without its backing trajectory shards:
 
-## Synthetic validation
+```bash
+./theory_validation.sh --bundle /path/to/experiment_S0_N20 --plot
+```
+
+An explicit migration from reviewed candidate measurements is available when their original logs were archived separately:
+
+```bash
+./theory_validation.sh --model sdv1 --scheduler ddim --recompute-experiments \
+  --source-analysis outputs/sdv1_ddim_g7.5_T50_N20/theory_candidates/ANALYSIS_HASH \
+  --source-logs _logs --device cpu
+```
+
+This validates and records the selected source, preserving candidate numerical shards. It never silently substitutes archived measurements for a newly generated run. `--source-logs` extends missing terminal accounting from matching saved records; mismatching provenance fails. Normal `run_all.sh` uses the current scientific caches.
+
+The candidate law, same-seed SSCD, prompt-balanced populations, and original Proposition 5 margin remain fixed. Endpoint gains and endpoint profile tests use the same destination noise and candidate support at both matched endpoints. The original sufficient norm condition and newer directional diagnostics retain distinct names. Unresolved numerical signs remain in fraction denominators. Final-current reference availability is independent of destination-posterior eligibility.
 
 ```bash
 python -m pytest tests/test_theory_*.py
 ```
 
-These tests require no network or model downloads. Plot tests regenerate all
-registered figures from copied scalar bundles while tensor/model imports are
-blocked, compare repeated output data/axes/images, and check numerical file hashes
-and timestamps. Root dispatch tests cover the supported matrix, all-configuration
-plot preflight, incompatible flags and the isolation of theory recomputation.
-
-Implementation verification and the scoped real-cache audit are recorded in
-[the change report](docs/theory/change_report.md).
-
-## Candidate-figure discovery
-
-The theory discovery suite adds 34 registered designs and fixed snapshot/group
-variants while preserving the four main-figure outputs. It saves direct matched
-posterior gains, endpoint direction tests, local guidance dose curves, retrieval,
-synchronization, and separately resumable refined integral diagnostics.
-
-```bash
-./run_all.sh --recompute-experiments --figure-suite candidates
-./run_all.sh --plot --figure-suite candidates
-./run_all.sh --plot                         # reloads the saved suite
-./run_all.sh --plot --figure-suite main      # explicit four-figure suite
-```
-
-Model/scheduler filters and multi-GPU device selection are unchanged. Offline
-galleries and every candidate's numerical/applicability status are saved under
-`outputs/<run>/theory_candidates/<hash>/`; the cross-configuration gallery is
-`outputs/theory_candidates/index.html`. Plot-only uses saved scalars. See the
-[discovery guide](docs/theory/candidate_discovery.md) and
-[formula mapping](docs/theory/candidate_formula_mapping.md).
+See [the paper migration and audit report](docs/theory/paper_pipeline.md), [the fixed registry](utils/experiments/theory/paper_registry.py), and [the manuscript formula mapping](docs/theory/candidate_formula_mapping.md). Historical discovery documentation and scientific tests remain as provenance; the exploratory gallery is no longer a default CLI mode. Legacy independent-inference wrappers are outside the paper pipeline.

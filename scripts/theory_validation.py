@@ -55,14 +55,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--selection-strategy", choices=("gmm",), default="gmm")
     parser.add_argument(
         "--figure-suite",
-        choices=("main", "candidates"),
-        default=None,
-        help="figure suite; omitted reloads the suite saved for this scientific run",
+        choices=("paper",),
+        default="paper",
+        help="fixed main and appendix paper suite (default); discovery modes are retired",
     )
     parser.add_argument(
+        "--diagnostics",
         "--include-diagnostics",
+        dest="diagnostics",
         action="store_true",
-        help="also render saved injection and applicable terminal-terms diagnostics",
+        help="also render saved optional diagnostic figures",
     )
     parser.add_argument(
         "--target-error-tolerance",
@@ -90,6 +92,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--validate-proximity",
         action="store_true",
         help="root plot preflight: validate protected saved proximity and source metadata",
+    )
+    parser.add_argument(
+        "--source-analysis",
+        type=Path,
+        help="explicit validated candidate scalar bundle for analysis migration",
+    )
+    parser.add_argument(
+        "--source-logs",
+        type=Path,
+        help="explicit matching archived logs for missing terminal accounting during migration",
     )
     parser.add_argument("--candidate-chunk-size", type=positive_integer, default=256)
     parser.add_argument("--query-chunk-size", type=positive_integer, default=16)
@@ -210,118 +222,84 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.cached_baseline and args.center != "cached-baseline":
         parser.error("--cached-baseline requires --center cached-baseline")
-    from utils.experiments.theory.contracts import (
-        TheoryError,
-        find_analysis_bundle,
-        numerical_config,
-        validate_source_metadata,
+    if (args.source_analysis or args.source_logs) and (
+        args.plot or args.validate_only or args.bundle
+    ):
+        parser.error(
+            "Source migration is analysis-only; plotting uses saved compact paper inputs"
+        )
+    if args.source_logs and not args.source_analysis:
+        parser.error("--source-logs requires an explicit --source-analysis")
+    from utils.experiments.theory.contracts import TheoryError, numerical_config
+    from utils.experiments.theory.paper_contracts import (
+        PaperPaths,
+        render_saved_paper,
+        validate_paper_bundle,
+        recompute_command,
     )
-    from utils.experiments.theory.plotting import render_bundle, validate_bundle
 
-    config = dict(
+    config = numerical_config(
         model_name=args.model,
         scheduler_name=args.scheduler,
         guidance_scale=args.g,
         num_inference_steps=args.T,
         num_seeds=args.N,
         center=args.center,
+        cached_baseline=args.cached_baseline,
+        target_error_tolerance=args.target_error_tolerance,
     )
-    if args.target_error_tolerance is not None:
-        config["target_error_tolerance"] = args.target_error_tolerance
-    if args.cached_baseline:
-        config["cached_baseline"] = args.cached_baseline
-    from utils.experiments.theory.candidate_contracts import (
-        find_candidate_bundle,
-        remember_suite,
-        selected_suite,
-        validate_candidate_bundle,
-        validate_candidate_sources,
-    )
-
     try:
-        if args.bundle:
-            bundle = args.bundle.resolve()
-            suite = (
-                "candidates" if (bundle / "analysis_manifest.json").exists() else "main"
+        bundle = (
+            args.bundle.absolute()
+            if args.bundle
+            else PaperPaths.build(PROJECT_ROOT, **config).output_directory
+        )
+        if args.plot or args.validate_only:
+            validate_paper_bundle(
+                bundle,
+                expected_config=None if args.bundle else config,
+                diagnostics=args.diagnostics,
             )
-            if args.figure_suite is not None and args.figure_suite != suite:
-                raise TheoryError(
-                    "The explicit figure suite differs from the copied bundle"
+            if args.validate_proximity:
+                try:
+                    validate_saved_proximity(PROJECT_ROOT, config)
+                except (TheoryError, OSError, ValueError, RuntimeError) as error:
+                    normal_command = recompute_command(config).replace(
+                        " --recompute-experiments", ""
+                    )
+                    print(
+                        f"Saved proximity preflight failed: {error}. "
+                        f"Run the normal pipeline to align proximity with the current frozen selection: {normal_command}",
+                        file=sys.stderr,
+                    )
+                    return 1
+            if args.plot:
+                render_saved_paper(
+                    bundle,
+                    expected_config=None if args.bundle else config,
+                    diagnostics=args.diagnostics,
                 )
-            if suite == "candidates":
-                validate_candidate_bundle(bundle)
-            else:
-                validate_bundle(bundle)
         else:
-            config = numerical_config(**config)
-            suite = selected_suite(PROJECT_ROOT, config, args.figure_suite)
-            if args.plot or args.validate_only:
-                if suite == "candidates":
-                    bundle = find_candidate_bundle(PROJECT_ROOT, **config)
-                    validate_candidate_bundle(
-                        bundle, expected_config=config, require_complete=True
-                    )
-                    validate_candidate_sources(bundle, PROJECT_ROOT)
-                else:
-                    bundle = find_analysis_bundle(PROJECT_ROOT, **config)
-                    validate_bundle(bundle, expected_config=config)
-                    validate_source_metadata(bundle, project_root=PROJECT_ROOT)
-            elif suite == "candidates":
-                from utils.experiments.theory.candidate_reduce import run_candidates
+            from utils.experiments.theory.paper_reduce import run_paper
 
-                bundle = run_candidates(
-                    PROJECT_ROOT,
-                    **config,
-                    recompute=args.recompute_experiments,
-                    device=args.device,
-                    candidate_chunk_size=args.candidate_chunk_size,
-                    query_chunk_size=args.query_chunk_size,
-                )
-            else:
-                from utils.experiments.theory.reduce import run_theory
-
-                bundle = run_theory(
-                    PROJECT_ROOT,
-                    **config,
-                    recompute=args.recompute_experiments,
-                    device=args.device,
-                    candidate_chunk_size=args.candidate_chunk_size,
-                    query_chunk_size=args.query_chunk_size,
-                )
-        if args.validate_proximity:
-            validate_saved_proximity(PROJECT_ROOT, config)
-        if not args.validate_only:
-            if suite == "candidates":
-                from utils.experiments.theory.candidate_plotting import (
-                    render_candidates,
-                    render_candidate_index,
-                )
-
-                # Full analysis already used the same renderer after both stages.
-                if args.plot or args.bundle:
-                    render_candidates(bundle)
-                if not args.bundle:
-                    from utils.experiments.theory.candidate_contracts import (
-                        all_candidate_bundles,
-                    )
-
-                    render_candidate_index(
-                        all_candidate_bundles(PROJECT_ROOT),
-                        PROJECT_ROOT / "outputs" / "theory_candidates",
-                    )
-            else:
-                render_bundle(bundle, include_diagnostics=args.include_diagnostics)
-            if not args.bundle and (
-                suite == "candidates" or args.figure_suite is not None
-            ):
-                remember_suite(PROJECT_ROOT, config, suite, bundle)
+            bundle = run_paper(
+                PROJECT_ROOT,
+                **config,
+                recompute=args.recompute_experiments,
+                diagnostics=args.diagnostics,
+                device=args.device,
+                candidate_chunk_size=args.candidate_chunk_size,
+                query_chunk_size=args.query_chunk_size,
+                source_analysis=args.source_analysis,
+                source_logs=args.source_logs,
+            )
         print(
-            f"{'Validated' if args.validate_only else 'Theory outputs'} ({suite}): {bundle}"
+            f"{'Validated' if args.validate_only else 'Theory outputs'} (paper): {bundle}"
         )
         return 0
     except (TheoryError, OSError, ValueError, RuntimeError) as error:
         print(
-            f"theory_validation.py: {error}\nRebuild saved analysis with ./run_all.sh --recompute-experiments for this configuration.",
+            f"theory_validation.py: {error}\nRebuild saved analysis with {recompute_command(config)}",
             file=sys.stderr,
         )
         return 1

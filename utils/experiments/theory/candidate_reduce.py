@@ -25,6 +25,7 @@ import pandas as pd
 import torch
 
 from utils.common.io import (
+    CacheIOError,
     atomic_write_bytes,
     atomic_write_frame_parquet,
     atomic_write_json,
@@ -62,6 +63,18 @@ from .scheduler_adapter import SchedulerAdapter
 from .support import FiniteSupport
 
 AUXILIARY = ("center.pt", "support.pt", "evaluation_initial.pt", "worker_schedule.pt")
+ENDPOINT_SOURCE_FILES = (
+    "candidate_feedback.py",
+    "candidate_metrics.py",
+    "candidate_reduce.py",
+    "cache_reader.py",
+    "metrics.py",
+    "scheduler_adapter.py",
+    "support.py",
+    "feedback.py",
+)
+SHARED_ENDPOINT_VERSION = "shared-base-candidate-endpoints-1"
+SHARED_ENDPOINT_DIRECTORY = "candidate_endpoint_extension"
 
 
 def _copy_immutable(source, destination):
@@ -193,24 +206,38 @@ def _endpoint_record(
     device,
     query_chunk_size,
     bank_hash,
+    loaded_record=None,
+    base_frames=None,
 ):
     from .candidate_feedback import endpoint_metrics, unavailable_endpoint
     from .candidate_metrics import basic_step_metrics, initial_retrieval_metrics
 
-    # This is the sole protected large-tensor load for all candidate designs.
-    z, epsilon_u, epsilon_c, target = load_record(sources.experiment, record)
-    base_path = (
-        base_bundle / "trajectory_metrics" / f"part-{record.original_index}.parquet"
+    # A fused base worker supplies this immutable record and its freshly reduced
+    # frames. Legacy standalone callers retain the existing validated disk path.
+    z, epsilon_u, epsilon_c, target = (
+        load_record(sources.experiment, record)
+        if loaded_record is None
+        else loaded_record
     )
-    base_manifest = read_json(base_bundle / "manifest.json")
-    if (
-        file_sha256(base_path)
-        != base_manifest["numerical_files"][
-            base_path.relative_to(base_bundle).as_posix()
-        ]
-    ):
-        raise TheoryError(f"Changed base scalar shard: {base_path}")
-    base = pd.read_parquet(base_path)
+    if base_frames is None:
+        base_path = (
+            base_bundle / "trajectory_metrics" / f"part-{record.original_index}.parquet"
+        )
+        base_manifest = read_json(base_bundle / "manifest.json")
+        if (
+            file_sha256(base_path)
+            != base_manifest["numerical_files"][
+                base_path.relative_to(base_bundle).as_posix()
+            ]
+        ):
+            raise TheoryError(f"Changed base scalar shard: {base_path}")
+        base = pd.read_parquet(base_path)
+    else:
+        if loaded_record is None or len(base_frames) != 3:
+            raise TheoryError(
+                "Shared endpoint reduction requires one loaded record and all three base frames"
+            )
+        base = base_frames[0]
     _validate_shard(
         base,
         record,
@@ -363,14 +390,22 @@ def _endpoint_record(
         sources.runs["experiment"]["scientific_config_hash"],
     )
     initial = frame[frame.step_index.eq(0)].copy()
-    old_initial = pd.read_parquet(
-        base_bundle / "initial_shards" / f"part-{record.original_index}.parquet"
+    old_initial = (
+        pd.read_parquet(
+            base_bundle / "initial_shards" / f"part-{record.original_index}.parquet"
+        )
+        if base_frames is None
+        else base_frames[1]
     )
     for name in old_initial.columns.difference(initial.columns):
         initial[name] = old_initial.set_index("seed").loc[initial.seed, name].to_numpy()
     endpoint = frame[frame.step_index.eq(steps - 1)].copy()
-    old_endpoint = pd.read_parquet(
-        base_bundle / "endpoint_shards" / f"part-{record.original_index}.parquet"
+    old_endpoint = (
+        pd.read_parquet(
+            base_bundle / "endpoint_shards" / f"part-{record.original_index}.parquet"
+        )
+        if base_frames is None
+        else base_frames[2]
     )
     for name in old_endpoint.columns.difference(endpoint.columns):
         endpoint[name] = (
@@ -411,6 +446,216 @@ def _stage_paths(directory, record, stage):
             )
         ] + [directory / "segments" / f"part-{ident}.npz"]
     return [directory / "integration_shards" / f"part-{ident}.parquet"]
+
+
+def prepare_shared_endpoint_extension(
+    base_bundle,
+    *,
+    analysis_hash,
+    config,
+    support_metadata,
+    candidate_chunk_size,
+    query_chunk_size,
+    backend_types,
+):
+    """Pin a provisional derived-only endpoint recipe before the base pass."""
+    from .candidate_feedback import ENDPOINT_POLICY
+
+    identity = {
+        "version": SHARED_ENDPOINT_VERSION,
+        "base_analysis_hash": analysis_hash,
+        "config": config,
+        "support_metadata_hash": canonical_hash(support_metadata),
+        "source_code": _source_hashes(ENDPOINT_SOURCE_FILES),
+        "endpoint_policy": ENDPOINT_POLICY,
+        "chunk_sizes": [candidate_chunk_size, query_chunk_size],
+        "backend_types": backend_types,
+    }
+    contract = identity | {"extension_hash": canonical_hash(identity)}
+    path = Path(base_bundle) / SHARED_ENDPOINT_DIRECTORY / "extension_identity.json"
+    try:
+        existing = read_json(path) if path.is_file() else None
+    except CacheIOError:
+        existing = None
+    if existing != contract:
+        atomic_write_json(path, contract)
+    return contract
+
+
+def _shared_endpoint_contract(base_bundle):
+    path = Path(base_bundle) / SHARED_ENDPOINT_DIRECTORY / "extension_identity.json"
+    if path.is_symlink():
+        raise TheoryError("Shared endpoint identity cannot be a symbolic link")
+    contract = read_json(path)
+    identity = {
+        name: value for name, value in contract.items() if name != "extension_hash"
+    }
+    if (
+        contract.get("version") != SHARED_ENDPOINT_VERSION
+        or canonical_hash(identity) != contract.get("extension_hash")
+        or contract.get("source_code") != _source_hashes(ENDPOINT_SOURCE_FILES)
+    ):
+        raise TheoryError("Shared endpoint recipe changed or is incompatible")
+    return contract
+
+
+def shared_endpoint_record_valid(base_bundle, record):
+    """Validate compact extension bytes, never reopen a raw trajectory."""
+    try:
+        contract = _shared_endpoint_contract(base_bundle)
+        directory = Path(base_bundle) / SHARED_ENDPOINT_DIRECTORY
+        paths = _stage_paths(directory, record, "endpoints")
+        stamp = directory / "completion/endpoints" / f"{record.original_index}.json"
+        if stamp.is_symlink() or not stamp.is_file():
+            return False
+        if not all(path.is_file() and not path.is_symlink() for path in paths):
+            return False
+        checkpoint = read_json(stamp)
+        return checkpoint.get("stage_hash") == contract[
+            "extension_hash"
+        ] and checkpoint.get("files") == {
+            path.relative_to(directory).as_posix(): file_sha256(path) for path in paths
+        }
+    except (CacheIOError, OSError, ValueError, TheoryError):
+        return False
+
+
+def stage_shared_endpoint_record(
+    sources,
+    record,
+    base_bundle,
+    support,
+    center,
+    schedule,
+    adapter,
+    *,
+    device,
+    query_chunk_size,
+    bank_hash,
+    loaded_record,
+    base_frames,
+):
+    """Consume the base worker's already-loaded record before releasing it."""
+    contract = _shared_endpoint_contract(base_bundle)
+    if (
+        contract["config"] != sources.config
+        or contract["chunk_sizes"][1] != query_chunk_size
+    ):
+        raise TheoryError("Shared endpoint worker differs from its pinned recipe")
+    directory = Path(base_bundle) / SHARED_ENDPOINT_DIRECTORY
+    result = _endpoint_record(
+        sources,
+        record,
+        base_bundle,
+        support,
+        center,
+        schedule,
+        adapter,
+        device=device,
+        query_chunk_size=query_chunk_size,
+        bank_hash=bank_hash,
+        loaded_record=loaded_record,
+        base_frames=base_frames,
+    )
+    paths = _stage_paths(directory, record, "endpoints")
+    for frame, path in zip(result[:5], paths[:5], strict=True):
+        atomic_write_frame_parquet(frame, path)
+    _save_segments(paths[-1], result[-1])
+    atomic_write_json(
+        directory / "completion/endpoints" / f"{record.original_index}.json",
+        {
+            "stage_hash": contract["extension_hash"],
+            "files": {
+                path.relative_to(directory).as_posix(): file_sha256(path)
+                for path in paths
+            },
+        },
+    )
+
+
+def shared_endpoint_extension_manifest(base_bundle, records):
+    """The final base publication pins every extension completion marker."""
+    contract = _shared_endpoint_contract(base_bundle)
+    if not all(shared_endpoint_record_valid(base_bundle, record) for record in records):
+        raise TheoryError(
+            "Shared endpoint extension is incomplete; no base publication"
+        )
+    directory = Path(base_bundle) / SHARED_ENDPOINT_DIRECTORY
+    return {
+        "complete": True,
+        "contract": contract,
+        "contract_file_sha256": file_sha256(directory / "extension_identity.json"),
+        "record_indices": sorted(record.original_index for record in records),
+        "completion_files": {
+            f"completion/endpoints/{record.original_index}.json": file_sha256(
+                directory / "completion/endpoints" / f"{record.original_index}.json"
+            )
+            for record in records
+        },
+    }
+
+
+def import_shared_endpoint_extension(
+    base_bundle,
+    base_manifest,
+    destination,
+    records,
+    endpoint_hash,
+    *,
+    endpoint_sources,
+    candidate_chunk_size,
+    query_chunk_size,
+    backend_types,
+):
+    """Import verified fused results into the unchanged ordinary endpoint cache."""
+    provenance = base_manifest.get("candidate_endpoint_extension")
+    if provenance is None:
+        return False
+    directory = Path(base_bundle) / SHARED_ENDPOINT_DIRECTORY
+    contract = _shared_endpoint_contract(base_bundle)
+    if (
+        not provenance.get("complete")
+        or provenance.get("contract") != contract
+        or provenance.get("contract_file_sha256")
+        != file_sha256(directory / "extension_identity.json")
+        or contract["base_analysis_hash"] != base_manifest["analysis_hash"]
+        or contract["config"] != base_manifest["config"]
+        or contract["source_code"] != endpoint_sources
+        or contract["chunk_sizes"] != [candidate_chunk_size, query_chunk_size]
+        or contract["backend_types"] != backend_types
+        or contract["support_metadata_hash"]
+        != canonical_hash(read_json(Path(base_bundle) / "support_metadata.json"))
+    ):
+        raise TheoryError(
+            "Shared endpoint provenance differs from requested endpoint recipe"
+        )
+    for record in records:
+        relative_stamp = f"completion/endpoints/{record.original_index}.json"
+        source_stamp = directory / relative_stamp
+        if (
+            record.original_index not in provenance["record_indices"]
+            or not shared_endpoint_record_valid(base_bundle, record)
+            or provenance["completion_files"].get(relative_stamp)
+            != file_sha256(source_stamp)
+        ):
+            raise TheoryError(
+                f"Incomplete or changed shared endpoints: {record.original_index}; resume base preparation"
+            )
+        paths = _stage_paths(directory, record, "endpoints")
+        copied = _stage_paths(destination, record, "endpoints")
+        for source, target in zip(paths, copied, strict=True):
+            _copy_immutable(source, target)
+        checkpoint = {
+            "stage_hash": endpoint_hash,
+            "files": {
+                path.relative_to(destination).as_posix(): file_sha256(path)
+                for path in copied
+            },
+        }
+        target_stamp = destination / relative_stamp
+        if not target_stamp.is_file() or read_json(target_stamp) != checkpoint:
+            atomic_write_json(target_stamp, checkpoint)
+    return True
 
 
 def _stage_worker(
@@ -910,18 +1155,7 @@ def run_candidates(
     records = sorted(sources.selected, key=lambda r: r.original_index)
     if smoke_record_limit is not None:
         records = records[:smoke_record_limit]
-    endpoint_sources = _source_hashes(
-        (
-            "candidate_feedback.py",
-            "candidate_metrics.py",
-            "candidate_reduce.py",
-            "cache_reader.py",
-            "metrics.py",
-            "scheduler_adapter.py",
-            "support.py",
-            "feedback.py",
-        )
-    )
+    endpoint_sources = _source_hashes(ENDPOINT_SOURCE_FILES)
     endpoint_identity = {
         "base_analysis_hash": base_bundle.name,
         "base_manifest_sha256": file_sha256(base_bundle / "manifest.json"),
@@ -1005,6 +1239,17 @@ def run_candidates(
             _reference_tables(
                 cache, base_bundle, devices[0], candidate_chunk_size, query_chunk_size
             )
+        import_shared_endpoint_extension(
+            base_bundle,
+            base_manifest,
+            cache,
+            records,
+            endpoint_hash,
+            endpoint_sources=endpoint_sources,
+            candidate_chunk_size=candidate_chunk_size,
+            query_chunk_size=query_chunk_size,
+            backend_types=sorted({d.type for d in devices}),
+        )
         endpoint_execution = _dispatch(
             sources=sources,
             records=records,

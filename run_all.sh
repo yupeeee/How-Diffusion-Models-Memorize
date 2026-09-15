@@ -21,7 +21,7 @@ PLOT_ONLY=0
 OVERWRITE=0
 RECOMPUTE=0
 INCLUDE_DIAGNOSTICS=0
-FIGURE_SUITE=""
+FIGURE_SUITE="paper"
 TARGET_ERROR_TOLERANCE=""
 
 usage() {
@@ -33,13 +33,14 @@ Explicit model/scheduler options filter these supported pairs; requests with
 no matching pair fail before any stage. --scheduler ddpm selects sdv1 only.
 Protected generation, SSCD, and GMM proximity retain their existing defaults.
 Theory reduces existing caches once per model/scheduler, then reloads scalar
-outputs to render the registered semantic figures. No theory stage performs inference.
+outputs to render four main and eight core appendix figures, plus two terminal
+figures when applicable. No theory stage performs inference.
 
 Options:
   --download            Run/resume shared Webster preparation once first
   --plot                Render saved proximity and theory scalar outputs only
-  --figure-suite NAME   main or candidates; omitted reloads the saved suite
-  --include-diagnostics Also render saved injection and applicable terminal terms
+  --figure-suite paper  Optional alias for the default fixed paper suite
+  --diagnostics         Also render saved optional diagnostic figures
   --target-error-tolerance FLOAT
                         Independently supplied raw latent L2 tolerance (optional)
   --recompute-experiments
@@ -175,7 +176,7 @@ while (($# > 0)); do
         --download) DOWNLOAD_WEBSTER=1; shift; continue ;;
         --plot) PLOT_ONLY=1; shift; continue ;;
         --recompute-experiments) RECOMPUTE=1; shift; continue ;;
-        --include-diagnostics) INCLUDE_DIAGNOSTICS=1; shift; continue ;;
+        --diagnostics|--include-diagnostics) INCLUDE_DIAGNOSTICS=1; shift; continue ;;
         --overwrite) OVERWRITE=1; shift; continue ;;
         --use-mu) set_center cached-baseline; shift; continue ;;
         --no-mu) set_center zero; shift; continue ;;
@@ -185,7 +186,7 @@ while (($# > 0)); do
     case "$option" in
         --figure-suite)
             if [[ "$1" == *=* ]]; then value="${1#*=}"; else (($# >= 2)) || missing_value "$option"; value="$2"; shift; fi
-            [[ "$value" == main || "$value" == candidates ]] || invalid_value "$option" "$value (expected main or candidates)"
+            [[ "$value" == paper ]] || invalid_value "$option" "$value (discovery modes retired; use paper or omit this option)"
             FIGURE_SUITE="$value"; shift; continue ;;
         --model) destination=MODEL ;;
         --scheduler) destination=SCHEDULER ;;
@@ -271,7 +272,7 @@ if [[ -n "$TARGET_ERROR_TOLERANCE" ]]; then
     THEORY_CENTER_ARGUMENTS+=(--target-error-tolerance "$TARGET_ERROR_TOLERANCE")
 fi
 THEORY_FIGURE_ARGUMENTS=()
-if ((INCLUDE_DIAGNOSTICS)); then THEORY_FIGURE_ARGUMENTS=(--include-diagnostics); fi
+if ((INCLUDE_DIAGNOSTICS)); then THEORY_FIGURE_ARGUMENTS=(--diagnostics); fi
 if [[ -n "$FIGURE_SUITE" ]]; then THEORY_FIGURE_ARGUMENTS+=(--figure-suite "$FIGURE_SUITE"); fi
 if [[ -n "$CACHED_BASELINE" ]]; then THEORY_CENTER_ARGUMENTS+=(--cached-baseline "$CACHED_BASELINE"); fi
 

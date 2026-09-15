@@ -181,6 +181,16 @@ def _numerical_snapshot(bundle):
     }
 
 
+def _paper_numerical_snapshot(bundle):
+    paths = [bundle / "analysis_config.json", bundle / "analysis_summary.json"]
+    paths.extend(path for path in (bundle / "plot_inputs").rglob("*") if path.is_file())
+    return {
+        path.relative_to(bundle).as_posix(): (_hash(path), path.stat().st_mtime_ns)
+        for path in paths
+        if path.is_file()
+    }
+
+
 def test_render_inventory_parity_and_immutable_scalar_sources(scalar_bundle):
     before = _numerical_snapshot(scalar_bundle)
     first = render_bundle(scalar_bundle)
@@ -208,9 +218,12 @@ def test_render_inventory_parity_and_immutable_scalar_sources(scalar_bundle):
 
 @pytest.mark.parametrize("mode", ("--plot", "--validate-only"))
 def test_copied_scalar_cli_never_imports_tensor_or_model_layers(
-    scalar_bundle, monkeypatch, mode
+    tmp_path, monkeypatch, mode
 ):
     from scripts import theory_validation
+    from tests.test_theory_paper_plotting import compact_fixture
+
+    scalar_bundle = compact_fixture(tmp_path / "paper")
 
     blocked = (
         "torch",
@@ -241,12 +254,12 @@ def test_copied_scalar_cli_never_imports_tensor_or_model_layers(
     for key in removed:
         monkeypatch.delitem(sys.modules, key)
     sys.meta_path.insert(0, guard)
-    before = _numerical_snapshot(scalar_bundle)
+    before = _paper_numerical_snapshot(scalar_bundle)
     try:
         assert theory_validation.main(["--bundle", str(scalar_bundle), mode]) == 0
     finally:
         sys.meta_path.remove(guard)
-    assert before == _numerical_snapshot(scalar_bundle)
+    assert before == _paper_numerical_snapshot(scalar_bundle)
 
 
 @pytest.mark.parametrize(
@@ -622,29 +635,36 @@ def test_root_saved_baseline_alias_never_runs_baseline_inference(tmp_path):
     }
 
 
-def test_normal_cli_reloads_reducer_bundle_before_rendering(scalar_bundle, monkeypatch):
+def test_normal_cli_runs_paper_and_plot_reuses_compact_inputs(tmp_path, monkeypatch):
     from scripts import theory_validation
+    from tests.test_theory_paper_plotting import compact_fixture
+    from utils.experiments.theory.paper_contracts import render_saved_paper
     import types
 
+    paper = compact_fixture(tmp_path / "paper")
     called = []
 
-    def reducer(root, **kwargs):
+    def run_paper(root, **kwargs):
         called.append(kwargs)
-        return scalar_bundle
+        render_saved_paper(paper)
+        return paper
 
     monkeypatch.setitem(
         sys.modules,
-        "utils.experiments.theory.reduce",
-        types.SimpleNamespace(run_theory=reducer),
+        "utils.experiments.theory.paper_reduce",
+        types.SimpleNamespace(run_paper=run_paper),
     )
-    before = _numerical_snapshot(scalar_bundle)
-    assert theory_validation.main(["--g", "-1", "--N", "2", "--T", "3"]) == 0
-    pngs = {p.name: _hash(p) for p in (scalar_bundle / "figures").glob("*.png")}
+    before = _paper_numerical_snapshot(paper)
+    assert theory_validation.main(["--N", "2"]) == 0
+    pngs = {p.relative_to(paper).as_posix(): _hash(p) for p in paper.rglob("*.png")}
+    assert pngs
     assert called[0]["recompute"] is False
     assert called[0]["device"] == "auto"
-    assert theory_validation.main(["--bundle", str(scalar_bundle), "--plot"]) == 0
-    assert before == _numerical_snapshot(scalar_bundle)
-    assert pngs == {p.name: _hash(p) for p in (scalar_bundle / "figures").glob("*.png")}
+    assert theory_validation.main(["--bundle", str(paper), "--plot"]) == 0
+    assert before == _paper_numerical_snapshot(paper)
+    assert pngs == {
+        p.relative_to(paper).as_posix(): _hash(p) for p in paper.rglob("*.png")
+    }
 
 
 def test_preflight_rejects_missing_registered_figure(scalar_bundle):
@@ -700,11 +720,8 @@ def test_theory_cli_passes_device_to_reducer_without_resolution(
 
     monkeypatch.setitem(
         sys.modules,
-        "utils.experiments.theory.reduce",
-        types.SimpleNamespace(run_theory=reducer),
-    )
-    monkeypatch.setattr(
-        "utils.experiments.theory.plotting.render_bundle", lambda bundle, **kwargs: None
+        "utils.experiments.theory.paper_reduce",
+        types.SimpleNamespace(run_paper=reducer),
     )
     assert theory_validation.main(["--device", device]) == 0
     assert len(called) == 1

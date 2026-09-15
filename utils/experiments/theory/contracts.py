@@ -104,7 +104,7 @@ def analysis_parent(project_root, **config) -> Path:
         c["num_inference_steps"],
         c["num_seeds"],
     )
-    return Path(project_root).resolve() / "outputs" / run / "theory_v2"
+    return Path(project_root).resolve() / "outputs" / run / "theory_measurements"
 
 
 def find_analysis_bundle(project_root, **config) -> Path:

@@ -1,3 +1,5 @@
+> Historical discovery workflow. The active runner now exports the fixed paper suite; `--figure-suite main/candidates` is retired. See [paper pipeline](paper_pipeline.md) and the root README. Existing candidate numerical caches remain authoritative sources.
+
 # Candidate-figure discovery suite
 
 The discovery suite extends the four main figures with the 34 designs specified

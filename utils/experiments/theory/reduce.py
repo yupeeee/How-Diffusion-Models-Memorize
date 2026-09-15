@@ -316,8 +316,14 @@ def _record_metrics(
     *,
     device,
     query_chunk_size,
+    defer_path_integration=False,
+    loaded_record=None,
 ):
-    z, epsilon_u, epsilon_c, target = load_record(sources.experiment, record)
+    z, epsilon_u, epsilon_c, target = (
+        load_record(sources.experiment, record)
+        if loaded_record is None
+        else loaded_record
+    )
     scores = load_scores(sources, record)
     initial_z, initial_u = z[:, 0], epsilon_u[:, 0]
     if evaluation_initial is None:
@@ -368,7 +374,19 @@ def _record_metrics(
                     state, next_state, u, c, g, k, target=target - center_device
                 )
                 metrics.update(update_metrics)
-                if k < steps - 1 and coefficients.affine and coefficients.B > 0:
+                if (
+                    defer_path_integration
+                    and k < steps - 1
+                    and coefficients.affine
+                    and coefficients.B > 0
+                ):
+                    feedback = unavailable_feedback(
+                        end - start,
+                        device=device,
+                        reason="path_integration_deferred_for_endpoint_stage",
+                        status="not_computed",
+                    )
+                elif k < steps - 1 and coefficients.affine and coefficients.B > 0:
                     feedback = proposition5_feedback(
                         support,
                         state,
@@ -415,6 +433,14 @@ def _record_metrics(
                         state, next_state, u, c, g, k, target
                     )
                     metrics.update(terminal)
+                    if defer_path_integration:
+                        from .paper_measurements import terminal_affine_accounting
+
+                        metrics.update(
+                            terminal_affine_accounting(
+                                adapter, state, next_state, u, c, target, g, step=k
+                            )
+                        )
                     metrics.update(
                         candidate_terminal_bound(
                             metrics["conditional_target_error_l2"],
@@ -728,6 +754,8 @@ def _run_theory_shard(
     query_chunk_size,
     auxiliary_hashes,
     progress=None,
+    defer_path_integration=False,
+    prepare_candidate_endpoints=False,
 ):
     """Reduce disjoint whole records; write no shared run-level aggregates.
 
@@ -843,7 +871,16 @@ def _run_theory_shard(
                                 f"Stale resumed source {record.original_index}: {validation.errors}"
                             )
                         resumed = True
+                if resumed and prepare_candidate_endpoints:
+                    from .candidate_reduce import shared_endpoint_record_valid
+
+                    resumed = shared_endpoint_record_valid(bundle, record)
                 if not resumed:
+                    loaded_record = (
+                        load_record(sources.experiment, record)
+                        if prepare_candidate_endpoints
+                        else None
+                    )
                     with torch.inference_mode():
                         frame, initial, endpoint, _ = _record_metrics(
                             sources,
@@ -855,7 +892,27 @@ def _run_theory_shard(
                             evaluation_initial,
                             device=concrete,
                             query_chunk_size=query_chunk_size,
+                            defer_path_integration=defer_path_integration,
+                            loaded_record=loaded_record,
                         )
+                        if prepare_candidate_endpoints:
+                            from .candidate_reduce import stage_shared_endpoint_record
+
+                            stage_shared_endpoint_record(
+                                sources,
+                                record,
+                                bundle,
+                                support,
+                                center,
+                                schedule,
+                                adapter,
+                                device=concrete,
+                                query_chunk_size=query_chunk_size,
+                                bank_hash=support_meta["tensor_sha256"],
+                                loaded_record=loaded_record,
+                                base_frames=(frame, initial, endpoint),
+                            )
+                    del loaded_record
                     _validate_shard(
                         frame,
                         record,
@@ -921,6 +978,8 @@ def _dispatch_theory_shards(
     candidate_chunk_size,
     query_chunk_size,
     auxiliary_hashes,
+    defer_path_integration=False,
+    prepare_candidate_endpoints=False,
 ):
     worker_count = worker_count_for_tasks(devices, len(records))
     if worker_count == 0:
@@ -943,6 +1002,8 @@ def _dispatch_theory_shards(
             candidate_chunk_size=candidate_chunk_size,
             query_chunk_size=query_chunk_size,
             auxiliary_hashes=auxiliary_hashes,
+            defer_path_integration=defer_path_integration,
+            prepare_candidate_endpoints=prepare_candidate_endpoints,
         )
         for index, (device, shard) in enumerate(
             zip(active_devices, shards, strict=True)
@@ -1003,6 +1064,8 @@ def _run_theory(
     candidate_chunk_size=256,
     query_chunk_size=16,
     smoke_record_limit=None,
+    defer_path_integration=False,
+    prepare_candidate_endpoints=False,
     **config,
 ):
     """Reduce one configuration; never generate, fit selection, decode or score.
@@ -1010,6 +1073,14 @@ def _run_theory(
     ``smoke_record_limit`` is an explicitly scoped audit API, not a CLI/default
     eligibility rule. It publishes a separate bundle and never the full-run index.
     """
+    if not isinstance(prepare_candidate_endpoints, bool):
+        raise TheoryError("prepare_candidate_endpoints must be a boolean")
+    if prepare_candidate_endpoints and not defer_path_integration:
+        raise TheoryError(
+            "Shared candidate endpoints require defer_path_integration=True"
+        )
+    if not isinstance(defer_path_integration, bool):
+        raise TheoryError("defer_path_integration must be a boolean")
     devices = _resolve_theory_devices(device)
     sources = discover_sources(project_root, **config)
     schedule = load_schedule(sources)
@@ -1046,6 +1117,19 @@ def _run_theory(
             "reduce.py",
         )
     }
+    if prepare_candidate_endpoints:
+        from .candidate_reduce import ENDPOINT_SOURCE_FILES, _source_hashes
+
+        code_hashes.update(_source_hashes(ENDPOINT_SOURCE_FILES))
+    if defer_path_integration:
+        code_hashes["paper_measurements.py"] = file_sha256(
+            package_dir / "paper_measurements.py"
+        )
+    numerical_policy = (
+        {"base_policy": NUMERICAL_POLICY, "defer_path_integration": True}
+        if defer_path_integration
+        else NUMERICAL_POLICY
+    )
     if sources.config["center"] == "cached-baseline":
         from utils.experiments.unconditional_baseline import load_unconditional_baseline
 
@@ -1094,7 +1178,10 @@ def _run_theory(
         "support_value_hash": support_metadata["tensor_sha256"],
         "support_aliases": support_metadata["aliases"],
         "registry": registry,
-        "numerical_policy": NUMERICAL_POLICY,
+        "numerical_policy": numerical_policy,
+        "defer_path_integration": defer_path_integration,
+        "prepare_candidate_endpoints": prepare_candidate_endpoints,
+        "path_integration_complete": not defer_path_integration,
         "integration_policy": INTEGRATION_POLICY,
         "reduction_backends": sorted({selected.type for selected in devices}),
         "time_block_size": TIME_BLOCK_SIZE,
@@ -1145,7 +1232,21 @@ def _run_theory(
             )
             completed_manifest["source_metadata_files"] = sources.metadata_files
             atomic_write_json(manifest_path, completed_manifest)
-        return bundle
+        extension_valid = True
+        if prepare_candidate_endpoints:
+            from .candidate_reduce import shared_endpoint_record_valid
+
+            expected_records = (
+                sources.selected[:smoke_record_limit]
+                if smoke_record_limit is not None
+                else sources.selected
+            )
+            extension_valid = all(
+                shared_endpoint_record_valid(bundle, record)
+                for record in expected_records
+            )
+        if extension_valid:
+            return bundle
     atomic_write_json(bundle / "analysis_identity.json", _json_safe(science_identity))
     failed = []
     failure_path = bundle / "failed.csv"
@@ -1231,6 +1332,18 @@ def _run_theory(
             schedule, bundle / "worker_schedule.pt"
         ),
     }
+    if prepare_candidate_endpoints:
+        from .candidate_reduce import prepare_shared_endpoint_extension
+
+        prepare_shared_endpoint_extension(
+            bundle,
+            analysis_hash=digest,
+            config=sources.config,
+            support_metadata=support_metadata,
+            candidate_chunk_size=candidate_chunk_size,
+            query_chunk_size=query_chunk_size,
+            backend_types=sorted({selected.type for selected in devices}),
+        )
     results = _dispatch_theory_shards(
         sources=sources,
         records=selected,
@@ -1241,6 +1354,8 @@ def _run_theory(
         candidate_chunk_size=candidate_chunk_size,
         query_chunk_size=query_chunk_size,
         auxiliary_hashes=auxiliary_hashes,
+        defer_path_integration=defer_path_integration,
+        prepare_candidate_endpoints=prepare_candidate_endpoints,
     )
     assignments = [index for result in results for index in result.assigned_indices]
     expected_indices = [record.original_index for record in selected]
@@ -1396,6 +1511,7 @@ def _run_theory(
         if p.is_file()
         and p.suffix in {".json", ".csv", ".parquet"}
         and "figures" not in p.parts
+        and "candidate_endpoint_extension" not in p.relative_to(bundle).parts
         and p.name != "manifest.json"
     }
     revision = subprocess.run(
@@ -1448,7 +1564,10 @@ def _run_theory(
         "analysis_scope": summary["analysis_scope"],
         "current_failed_record_count": 0,
         "failed_csv_preserves_history": True,
-        "numerical_policy": NUMERICAL_POLICY,
+        "numerical_policy": numerical_policy,
+        "defer_path_integration": defer_path_integration,
+        "prepare_candidate_endpoints": prepare_candidate_endpoints,
+        "path_integration_complete": not defer_path_integration,
         "integration_policy": INTEGRATION_POLICY,
         "scheduler_adapter": adapter.metadata(),
         "metric_evidence": {
@@ -1459,6 +1578,12 @@ def _run_theory(
             "population_and_paper_bounds": "unavailable",
         },
     }
+    if prepare_candidate_endpoints:
+        from .candidate_reduce import shared_endpoint_extension_manifest
+
+        manifest["candidate_endpoint_extension"] = shared_endpoint_extension_manifest(
+            bundle, selected
+        )
     # Refuse publication if a producer changed completion/scientific metadata
     # during this read-only reduction.
     for relative, expected_hash in sources.metadata_files.items():
@@ -1499,6 +1624,8 @@ def run_theory(
     candidate_chunk_size=256,
     query_chunk_size=16,
     smoke_record_limit=None,
+    defer_path_integration=False,
+    prepare_candidate_endpoints=False,
     **config,
 ):
     """Public reduction entry point with durable failure auditing.
@@ -1514,6 +1641,8 @@ def run_theory(
             candidate_chunk_size=candidate_chunk_size,
             query_chunk_size=query_chunk_size,
             smoke_record_limit=smoke_record_limit,
+            defer_path_integration=defer_path_integration,
+            prepare_candidate_endpoints=prepare_candidate_endpoints,
             **config,
         )
     except Exception as error:

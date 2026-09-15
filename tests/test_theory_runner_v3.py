@@ -7,7 +7,6 @@ import pytest
 from tests.test_theory_plot_cli import (
     _run_all_stub,
     _option,
-    scalar_bundle as scalar_bundle,
 )
 from utils.experiments.theory.contracts import numerical_config
 
@@ -28,7 +27,7 @@ def test_diagnostics_are_forwarded_only_to_theory(tmp_path, mode):
         for c in calls
         if c[0] == "theory_validation.sh" and "--validate-only" not in c
     ]
-    assert len(renders) == 1 and "--include-diagnostics" in renders[0]
+    assert len(renders) == 1 and "--diagnostics" in renders[0]
     assert all(
         "--include-diagnostics" not in c
         for c in calls
@@ -74,22 +73,22 @@ def test_bad_tolerance_fails_before_any_stage(tmp_path, value):
     assert calls == []
 
 
-def test_cli_diagnostics_renderer_receives_saved_scalar_bundle(
-    scalar_bundle, monkeypatch
-):
+def test_cli_diagnostics_renderer_receives_saved_scalar_bundle(tmp_path, monkeypatch):
     from scripts import theory_validation
-    from utils.experiments.theory import plotting
+    from tests.test_theory_paper_plotting import compact_fixture
+    from utils.experiments.theory import paper_contracts
 
+    bundle = compact_fixture(tmp_path / "paper", diagnostics=True)
     calls = []
     monkeypatch.setattr(
-        plotting,
-        "render_bundle",
+        paper_contracts,
+        "render_saved_paper",
         lambda bundle, **options: calls.append((bundle, options)),
     )
     assert (
         theory_validation.main(
-            ["--bundle", str(scalar_bundle), "--plot", "--include-diagnostics"]
+            ["--bundle", str(bundle), "--plot", "--include-diagnostics"]
         )
         == 0
     )
-    assert calls == [(scalar_bundle.resolve(), {"include_diagnostics": True})]
+    assert calls == [(bundle.resolve(), {"expected_config": None, "diagnostics": True})]
