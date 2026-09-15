@@ -1,0 +1,43 @@
+{
+  "analysis_hash": "81085d1787c9e3f4f09b4f879ff3150cb94b3468ef01ae8b8b48e3104106bd83",
+  "complete": true,
+  "schema_version": 3,
+  "current_failed_record_count": 0,
+  "feedback_source_sha256": "9cc530d31455370646fbbf1be8459c3940fe52033dea78ac00446aebded77fde",
+  "expected_counts": {
+    "endpoint_rows": 4960,
+    "initial_rows": 4960,
+    "prompts": 248,
+    "seeds_per_prompt": 20,
+    "trajectory_rows": 248000
+  },
+  "resolved_devices": [
+    "cuda:0",
+    "cuda:1",
+    "cuda:2"
+  ],
+  "worker_count": 3,
+  "workers": [
+    {
+      "device": "cuda:0",
+      "assigned_records": 83,
+      "completed_records": 83,
+      "failed_records": 0,
+      "duration_seconds": 144.1671473479364
+    },
+    {
+      "device": "cuda:1",
+      "assigned_records": 83,
+      "completed_records": 83,
+      "failed_records": 0,
+      "duration_seconds": 145.54680320387706
+    },
+    {
+      "device": "cuda:2",
+      "assigned_records": 82,
+      "completed_records": 82,
+      "failed_records": 0,
+      "duration_seconds": 143.8172570830211
+    }
+  ]
+}

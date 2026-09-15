@@ -1,0 +1,215 @@
+{
+  "scope": "read-only CPU independent investigation of all producer-unresolved integral-QA rows in this configuration; original scalar outputs and thresholds untouched",
+  "configuration": "sdv1_ddpm_g7.5_T50_N20",
+  "analysis_hash": "2fe4344cda4ba068436d6361d2c8413c265e9c9ba6efb791a719044d7f45e467",
+  "reference_backend": "CPU; GPU-produced bundles can differ in reduction order",
+  "rows": [
+    {
+      "record": "1683590374",
+      "seed": 0,
+      "step": 48,
+      "target_atom": 159,
+      "saved_H": -16968.50804514624,
+      "saved_integrated_H": -16968.508385267018,
+      "saved_identity_residual": 0.0003401207759452518,
+      "saved_quadrature_estimate": 0.00031694860471218576,
+      "saved_gain_tolerance": 7.344455778477612e-07,
+      "saved_combined_allowance": 0.0003176830502900335,
+      "saved_margin": -372.1633362543189,
+      "saved_proof_slack": 4360845.955560396,
+      "saved_condition_status": "numerically_unresolved",
+      "recomputed_direct_H": -16968.5080451509,
+      "recomputed_direct_minus_saved_H": -4.6566128730773926e-09,
+      "affine_endpoint_H": -16968.508045149036,
+      "direct_minus_affine_H": -1.862645149230957e-09,
+      "tight_independent_QUADPACK_H": -16968.508380555464,
+      "tight_QUADPACK_error_estimate": 5.137611198678693e-09,
+      "tight_QUADPACK_evaluations": 273,
+      "tight_integral_minus_affine_H": -0.00033540642834850587,
+      "tight_integral_minus_saved_H": -0.0003354092223162297,
+      "maximum_relative_logit_magnitude": 14978702.46100309,
+      "maximum_endpoint_logit_reconstruction_difference": 9.313225746154785e-09,
+      "quadrature_warnings": [],
+      "QUADPACK_message": null,
+      "tight_requested_tolerance_achieved": true,
+      "source_timestep": 21,
+      "destination_timestep": 1,
+      "kappa": 0.9139270806287074,
+      "sigma_next": 0.041279263375681344,
+      "support_size": 442,
+      "weights_positive_normalized": true,
+      "tail_checks": [
+        {
+          "width_extent": 8,
+          "points": 8,
+          "integrated_H": -16968.508380555464,
+          "reported_error": 5.137611198678693e-09,
+          "neval": 273,
+          "integral_minus_affine_endpoint": -0.00033540642834850587,
+          "integral_minus_saved_endpoint": -0.0003354092223162297,
+          "QUADPACK_message": null
+        },
+        {
+          "width_extent": 16,
+          "points": 10,
+          "integrated_H": -16968.50804526138,
+          "reported_error": 6.276370764508421e-10,
+          "neval": 315,
+          "integral_minus_affine_endpoint": -1.1234442354179919e-07,
+          "integral_minus_saved_endpoint": -1.1513839126564562e-07,
+          "QUADPACK_message": null
+        },
+        {
+          "width_extent": 32,
+          "points": 12,
+          "integrated_H": -16968.50804514901,
+          "reported_error": 1.4478940869518169e-08,
+          "neval": 357,
+          "integral_minus_affine_endpoint": 2.546585164964199e-11,
+          "integral_minus_saved_endpoint": -2.7685018721967936e-09,
+          "QUADPACK_message": null
+        },
+        {
+          "width_extent": 64,
+          "points": 14,
+          "integrated_H": -16968.50804514901,
+          "reported_error": 1.447892098515291e-08,
+          "neval": 357,
+          "integral_minus_affine_endpoint": 2.546585164964199e-11,
+          "integral_minus_saved_endpoint": -2.7685018721967936e-09,
+          "QUADPACK_message": null
+        }
+      ],
+      "log_one_plus_exp_minus_8": 0.00033540637289576885
+    }
+  ],
+  "M_component_reconstruction_maxima_per_record": [
+    {
+      "original_index": "1291771357",
+      "seed": 4,
+      "step": 38,
+      "M_reconstruction_abs_residual": 3.922195901395753e-12,
+      "recorded_source_sensitivity": 6.187228600868843,
+      "recorded_total_condition_uncertainty": 6.188871775405915,
+      "ratio_to_recorded_source_sensitivity": 6.339180519118007e-13
+    },
+    {
+      "original_index": "1485909131",
+      "seed": 3,
+      "step": 37,
+      "M_reconstruction_abs_residual": 2.5636381906224415e-11,
+      "recorded_source_sensitivity": 7.106405348212919,
+      "recorded_total_condition_uncertainty": 7.108048522731861,
+      "ratio_to_recorded_source_sensitivity": 3.6075034634312435e-12
+    },
+    {
+      "original_index": "1486909380",
+      "seed": 6,
+      "step": 48,
+      "M_reconstruction_abs_residual": 2.588649294921197e-10,
+      "recorded_source_sensitivity": 4.082253679868301,
+      "recorded_total_condition_uncertainty": 4.0838968544053404,
+      "ratio_to_recorded_source_sensitivity": 6.341225945088034e-11
+    },
+    {
+      "original_index": "1543139499",
+      "seed": 11,
+      "step": 44,
+      "M_reconstruction_abs_residual": 7.645439836778678e-12,
+      "recorded_source_sensitivity": 5.3060820356405385,
+      "recorded_total_condition_uncertainty": 5.306082314279058,
+      "ratio_to_recorded_source_sensitivity": 1.4408823281330473e-12
+    },
+    {
+      "original_index": "1620480710",
+      "seed": 6,
+      "step": 46,
+      "M_reconstruction_abs_residual": 3.701643436215818e-10,
+      "recorded_source_sensitivity": 4.731824636743964,
+      "recorded_total_condition_uncertainty": 4.733467811095836,
+      "ratio_to_recorded_source_sensitivity": 7.822866907347969e-11
+    },
+    {
+      "original_index": "1683590374",
+      "seed": 12,
+      "step": 32,
+      "M_reconstruction_abs_residual": 7.844391802791506e-12,
+      "recorded_source_sensitivity": 9.571771511333177,
+      "recorded_total_condition_uncertainty": 9.573414690361249,
+      "ratio_to_recorded_source_sensitivity": 8.195339591530766e-13
+    },
+    {
+      "original_index": "1761045087",
+      "seed": 9,
+      "step": 46,
+      "M_reconstruction_abs_residual": 2.5215740606654435e-10,
+      "recorded_source_sensitivity": 4.845435128412156,
+      "recorded_total_condition_uncertainty": 4.845435135827039,
+      "ratio_to_recorded_source_sensitivity": 5.204019853407388e-11
+    },
+    {
+      "original_index": "2026642560",
+      "seed": 1,
+      "step": 47,
+      "M_reconstruction_abs_residual": 8.486722435918637e-11,
+      "recorded_source_sensitivity": 4.696315488102046,
+      "recorded_total_condition_uncertainty": 4.696315718587461,
+      "ratio_to_recorded_source_sensitivity": 1.807102282080379e-11
+    },
+    {
+      "original_index": "2070526890",
+      "seed": 11,
+      "step": 41,
+      "M_reconstruction_abs_residual": 2.4101609596982598e-11,
+      "recorded_source_sensitivity": 7.073472559003644,
+      "recorded_total_condition_uncertainty": 7.075115733540853,
+      "ratio_to_recorded_source_sensitivity": 3.407323545251373e-12
+    },
+    {
+      "original_index": "328282297",
+      "seed": 6,
+      "step": 27,
+      "M_reconstruction_abs_residual": 8.242295734817162e-12,
+      "recorded_source_sensitivity": 12.506602806913069,
+      "recorded_total_condition_uncertainty": 12.50660289875413,
+      "ratio_to_recorded_source_sensitivity": 6.590355400317985e-13
+    },
+    {
+      "original_index": "487633233",
+      "seed": 7,
+      "step": 46,
+      "M_reconstruction_abs_residual": 1.9036860976484604e-10,
+      "recorded_source_sensitivity": 5.179160651839989,
+      "recorded_total_condition_uncertainty": 5.180877855626279,
+      "ratio_to_recorded_source_sensitivity": 3.6756652778711206e-11
+    },
+    {
+      "original_index": "713955807",
+      "seed": 13,
+      "step": 43,
+      "M_reconstruction_abs_residual": 1.1766587704187259e-11,
+      "recorded_source_sensitivity": 5.359221478358382,
+      "recorded_total_condition_uncertainty": 5.359221478360268,
+      "ratio_to_recorded_source_sensitivity": 2.1955778001904036e-12
+    },
+    {
+      "original_index": "985781054",
+      "seed": 6,
+      "step": 46,
+      "M_reconstruction_abs_residual": 3.851710062008351e-10,
+      "recorded_source_sensitivity": 4.424296655943388,
+      "recorded_total_condition_uncertainty": 4.425913751880349,
+      "ratio_to_recorded_source_sensitivity": 8.705813288614245e-11
+    }
+  ],
+  "largest_M_residual_record": {
+    "original_index": "985781054",
+    "seed": 6,
+    "step": 46,
+    "M_reconstruction_abs_residual": 3.851710062008351e-10,
+    "recorded_source_sensitivity": 4.424296655943388,
+    "recorded_total_condition_uncertainty": 4.425913751880349,
+    "ratio_to_recorded_source_sensitivity": 8.705813288614245e-11
+  },
+  "maximum_M_residual_to_source_sensitivity_ratio": 8.705813288614245e-11
+}

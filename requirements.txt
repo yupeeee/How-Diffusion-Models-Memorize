@@ -15,3 +15,4 @@ diffusers
 transformers
 accelerate
 safetensors
+scipy

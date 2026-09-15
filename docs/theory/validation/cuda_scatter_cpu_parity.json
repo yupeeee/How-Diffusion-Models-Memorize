@@ -1,0 +1,85 @@
+{
+  "before_source_sha256": "9afb2b68d863f907cbcd847d9ba040161035a7dc6bf9fa6a7948812e9d7344df",
+  "after_source_sha256": "9cc530d31455370646fbbf1be8459c3940fe52033dea78ac00446aebded77fde",
+  "cuda_available": false,
+  "cases": [
+    {
+      "case": "positive_condition",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "negative_gain",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "outside_condition_positive_gain",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "source_unresolved",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "saturated_positive",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "saturated_negative",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "sharp_interior",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "budget_unresolved",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "real_sdv2_record_1025217113_step_0_seeds_0_1",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "real_sdv2_record_1025217113_step_25_seeds_0_1",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    },
+    {
+      "case": "real_sdv2_record_1025217113_step_48_seeds_0_1",
+      "scalar_fields": 40,
+      "tensor_fields": 30,
+      "bitwise_equal": true,
+      "differences": []
+    }
+  ],
+  "all_bitwise_equal": true
+}

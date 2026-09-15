@@ -1,0 +1,2580 @@
+{
+  "created_utc": "2026-09-14T21:22:45.723525+00:00",
+  "requested_configurations": [
+    "sdv2_ddim_g7.5_T50_N20"
+  ],
+  "all_four_configurations_requested": false,
+  "scope": "complete requested scalar bundles only; no raw tensor access, posterior recomputation, or model inference",
+  "configurations": {
+    "sdv2_ddim_g7.5_T50_N20": {
+      "configuration": "sdv2_ddim_g7.5_T50_N20",
+      "bundle": "/nas/home/juyeop/workspace/How-Diffusion-Models-Memorize/outputs/sdv2_ddim_g7.5_T50_N20/theory_v2/80966a1f0c9d5cff3b833695a13555a39b2dca41462225038309c8438048e50e",
+      "analysis_hash": "80966a1f0c9d5cff3b833695a13555a39b2dca41462225038309c8438048e50e",
+      "schema_version": 3,
+      "formula_version": "cache-theory-3.0-proposition5",
+      "manifest_complete": true,
+      "scope": "all retained prompts, all evaluation seeds, all stored prediction steps",
+      "validation_status": "hard_contract_checks_passed_with_recorded_numerical_issues",
+      "hard_contract_status": "passed",
+      "formal_numerical_certification": false,
+      "checks_count": 69,
+      "violations": {},
+      "all_raw_findings": {
+        "condition_component_M_identity": {
+          "count": 378,
+          "examples": [
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 6,
+              "step_index": 39,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -2.991287078676578,
+              "candidate_proof_lower_bound_slack": 1222.7796898157726,
+              "candidate_integral_identity_residual": 1.4832579608992091e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 8,
+              "step_index": 34,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.2757616341959874,
+              "candidate_proof_lower_bound_slack": 506.0455929527765,
+              "candidate_integral_identity_residual": -3.0462299349665045e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 8,
+              "step_index": 36,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.04303048920701258,
+              "candidate_proof_lower_bound_slack": 514.6144081926169,
+              "candidate_integral_identity_residual": 3.922251412546984e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 8,
+              "step_index": 37,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -0.3476037007658306,
+              "candidate_proof_lower_bound_slack": 580.7399763586433,
+              "candidate_integral_identity_residual": 5.100364575127969e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 18,
+              "step_index": 46,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -4.2231682924903,
+              "candidate_proof_lower_bound_slack": 7328.632680864805,
+              "candidate_integral_identity_residual": -7.779465960311427e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 1,
+              "step_index": 30,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -5.636110812118204,
+              "candidate_proof_lower_bound_slack": 1242.1277922065397,
+              "candidate_integral_identity_residual": 6.041389610800252e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 1,
+              "step_index": 40,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 14.717593347886577,
+              "candidate_proof_lower_bound_slack": 7432.116240983598,
+              "candidate_integral_identity_residual": -2.2652102416031994e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 8,
+              "step_index": 20,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 1.5949389994048033,
+              "candidate_proof_lower_bound_slack": 185.88415807572107,
+              "candidate_integral_identity_residual": 5.841993555577574e-13
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 8,
+              "step_index": 25,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.5239884909206012,
+              "candidate_proof_lower_bound_slack": 298.7860726094008,
+              "candidate_integral_identity_residual": -2.9971580772780726e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 8,
+              "step_index": 28,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -0.12212930437726754,
+              "candidate_proof_lower_bound_slack": 413.9784332307877,
+              "candidate_integral_identity_residual": -2.223971007353498e-12
+            }
+          ]
+        },
+        "integral_identity_outside_recorded_uncertainty": {
+          "count": 10,
+          "examples": [
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 37,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 4.69137660249887,
+              "candidate_proof_lower_bound_slack": 2349.1027760996585,
+              "candidate_integral_identity_residual": 1.2535750215647568e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 38,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 7.684256362830638,
+              "candidate_proof_lower_bound_slack": 1725.2825886793378,
+              "candidate_integral_identity_residual": 1.2505552149377763e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 40,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 17.054488023175473,
+              "candidate_proof_lower_bound_slack": 2514.165096971151,
+              "candidate_integral_identity_residual": 1.4416912108572433e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 41,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 24.1256231405592,
+              "candidate_proof_lower_bound_slack": 3132.8573441599488,
+              "candidate_integral_identity_residual": -2.4101609596982598e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 28,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 3.7928476298303107,
+              "candidate_proof_lower_bound_slack": 467.3314557948893,
+              "candidate_integral_identity_residual": -1.7368328997235949e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 35,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.8280494908122289,
+              "candidate_proof_lower_bound_slack": 950.835193066062,
+              "candidate_integral_identity_residual": 1.0070833056374795e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 36,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 1.6079043486779474,
+              "candidate_proof_lower_bound_slack": 1026.0149128104786,
+              "candidate_integral_identity_residual": -1.885824829628291e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 40,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 4.596347687194747,
+              "candidate_proof_lower_bound_slack": 1514.128801165421,
+              "candidate_integral_identity_residual": -1.0026646179994714e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "776379145",
+              "record_id": "sdv2-0439",
+              "target_id": "0880f7e2e2f4bdca9871f9f0966dd2e4a736b9064f4ebbc11ef8e9e307af525b",
+              "seed": 19,
+              "step_index": 48,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 16598.686957415193,
+              "candidate_proof_lower_bound_slack": 3987658.4289269755,
+              "candidate_integral_identity_residual": 0.00033168529625982046
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "883531181",
+              "record_id": "sdv2-0367",
+              "target_id": "d8d86f2e69bf9fe15627c5df75e1a2b3cf9364d950448945617561fc8150e5dd",
+              "seed": 16,
+              "step_index": 23,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -1.044702593007436,
+              "candidate_proof_lower_bound_slack": 292.29005514951723,
+              "candidate_integral_identity_residual": 8.988365607365267e-13
+            }
+          ]
+        },
+        "saved_integral_QA_inconsistency": {
+          "count": 10,
+          "examples": [
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 37,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 4.69137660249887,
+              "candidate_proof_lower_bound_slack": 2349.1027760996585,
+              "candidate_integral_identity_residual": 1.2535750215647568e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 38,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 7.684256362830638,
+              "candidate_proof_lower_bound_slack": 1725.2825886793378,
+              "candidate_integral_identity_residual": 1.2505552149377763e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 40,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 17.054488023175473,
+              "candidate_proof_lower_bound_slack": 2514.165096971151,
+              "candidate_integral_identity_residual": 1.4416912108572433e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 41,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 24.1256231405592,
+              "candidate_proof_lower_bound_slack": 3132.8573441599488,
+              "candidate_integral_identity_residual": -2.4101609596982598e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 28,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 3.7928476298303107,
+              "candidate_proof_lower_bound_slack": 467.3314557948893,
+              "candidate_integral_identity_residual": -1.7368328997235949e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 35,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.8280494908122289,
+              "candidate_proof_lower_bound_slack": 950.835193066062,
+              "candidate_integral_identity_residual": 1.0070833056374795e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 36,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 1.6079043486779474,
+              "candidate_proof_lower_bound_slack": 1026.0149128104786,
+              "candidate_integral_identity_residual": -1.885824829628291e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 40,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 4.596347687194747,
+              "candidate_proof_lower_bound_slack": 1514.128801165421,
+              "candidate_integral_identity_residual": -1.0026646179994714e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "776379145",
+              "record_id": "sdv2-0439",
+              "target_id": "0880f7e2e2f4bdca9871f9f0966dd2e4a736b9064f4ebbc11ef8e9e307af525b",
+              "seed": 19,
+              "step_index": 48,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 16598.686957415193,
+              "candidate_proof_lower_bound_slack": 3987658.4289269755,
+              "candidate_integral_identity_residual": 0.00033168529625982046
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "883531181",
+              "record_id": "sdv2-0367",
+              "target_id": "d8d86f2e69bf9fe15627c5df75e1a2b3cf9364d950448945617561fc8150e5dd",
+              "seed": 16,
+              "step_index": 23,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -1.044702593007436,
+              "candidate_proof_lower_bound_slack": 292.29005514951723,
+              "candidate_integral_identity_residual": 8.988365607365267e-13
+            }
+          ]
+        }
+      },
+      "numerical_findings": {
+        "condition_component_M_identity": {
+          "count": 378,
+          "examples": [
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 6,
+              "step_index": 39,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -2.991287078676578,
+              "candidate_proof_lower_bound_slack": 1222.7796898157726,
+              "candidate_integral_identity_residual": 1.4832579608992091e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 8,
+              "step_index": 34,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.2757616341959874,
+              "candidate_proof_lower_bound_slack": 506.0455929527765,
+              "candidate_integral_identity_residual": -3.0462299349665045e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 8,
+              "step_index": 36,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.04303048920701258,
+              "candidate_proof_lower_bound_slack": 514.6144081926169,
+              "candidate_integral_identity_residual": 3.922251412546984e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 8,
+              "step_index": 37,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -0.3476037007658306,
+              "candidate_proof_lower_bound_slack": 580.7399763586433,
+              "candidate_integral_identity_residual": 5.100364575127969e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1025217113",
+              "record_id": "sdv2-0308",
+              "target_id": "309066cf858c34737205ab124317eed26efc12be02224f2a31c62f11c99d45f9",
+              "seed": 18,
+              "step_index": 46,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -4.2231682924903,
+              "candidate_proof_lower_bound_slack": 7328.632680864805,
+              "candidate_integral_identity_residual": -7.779465960311427e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 1,
+              "step_index": 30,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -5.636110812118204,
+              "candidate_proof_lower_bound_slack": 1242.1277922065397,
+              "candidate_integral_identity_residual": 6.041389610800252e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 1,
+              "step_index": 40,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 14.717593347886577,
+              "candidate_proof_lower_bound_slack": 7432.116240983598,
+              "candidate_integral_identity_residual": -2.2652102416031994e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 8,
+              "step_index": 20,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 1.5949389994048033,
+              "candidate_proof_lower_bound_slack": 185.88415807572107,
+              "candidate_integral_identity_residual": 5.841993555577574e-13
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 8,
+              "step_index": 25,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.5239884909206012,
+              "candidate_proof_lower_bound_slack": 298.7860726094008,
+              "candidate_integral_identity_residual": -2.9971580772780726e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1131703524",
+              "record_id": "sdv2-0491",
+              "target_id": "c60b57d6f6c660498c1f315f381a01d2fcb09029b17b2adea14923ed33025d36",
+              "seed": 8,
+              "step_index": 28,
+              "candidate_condition_status": "estimated_not_met",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -0.12212930437726754,
+              "candidate_proof_lower_bound_slack": 413.9784332307877,
+              "candidate_integral_identity_residual": -2.223971007353498e-12
+            }
+          ],
+          "classification": "independent_reduction_roundoff_within_preexisting_recorded_source_sensitivity",
+          "maximum_raw_residual": 1.7459456103097182e-09,
+          "maximum_ratio_to_recorded_source_sensitivity": 4.4664890281159643e-10
+        },
+        "integral_identity_outside_recorded_uncertainty": {
+          "count": 10,
+          "examples": [
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 37,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 4.69137660249887,
+              "candidate_proof_lower_bound_slack": 2349.1027760996585,
+              "candidate_integral_identity_residual": 1.2535750215647568e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 38,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 7.684256362830638,
+              "candidate_proof_lower_bound_slack": 1725.2825886793378,
+              "candidate_integral_identity_residual": 1.2505552149377763e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 40,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 17.054488023175473,
+              "candidate_proof_lower_bound_slack": 2514.165096971151,
+              "candidate_integral_identity_residual": 1.4416912108572433e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 41,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 24.1256231405592,
+              "candidate_proof_lower_bound_slack": 3132.8573441599488,
+              "candidate_integral_identity_residual": -2.4101609596982598e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 28,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 3.7928476298303107,
+              "candidate_proof_lower_bound_slack": 467.3314557948893,
+              "candidate_integral_identity_residual": -1.7368328997235949e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 35,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.8280494908122289,
+              "candidate_proof_lower_bound_slack": 950.835193066062,
+              "candidate_integral_identity_residual": 1.0070833056374795e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 36,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 1.6079043486779474,
+              "candidate_proof_lower_bound_slack": 1026.0149128104786,
+              "candidate_integral_identity_residual": -1.885824829628291e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 40,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 4.596347687194747,
+              "candidate_proof_lower_bound_slack": 1514.128801165421,
+              "candidate_integral_identity_residual": -1.0026646179994714e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "776379145",
+              "record_id": "sdv2-0439",
+              "target_id": "0880f7e2e2f4bdca9871f9f0966dd2e4a736b9064f4ebbc11ef8e9e307af525b",
+              "seed": 19,
+              "step_index": 48,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 16598.686957415193,
+              "candidate_proof_lower_bound_slack": 3987658.4289269755,
+              "candidate_integral_identity_residual": 0.00033168529625982046
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "883531181",
+              "record_id": "sdv2-0367",
+              "target_id": "d8d86f2e69bf9fe15627c5df75e1a2b3cf9364d950448945617561fc8150e5dd",
+              "seed": 16,
+              "step_index": 23,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -1.044702593007436,
+              "candidate_proof_lower_bound_slack": 292.29005514951723,
+              "candidate_integral_identity_residual": 8.988365607365267e-13
+            }
+          ],
+          "classification": "producer_recorded_numerically_unresolved; flags_and_thresholds_unchanged",
+          "investigation": "docs/theory/numerical_qa_investigation.md"
+        },
+        "saved_integral_QA_inconsistency": {
+          "count": 10,
+          "examples": [
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 37,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 4.69137660249887,
+              "candidate_proof_lower_bound_slack": 2349.1027760996585,
+              "candidate_integral_identity_residual": 1.2535750215647568e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 38,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 7.684256362830638,
+              "candidate_proof_lower_bound_slack": 1725.2825886793378,
+              "candidate_integral_identity_residual": 1.2505552149377763e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 40,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 17.054488023175473,
+              "candidate_proof_lower_bound_slack": 2514.165096971151,
+              "candidate_integral_identity_residual": 1.4416912108572433e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1304810786",
+              "record_id": "sdv2-0375",
+              "target_id": "0f614fbc91e83eb09895ee92bdb3d14f1d61195909bd93c1aca741c40cce08ce",
+              "seed": 18,
+              "step_index": 41,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 24.1256231405592,
+              "candidate_proof_lower_bound_slack": 3132.8573441599488,
+              "candidate_integral_identity_residual": -2.4101609596982598e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 28,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 3.7928476298303107,
+              "candidate_proof_lower_bound_slack": 467.3314557948893,
+              "candidate_integral_identity_residual": -1.7368328997235949e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 35,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 0.8280494908122289,
+              "candidate_proof_lower_bound_slack": 950.835193066062,
+              "candidate_integral_identity_residual": 1.0070833056374795e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 36,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 1.6079043486779474,
+              "candidate_proof_lower_bound_slack": 1026.0149128104786,
+              "candidate_integral_identity_residual": -1.885824829628291e-12
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "1394512001",
+              "record_id": "sdv2-0235",
+              "target_id": "09d0d28cc566bee5c04ef2c28914b3f9474d91387844df8f9c2618980643403f",
+              "seed": 5,
+              "step_index": 40,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 4.596347687194747,
+              "candidate_proof_lower_bound_slack": 1514.128801165421,
+              "candidate_integral_identity_residual": -1.0026646179994714e-11
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "776379145",
+              "record_id": "sdv2-0439",
+              "target_id": "0880f7e2e2f4bdca9871f9f0966dd2e4a736b9064f4ebbc11ef8e9e307af525b",
+              "seed": 19,
+              "step_index": 48,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "positive",
+              "candidate_log_probability_gain": 16598.686957415193,
+              "candidate_proof_lower_bound_slack": 3987658.4289269755,
+              "candidate_integral_identity_residual": 0.00033168529625982046
+            },
+            {
+              "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+              "original_index": "883531181",
+              "record_id": "sdv2-0367",
+              "target_id": "d8d86f2e69bf9fe15627c5df75e1a2b3cf9364d950448945617561fc8150e5dd",
+              "seed": 16,
+              "step_index": 23,
+              "candidate_condition_status": "numerically_unresolved",
+              "candidate_gain_status": "negative",
+              "candidate_log_probability_gain": -1.044702593007436,
+              "candidate_proof_lower_bound_slack": 292.29005514951723,
+              "candidate_integral_identity_residual": 8.988365607365267e-13
+            }
+          ],
+          "classification": "producer_recorded_numerically_unresolved; flags_and_thresholds_unchanged",
+          "investigation": "docs/theory/numerical_qa_investigation.md"
+        }
+      },
+      "producer_recorded_numerical_issue_rows": 10,
+      "prompt_count": 86,
+      "seeds_per_prompt": 20,
+      "steps_per_seed": 50,
+      "trajectory_row_count": 86000,
+      "initial_row_count": 1720,
+      "endpoint_row_count": 1720,
+      "unique_initial_baseline_count": 20,
+      "eligible_feedback_count": 84280,
+      "ineligible_feedback_status_counts": {
+        "terminal_transition_not_in_Proposition5": 1720
+      },
+      "condition_status_counts": {
+        "estimated_not_met": 83721,
+        "numerically_unresolved": 559
+      },
+      "condition_met_count": 0,
+      "condition_coverage_denominator": 84280,
+      "condition_coverage": 0.0,
+      "condition_interpretation": "numerically estimated, not a formal certificate",
+      "gain_status_counts": {
+        "negative": 53432,
+        "positive": 30848
+      },
+      "condition_met_gain_status_counts": {},
+      "saturated_count": 7045,
+      "underflow_count": 3192,
+      "underflow_resolved_sign_counts": {
+        "positive": 2107,
+        "negative": 1085
+      },
+      "high_sscd_eligible_count": 5047,
+      "negative_high_sscd_count": 1414,
+      "negative_high_sscd_most_negative_H_examples": [
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "1364237246",
+          "record_id": "sdv2-0057",
+          "target_id": "ae8ea91004fe98253734446a54442223016081d6d5aab0cb9666b99cbd4dc05d",
+          "seed": 16,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.7626419067382812,
+          "candidate_condition_margin_rmse": -0.7291761942989692,
+          "candidate_log_probability_gain": -4546.71318184468,
+          "candidate_log_odds_gain": -4546.71318184468,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "282677491",
+          "record_id": "sdv2-0120",
+          "target_id": "522f2c62d780c575b57322cd9289c3f8780367b222aded392eeaf75698789cfd",
+          "seed": 2,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.7823075652122498,
+          "candidate_condition_margin_rmse": -0.7751312109508552,
+          "candidate_log_probability_gain": -2428.489075805177,
+          "candidate_log_odds_gain": -2428.489075805177,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "450132373",
+          "record_id": "sdv2-0076",
+          "target_id": "8325b1e5815b2754486adc82526601e4c59741a9e600db4083292276eabdc367",
+          "seed": 1,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.8421241044998169,
+          "candidate_condition_margin_rmse": -0.9006466708467792,
+          "candidate_log_probability_gain": -2355.882539736107,
+          "candidate_log_odds_gain": -2355.882539736107,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "447331956",
+          "record_id": "sdv2-0077",
+          "target_id": "a5553aff42995a28d3e3f1a06ac86c0b92697464e4bc68eede100ac57457eedc",
+          "seed": 9,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.8880054950714111,
+          "candidate_condition_margin_rmse": -0.5912778207260894,
+          "candidate_log_probability_gain": -2248.5548799448297,
+          "candidate_log_odds_gain": -2248.5548799448297,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "447331956",
+          "record_id": "sdv2-0077",
+          "target_id": "a5553aff42995a28d3e3f1a06ac86c0b92697464e4bc68eede100ac57457eedc",
+          "seed": 6,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.8917633295059204,
+          "candidate_condition_margin_rmse": -0.601497016205294,
+          "candidate_log_probability_gain": -1655.0076524552424,
+          "candidate_log_odds_gain": -1655.0076524552424,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "282677491",
+          "record_id": "sdv2-0120",
+          "target_id": "522f2c62d780c575b57322cd9289c3f8780367b222aded392eeaf75698789cfd",
+          "seed": 18,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.7981090545654297,
+          "candidate_condition_margin_rmse": -0.8057990844174265,
+          "candidate_log_probability_gain": -1406.8556140699657,
+          "candidate_log_odds_gain": -1406.8556140699657,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "282677491",
+          "record_id": "sdv2-0120",
+          "target_id": "522f2c62d780c575b57322cd9289c3f8780367b222aded392eeaf75698789cfd",
+          "seed": 13,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.8303791880607605,
+          "candidate_condition_margin_rmse": -0.7979148837826742,
+          "candidate_log_probability_gain": -1320.4475371501176,
+          "candidate_log_odds_gain": -1320.4475371501176,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "1104526415",
+          "record_id": "sdv2-0125",
+          "target_id": "00f5f5ca165a350556b2ea9737b7fbe90226da7fffef6337dd4ee350fd738a52",
+          "seed": 0,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.8819617033004761,
+          "candidate_condition_margin_rmse": -0.7698950456627387,
+          "candidate_log_probability_gain": -1193.412128556869,
+          "candidate_log_odds_gain": -2878.3274195182603,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "1599798982",
+          "record_id": "sdv2-0153",
+          "target_id": "9f5004cbf0a9a4fe051b3b47899736ae4a0078726ca9d17fe67df44453fa59d4",
+          "seed": 1,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.8458908200263977,
+          "candidate_condition_margin_rmse": -0.631238779715508,
+          "candidate_log_probability_gain": -1058.8219951604842,
+          "candidate_log_odds_gain": -1058.8219951604842,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        },
+        {
+          "run_id": "4922e621100eb880b7523f40b80c95014b17014df7b21d0cbce435c4a7de9331",
+          "original_index": "282677491",
+          "record_id": "sdv2-0120",
+          "target_id": "522f2c62d780c575b57322cd9289c3f8780367b222aded392eeaf75698789cfd",
+          "seed": 3,
+          "step_index": 48,
+          "snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "terminal_sscd": 0.8020867109298706,
+          "candidate_condition_margin_rmse": -0.7764848305105045,
+          "candidate_log_probability_gain": -829.2082634755643,
+          "candidate_log_odds_gain": -829.2082634755643,
+          "candidate_gain_status": "negative",
+          "candidate_gain_underflow": false
+        }
+      ],
+      "integral_status_counts": {
+        "estimated_converged": 84280
+      },
+      "integral_QA_counts": {
+        "consistent_with_numerical_estimates": 84270,
+        "numerical_inconsistency": 10
+      },
+      "quadrature_budget_exhausted_count": 0,
+      "maximum_integral_identity_error_allowance_ratio": 3.5052631700486088,
+      "minimum_proof_lower_bound_slack": 6.217651419669445,
+      "maximum_margin_component_identity_residual": 1.7459456103097182e-09,
+      "terminal_clean_applicable_count": 0,
+      "terminal_clean_inapplicable_count": 1720,
+      "metric_quantiles": {
+        "candidate_condition_margin_rmse": {
+          "0": -3.887370067611247,
+          "0.01": -2.7549978224333658,
+          "0.25": -1.8513077596514744,
+          "0.5": -1.446036912969527,
+          "0.75": -1.249255297083142,
+          "0.99": -0.42808496777454125,
+          "1": -0.27748039352550524
+        },
+        "candidate_variation_l2": {
+          "0": 0.0,
+          "0.01": 0.0,
+          "0.25": 0.0,
+          "0.5": 8.281507619458098e-54,
+          "0.75": 1.435553156523632e-05,
+          "0.99": 71.18225326363648,
+          "1": 151.6970921846275
+        },
+        "candidate_variation_error_l2": {
+          "0": 0.0,
+          "0.01": 0.0,
+          "0.25": 0.0,
+          "0.5": 1.1423453318608556e-67,
+          "0.75": 6.624108711899907e-16,
+          "0.99": 5.5631179719552963e-05,
+          "1": 0.0010157539728026382
+        },
+        "candidate_condition_numerical_uncertainty_l2": {
+          "0": 3.0591890991267676,
+          "0.01": 3.8629722892319216,
+          "0.25": 7.322934705844014,
+          "0.5": 13.799886805244377,
+          "0.75": 32.00761054941437,
+          "0.99": 104.91871552476984,
+          "1": 105.95028636232658
+        },
+        "candidate_log_probability_gain": {
+          "0": -38295.384475966915,
+          "0.01": -1268.7915764909578,
+          "0.25": -11.210387057318428,
+          "0.5": -2.524949250083507,
+          "0.75": 0.8996818537021056,
+          "0.99": 278.568908398978,
+          "1": 85431.77535278164
+        },
+        "candidate_log_odds_gain": {
+          "0": -38295.384475966915,
+          "0.01": -1521.9543733267471,
+          "0.25": -11.555879297965886,
+          "0.5": -2.9202779560987437,
+          "0.75": 2.200000434213235,
+          "0.99": 360.73591719740654,
+          "1": 85431.77535278164
+        },
+        "candidate_quadrature_evaluations": {
+          "0": 30.0,
+          "0.01": 30.0,
+          "0.25": 30.0,
+          "0.5": 30.0,
+          "0.75": 30.0,
+          "0.99": 135.0,
+          "1": 210.0
+        },
+        "candidate_quadrature_refinements": {
+          "0": 0.0,
+          "0.01": 0.0,
+          "0.25": 0.0,
+          "0.5": 0.0,
+          "0.75": 0.0,
+          "0.99": 3.0,
+          "1": 6.0
+        },
+        "candidate_integral_identity_residual": {
+          "0": -8.384078682865947e-06,
+          "0.01": -2.508170382498065e-10,
+          "0.25": -4.1311398746302075e-13,
+          "0.5": 0.0,
+          "0.75": 4.2543746303636e-13,
+          "0.99": 2.0541392586892762e-10,
+          "1": 0.00033168529625982046
+        }
+      },
+      "timestep_summaries": [
+        {
+          "step_index": 0,
+          "source_timestep": 981,
+          "destination_timestep": 961,
+          "source_snr": 0.00580904601943496,
+          "destination_snr": 0.00733513444538153,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1654,
+            "numerically_unresolved": 66
+          },
+          "gain_status_counts": {
+            "positive": 1407,
+            "negative": 313
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 0,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 0,
+          "log_probability_gain_quantiles": {
+            "0": -34.6848173425631,
+            "0.01": -29.454698522883728,
+            "0.25": 1.7001896646720205,
+            "0.5": 4.667766823007247,
+            "0.75": 9.067137632422357,
+            "0.99": 41.68444886061783,
+            "1": 56.28744267070133
+          }
+        },
+        {
+          "step_index": 1,
+          "source_timestep": 961,
+          "destination_timestep": 941,
+          "source_snr": 0.00733513444538153,
+          "destination_snr": 0.009201192540422362,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1635,
+            "numerically_unresolved": 85
+          },
+          "gain_status_counts": {
+            "positive": 1083,
+            "negative": 637
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 0,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 10,
+          "log_probability_gain_quantiles": {
+            "0": -61.32423238466211,
+            "0.01": -55.033588389582775,
+            "0.25": -7.988962387564949,
+            "0.5": 2.498976886821783,
+            "0.75": 7.166539140303209,
+            "0.99": 47.22098058754784,
+            "1": 64.57789986316627
+          }
+        },
+        {
+          "step_index": 2,
+          "source_timestep": 941,
+          "destination_timestep": 921,
+          "source_snr": 0.009201192540422362,
+          "destination_snr": 0.011467925559610233,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1610,
+            "numerically_unresolved": 110
+          },
+          "gain_status_counts": {
+            "negative": 887,
+            "positive": 833
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 3,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 20,
+          "log_probability_gain_quantiles": {
+            "0": -74.1474005297792,
+            "0.01": -63.607353940391214,
+            "0.25": -11.586223391534968,
+            "0.5": -0.16826263689941767,
+            "0.75": 4.052685256694968,
+            "0.99": 28.738777873479563,
+            "1": 53.78915892981858
+          }
+        },
+        {
+          "step_index": 3,
+          "source_timestep": 921,
+          "destination_timestep": 901,
+          "source_snr": 0.011467925559610233,
+          "destination_snr": 0.014203811750479436,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1623,
+            "numerically_unresolved": 97
+          },
+          "gain_status_counts": {
+            "negative": 1002,
+            "positive": 718
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 17,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 24,
+          "log_probability_gain_quantiles": {
+            "0": -73.8596739130885,
+            "0.01": -46.41543732896406,
+            "0.25": -10.043552821262317,
+            "0.5": -1.4636895508251282,
+            "0.75": 1.9742034120990282,
+            "0.99": 18.88751789009498,
+            "1": 55.882250269490385
+          }
+        },
+        {
+          "step_index": 4,
+          "source_timestep": 901,
+          "destination_timestep": 881,
+          "source_snr": 0.014203811750479436,
+          "destination_snr": 0.01748565082244614,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1642,
+            "numerically_unresolved": 78
+          },
+          "gain_status_counts": {
+            "negative": 1037,
+            "positive": 683
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 29,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 27,
+          "log_probability_gain_quantiles": {
+            "0": -76.88247379393692,
+            "0.01": -39.695255282175424,
+            "0.25": -9.595630878570958,
+            "0.5": -1.8707180751017818,
+            "0.75": 1.1016467817277267,
+            "0.99": 17.56959379755298,
+            "1": 55.76982903621688
+          }
+        },
+        {
+          "step_index": 5,
+          "source_timestep": 881,
+          "destination_timestep": 861,
+          "source_snr": 0.01748565082244614,
+          "destination_snr": 0.021399134498356096,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1659,
+            "numerically_unresolved": 61
+          },
+          "gain_status_counts": {
+            "negative": 1088,
+            "positive": 632
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 43,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 26,
+          "log_probability_gain_quantiles": {
+            "0": -97.18283389664725,
+            "0.01": -35.31286948760911,
+            "0.25": -9.5163352834239,
+            "0.5": -2.294066239627824,
+            "0.75": 0.6529356156348336,
+            "0.99": 15.606223899235234,
+            "1": 55.18138637615171
+          }
+        },
+        {
+          "step_index": 6,
+          "source_timestep": 861,
+          "destination_timestep": 841,
+          "source_snr": 0.021399134498356096,
+          "destination_snr": 0.026039444400403115,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1689,
+            "numerically_unresolved": 31
+          },
+          "gain_status_counts": {
+            "negative": 1134,
+            "positive": 586
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 48,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 29,
+          "log_probability_gain_quantiles": {
+            "0": -66.03695628198028,
+            "0.01": -36.398247637468515,
+            "0.25": -9.742542620913042,
+            "0.5": -2.695803458787232,
+            "0.75": 0.19225143974294667,
+            "0.99": 13.241353066602693,
+            "1": 56.892735303583734
+          }
+        },
+        {
+          "step_index": 7,
+          "source_timestep": 841,
+          "destination_timestep": 821,
+          "source_snr": 0.026039444400403115,
+          "destination_snr": 0.031511915958837726,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1702,
+            "numerically_unresolved": 18
+          },
+          "gain_status_counts": {
+            "negative": 1159,
+            "positive": 561
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 55,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 30,
+          "log_probability_gain_quantiles": {
+            "0": -78.99124604084068,
+            "0.01": -35.620681097450145,
+            "0.25": -9.806230704513112,
+            "0.5": -2.9414868883714913,
+            "0.75": 0.04714986629379098,
+            "0.99": 11.206579026889713,
+            "1": 41.49755399274387
+          }
+        },
+        {
+          "step_index": 8,
+          "source_timestep": 821,
+          "destination_timestep": 801,
+          "source_snr": 0.031511915958837726,
+          "destination_snr": 0.03793280590601343,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1717,
+            "numerically_unresolved": 3
+          },
+          "gain_status_counts": {
+            "negative": 1180,
+            "positive": 540
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 64,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 29,
+          "log_probability_gain_quantiles": {
+            "0": -154.88668324051807,
+            "0.01": -34.52887543350424,
+            "0.25": -9.589364486019761,
+            "0.5": -3.033427449922641,
+            "0.75": 0.00062929886921423,
+            "0.99": 10.095774219409321,
+            "1": 38.55754930444628
+          }
+        },
+        {
+          "step_index": 9,
+          "source_timestep": 801,
+          "destination_timestep": 781,
+          "source_snr": 0.03793280590601343,
+          "destination_snr": 0.04543018215426,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1197,
+            "positive": 523
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 74,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 29,
+          "log_probability_gain_quantiles": {
+            "0": -85.58484455046232,
+            "0.01": -32.153440401486264,
+            "0.25": -9.339971794648335,
+            "0.5": -3.0654124830563774,
+            "0.75": 3.0466755953757743e-07,
+            "0.99": 9.661326543341946,
+            "1": 59.00673262439432
+          }
+        },
+        {
+          "step_index": 10,
+          "source_timestep": 781,
+          "destination_timestep": 761,
+          "source_snr": 0.04543018215426,
+          "destination_snr": 0.054144977916518025,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1218,
+            "positive": 502
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 82,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 30,
+          "log_probability_gain_quantiles": {
+            "0": -74.84238857549263,
+            "0.01": -33.23621592679358,
+            "0.25": -9.223149455945213,
+            "0.5": -3.161240320708032,
+            "0.75": 1.3177917848801291e-14,
+            "0.99": 7.046517969680157,
+            "1": 83.93168386724705
+          }
+        },
+        {
+          "step_index": 11,
+          "source_timestep": 761,
+          "destination_timestep": 741,
+          "source_snr": 0.054144977916518025,
+          "destination_snr": 0.0642322954424198,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1219,
+            "positive": 501
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 92,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 28,
+          "log_probability_gain_quantiles": {
+            "0": -83.76592762948724,
+            "0.01": -35.029887508164215,
+            "0.25": -9.078665710899593,
+            "0.5": -3.305682052636147,
+            "0.75": 3.7849302168751823e-20,
+            "0.99": 7.593951037704836,
+            "1": 25.856610115793046
+          }
+        },
+        {
+          "step_index": 12,
+          "source_timestep": 741,
+          "destination_timestep": 721,
+          "source_snr": 0.0642322954424198,
+          "destination_snr": 0.07586302135361327,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1229,
+            "positive": 491
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 106,
+          "underflow_count": 0,
+          "high_sscd_negative_gain_count": 26,
+          "log_probability_gain_quantiles": {
+            "0": -72.22103377872952,
+            "0.01": -33.18887088928806,
+            "0.25": -9.084494045073228,
+            "0.5": -3.376829983145889,
+            "0.75": 4.1244302846626625e-29,
+            "0.99": 7.366812247883713,
+            "1": 28.841521985774534
+          }
+        },
+        {
+          "step_index": 13,
+          "source_timestep": 721,
+          "destination_timestep": 701,
+          "source_snr": 0.07586302135361327,
+          "destination_snr": 0.08922572536970169,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1232,
+            "positive": 488
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 115,
+          "underflow_count": 3,
+          "high_sscd_negative_gain_count": 25,
+          "log_probability_gain_quantiles": {
+            "0": -76.93731992145814,
+            "0.01": -36.98926463628103,
+            "0.25": -8.89207191846458,
+            "0.5": -3.3704102794023356,
+            "0.75": 4.947124559478759e-36,
+            "0.99": 7.045444802355266,
+            "1": 28.621668837274683
+          }
+        },
+        {
+          "step_index": 14,
+          "source_timestep": 701,
+          "destination_timestep": 681,
+          "source_snr": 0.08922572536970169,
+          "destination_snr": 0.10452913328431038,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1226,
+            "positive": 494
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 124,
+          "underflow_count": 5,
+          "high_sscd_negative_gain_count": 29,
+          "log_probability_gain_quantiles": {
+            "0": -89.62238380079725,
+            "0.01": -38.446185252691116,
+            "0.25": -8.527018851690968,
+            "0.5": -3.2485063764014512,
+            "0.75": 1.454432229995481e-38,
+            "0.99": 7.111007203543226,
+            "1": 28.784928361483253
+          }
+        },
+        {
+          "step_index": 15,
+          "source_timestep": 681,
+          "destination_timestep": 661,
+          "source_snr": 0.10452913328431038,
+          "destination_snr": 0.12200511643662666,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1222,
+            "positive": 498
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 129,
+          "underflow_count": 5,
+          "high_sscd_negative_gain_count": 26,
+          "log_probability_gain_quantiles": {
+            "0": -238.13857392573118,
+            "0.01": -37.97701800498332,
+            "0.25": -8.486841183355807,
+            "0.5": -3.206348845291757,
+            "0.75": 2.295051447194071e-42,
+            "0.99": 6.463771829560497,
+            "1": 28.59355076246493
+          }
+        },
+        {
+          "step_index": 16,
+          "source_timestep": 661,
+          "destination_timestep": 641,
+          "source_snr": 0.12200511643662666,
+          "destination_snr": 0.1419122301635802,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1221,
+            "positive": 499
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 135,
+          "underflow_count": 5,
+          "high_sscd_negative_gain_count": 27,
+          "log_probability_gain_quantiles": {
+            "0": -61.92282169795885,
+            "0.01": -38.16346560441668,
+            "0.25": -8.63466633904494,
+            "0.5": -3.1559888661377045,
+            "0.75": 5.881157308426284e-46,
+            "0.99": 6.628680608179674,
+            "1": 25.642075236795108
+          }
+        },
+        {
+          "step_index": 17,
+          "source_timestep": 641,
+          "destination_timestep": 621,
+          "source_snr": 0.1419122301635802,
+          "destination_snr": 0.1645403048998945,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1225,
+            "positive": 495
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 142,
+          "underflow_count": 6,
+          "high_sscd_negative_gain_count": 27,
+          "log_probability_gain_quantiles": {
+            "0": -60.77461884101558,
+            "0.01": -38.015892129658475,
+            "0.25": -8.86526337194266,
+            "0.5": -3.1726930237230135,
+            "0.75": 1.7792249301097657e-63,
+            "0.99": 6.7605162647469195,
+            "1": 20.766792052166693
+          }
+        },
+        {
+          "step_index": 18,
+          "source_timestep": 621,
+          "destination_timestep": 601,
+          "source_snr": 0.1645403048998945,
+          "destination_snr": 0.19021593659963015,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1223,
+            "positive": 497
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 150,
+          "underflow_count": 6,
+          "high_sscd_negative_gain_count": 28,
+          "log_probability_gain_quantiles": {
+            "0": -264.8669302300741,
+            "0.01": -39.00971028150681,
+            "0.25": -8.933175564976523,
+            "0.5": -3.143819443908228,
+            "0.75": 2.5073737056870324e-64,
+            "0.99": 6.841518001976316,
+            "1": 16.337088823160002
+          }
+        },
+        {
+          "step_index": 19,
+          "source_timestep": 601,
+          "destination_timestep": 581,
+          "source_snr": 0.19021593659963015,
+          "destination_snr": 0.21930915473754772,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1217,
+            "positive": 503
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 158,
+          "underflow_count": 8,
+          "high_sscd_negative_gain_count": 27,
+          "log_probability_gain_quantiles": {
+            "0": -224.56247154564517,
+            "0.01": -39.35942233227061,
+            "0.25": -8.976508061646484,
+            "0.5": -3.240471104535345,
+            "0.75": 3.694411924368907e-67,
+            "0.99": 6.399759719363553,
+            "1": 13.564409654831707
+          }
+        },
+        {
+          "step_index": 20,
+          "source_timestep": 581,
+          "destination_timestep": 561,
+          "source_snr": 0.21930915473754772,
+          "destination_snr": 0.25224201017447523,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1215,
+            "positive": 505
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 160,
+          "underflow_count": 16,
+          "high_sscd_negative_gain_count": 23,
+          "log_probability_gain_quantiles": {
+            "0": -294.26616504258436,
+            "0.01": -40.59771778775874,
+            "0.25": -9.018916036498126,
+            "0.5": -3.264154692022526,
+            "0.75": 1.40875039689038e-75,
+            "0.99": 6.805073871076201,
+            "1": 17.381478319167627
+          }
+        },
+        {
+          "step_index": 21,
+          "source_timestep": 561,
+          "destination_timestep": 541,
+          "source_snr": 0.25224201017447523,
+          "destination_snr": 0.28949840737237414,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1216,
+            "positive": 504
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 169,
+          "underflow_count": 25,
+          "high_sscd_negative_gain_count": 23,
+          "log_probability_gain_quantiles": {
+            "0": -164.32916570469752,
+            "0.01": -40.17634147878048,
+            "0.25": -9.226959475760111,
+            "0.5": -3.1792952848824143,
+            "0.75": 3.2857135109388114e-87,
+            "0.99": 7.278570000875404,
+            "1": 18.592507722995833
+          }
+        },
+        {
+          "step_index": 22,
+          "source_timestep": 541,
+          "destination_timestep": 521,
+          "source_snr": 0.28949840737237414,
+          "destination_snr": 0.33163718524954394,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1197,
+            "positive": 523
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 170,
+          "underflow_count": 31,
+          "high_sscd_negative_gain_count": 21,
+          "log_probability_gain_quantiles": {
+            "0": -228.50341370424485,
+            "0.01": -40.9973445698374,
+            "0.25": -9.322563742740158,
+            "0.5": -3.1028355103342165,
+            "0.75": 4.0961854027931194e-66,
+            "0.99": 7.5576421747691205,
+            "1": 13.628101289487859
+          }
+        },
+        {
+          "step_index": 23,
+          "source_timestep": 521,
+          "destination_timestep": 501,
+          "source_snr": 0.33163718524954394,
+          "destination_snr": 0.3793081449165005,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1719,
+            "numerically_unresolved": 1
+          },
+          "gain_status_counts": {
+            "negative": 1187,
+            "positive": 533
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 172,
+          "underflow_count": 38,
+          "high_sscd_negative_gain_count": 21,
+          "log_probability_gain_quantiles": {
+            "0": -147.96984009700827,
+            "0.01": -43.499452138027806,
+            "0.25": -9.586659616927818,
+            "0.5": -3.0834075132413545,
+            "0.75": 7.367644127453762e-55,
+            "0.99": 7.715605489946712,
+            "1": 16.418314366115737
+          }
+        },
+        {
+          "step_index": 24,
+          "source_timestep": 501,
+          "destination_timestep": 481,
+          "source_snr": 0.3793081449165005,
+          "destination_snr": 0.4332714253251024,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1182,
+            "positive": 538
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 175,
+          "underflow_count": 44,
+          "high_sscd_negative_gain_count": 20,
+          "log_probability_gain_quantiles": {
+            "0": -212.1409484884207,
+            "0.01": -44.68919132853918,
+            "0.25": -9.581951072132597,
+            "0.5": -2.9589629451083965,
+            "0.75": 7.796651776132671e-52,
+            "0.99": 8.156106234004103,
+            "1": 15.395909561277222
+          }
+        },
+        {
+          "step_index": 25,
+          "source_timestep": 481,
+          "destination_timestep": 461,
+          "source_snr": 0.4332714253251024,
+          "destination_snr": 0.49442299776663384,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1172,
+            "positive": 548
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 175,
+          "underflow_count": 46,
+          "high_sscd_negative_gain_count": 21,
+          "log_probability_gain_quantiles": {
+            "0": -309.25997510097113,
+            "0.01": -44.931024741059346,
+            "0.25": -9.410213919650914,
+            "0.5": -3.0335998656228185,
+            "0.75": 2.1483968350329872e-39,
+            "0.99": 9.315468531676363,
+            "1": 16.381051527758245
+          }
+        },
+        {
+          "step_index": 26,
+          "source_timestep": 461,
+          "destination_timestep": 441,
+          "source_snr": 0.49442299776663384,
+          "destination_snr": 0.5638267672858215,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1154,
+            "positive": 566
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 178,
+          "underflow_count": 49,
+          "high_sscd_negative_gain_count": 22,
+          "log_probability_gain_quantiles": {
+            "0": -177.664294848204,
+            "0.01": -46.0697638552743,
+            "0.25": -9.36935277322641,
+            "0.5": -2.8414588898349393,
+            "0.75": 1.9030659417262964e-17,
+            "0.99": 9.512748956369297,
+            "1": 19.751651203112488
+          }
+        },
+        {
+          "step_index": 27,
+          "source_timestep": 441,
+          "destination_timestep": 421,
+          "source_snr": 0.5638267672858215,
+          "destination_snr": 0.6427557894352394,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1141,
+            "positive": 579
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 181,
+          "underflow_count": 56,
+          "high_sscd_negative_gain_count": 21,
+          "log_probability_gain_quantiles": {
+            "0": -254.80935604985825,
+            "0.01": -47.84447663656874,
+            "0.25": -9.233823676888505,
+            "0.5": -2.6747809937414786,
+            "0.75": 0.0001902678102102505,
+            "0.99": 10.173624115860418,
+            "1": 23.348030443445168
+          }
+        },
+        {
+          "step_index": 28,
+          "source_timestep": 421,
+          "destination_timestep": 401,
+          "source_snr": 0.6427557894352394,
+          "destination_snr": 0.7327458095553345,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1719,
+            "numerically_unresolved": 1
+          },
+          "gain_status_counts": {
+            "negative": 1136,
+            "positive": 584
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 181,
+          "underflow_count": 67,
+          "high_sscd_negative_gain_count": 22,
+          "log_probability_gain_quantiles": {
+            "0": -203.53121643580926,
+            "0.01": -49.645917507806715,
+            "0.25": -8.953552008979841,
+            "0.5": -2.5022391705356313,
+            "0.75": 0.021694111400051952,
+            "0.99": 11.118525491292235,
+            "1": 28.60327504955785
+          }
+        },
+        {
+          "step_index": 29,
+          "source_timestep": 401,
+          "destination_timestep": 381,
+          "source_snr": 0.7327458095553345,
+          "destination_snr": 0.8356658710976943,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1128,
+            "positive": 592
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 189,
+          "underflow_count": 71,
+          "high_sscd_negative_gain_count": 27,
+          "log_probability_gain_quantiles": {
+            "0": -198.72211885290199,
+            "0.01": -51.98658450894472,
+            "0.25": -8.937756579657389,
+            "0.5": -2.5635168987646466,
+            "0.75": 0.2250574905783651,
+            "0.99": 12.40847785274199,
+            "1": 35.810232393208935
+          }
+        },
+        {
+          "step_index": 30,
+          "source_timestep": 381,
+          "destination_timestep": 361,
+          "source_snr": 0.8356658710976943,
+          "destination_snr": 0.9538126135339813,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1112,
+            "positive": 608
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 190,
+          "underflow_count": 80,
+          "high_sscd_negative_gain_count": 30,
+          "log_probability_gain_quantiles": {
+            "0": -149.0604709648469,
+            "0.01": -54.26459945507042,
+            "0.25": -9.08862685998929,
+            "0.5": -2.383715143749214,
+            "0.75": 0.49861022224289503,
+            "0.99": 14.574694294795036,
+            "1": 44.133455536724796
+          }
+        },
+        {
+          "step_index": 31,
+          "source_timestep": 361,
+          "destination_timestep": 341,
+          "source_snr": 0.9538126135339813,
+          "destination_snr": 1.0900369915714432,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1083,
+            "positive": 637
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 193,
+          "underflow_count": 85,
+          "high_sscd_negative_gain_count": 31,
+          "log_probability_gain_quantiles": {
+            "0": -138.55996567265174,
+            "0.01": -56.97657482736514,
+            "0.25": -9.232979065899599,
+            "0.5": -2.091648678921729,
+            "0.75": 0.7865986646297642,
+            "0.99": 16.374673404436713,
+            "1": 63.43313125441273
+          }
+        },
+        {
+          "step_index": 32,
+          "source_timestep": 341,
+          "destination_timestep": 321,
+          "source_snr": 1.0900369915714432,
+          "destination_snr": 1.247919692806575,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1059,
+            "positive": 661
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 192,
+          "underflow_count": 97,
+          "high_sscd_negative_gain_count": 31,
+          "log_probability_gain_quantiles": {
+            "0": -99.68204416170556,
+            "0.01": -53.66011372149503,
+            "0.25": -9.17334746196775,
+            "0.5": -1.8966831713705687,
+            "0.75": 1.1449444711606702,
+            "0.99": 18.51369608169546,
+            "1": 85.95664872211273
+          }
+        },
+        {
+          "step_index": 33,
+          "source_timestep": 321,
+          "destination_timestep": 301,
+          "source_snr": 1.247919692806575,
+          "destination_snr": 1.432015623147237,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1041,
+            "positive": 679
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 193,
+          "underflow_count": 104,
+          "high_sscd_negative_gain_count": 32,
+          "log_probability_gain_quantiles": {
+            "0": -117.94567832533357,
+            "0.01": -57.80055493396223,
+            "0.25": -9.972423228057323,
+            "0.5": -1.8061816271065254,
+            "0.75": 1.349003465574242,
+            "0.99": 19.97030790622317,
+            "1": 106.42891658620647
+          }
+        },
+        {
+          "step_index": 34,
+          "source_timestep": 301,
+          "destination_timestep": 281,
+          "source_snr": 1.432015623147237,
+          "destination_snr": 1.6482004796279652,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1028,
+            "positive": 692
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 193,
+          "underflow_count": 109,
+          "high_sscd_negative_gain_count": 32,
+          "log_probability_gain_quantiles": {
+            "0": -130.5380764254769,
+            "0.01": -56.29466628164198,
+            "0.25": -10.214473234064371,
+            "0.5": -1.6018366543485172,
+            "0.75": 1.7136975134617387,
+            "0.99": 22.876582322905886,
+            "1": 120.90430333653057
+          }
+        },
+        {
+          "step_index": 35,
+          "source_timestep": 281,
+          "destination_timestep": 261,
+          "source_snr": 1.6482004796279652,
+          "destination_snr": 1.9041825957279968,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1719,
+            "numerically_unresolved": 1
+          },
+          "gain_status_counts": {
+            "negative": 1020,
+            "positive": 700
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 193,
+          "underflow_count": 119,
+          "high_sscd_negative_gain_count": 31,
+          "log_probability_gain_quantiles": {
+            "0": -145.98890818527434,
+            "0.01": -60.380579771465236,
+            "0.25": -10.686490703321397,
+            "0.5": -1.4803798428902155,
+            "0.75": 2.1109255240046627,
+            "0.99": 25.837366882859392,
+            "1": 123.35984275538067
+          }
+        },
+        {
+          "step_index": 36,
+          "source_timestep": 261,
+          "destination_timestep": 241,
+          "source_snr": 1.9041825957279968,
+          "destination_snr": 2.210260455025647,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1719,
+            "numerically_unresolved": 1
+          },
+          "gain_status_counts": {
+            "negative": 1018,
+            "positive": 702
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 193,
+          "underflow_count": 122,
+          "high_sscd_negative_gain_count": 33,
+          "log_probability_gain_quantiles": {
+            "0": -164.93369175639964,
+            "0.01": -66.95791470661352,
+            "0.25": -11.15962672288515,
+            "0.5": -1.4079541524242813,
+            "0.75": 2.552721136998116,
+            "0.99": 30.42114917275071,
+            "1": 123.84389746956731
+          }
+        },
+        {
+          "step_index": 37,
+          "source_timestep": 241,
+          "destination_timestep": 221,
+          "source_snr": 2.210260455025647,
+          "destination_snr": 2.580496755783472,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1719,
+            "numerically_unresolved": 1
+          },
+          "gain_status_counts": {
+            "negative": 1017,
+            "positive": 703
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 196,
+          "underflow_count": 133,
+          "high_sscd_negative_gain_count": 30,
+          "log_probability_gain_quantiles": {
+            "0": -178.7377661190112,
+            "0.01": -72.09544551206615,
+            "0.25": -12.040193450742663,
+            "0.5": -1.6481973082345576,
+            "0.75": 2.7422847692851064,
+            "0.99": 34.13989078713157,
+            "1": 156.32044011279504
+          }
+        },
+        {
+          "step_index": 38,
+          "source_timestep": 221,
+          "destination_timestep": 201,
+          "source_snr": 2.580496755783472,
+          "destination_snr": 3.0345858416405163,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1719,
+            "numerically_unresolved": 1
+          },
+          "gain_status_counts": {
+            "negative": 1019,
+            "positive": 701
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 197,
+          "underflow_count": 137,
+          "high_sscd_negative_gain_count": 30,
+          "log_probability_gain_quantiles": {
+            "0": -190.9319922752111,
+            "0.01": -80.80858530865618,
+            "0.25": -13.086184432214395,
+            "0.5": -1.4275353167540743,
+            "0.75": 3.423240937765513,
+            "0.99": 39.7736510734316,
+            "1": 121.2102645796549
+          }
+        },
+        {
+          "step_index": 39,
+          "source_timestep": 201,
+          "destination_timestep": 181,
+          "source_snr": 3.0345858416405163,
+          "destination_snr": 3.6009636203032147,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1017,
+            "positive": 703
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 197,
+          "underflow_count": 145,
+          "high_sscd_negative_gain_count": 30,
+          "log_probability_gain_quantiles": {
+            "0": -208.78936431284092,
+            "0.01": -95.29707938971063,
+            "0.25": -15.550440506920495,
+            "0.5": -1.8980158608064812,
+            "0.75": 3.6264490792600554,
+            "0.99": 46.49396722514683,
+            "1": 168.22095027859905
+          }
+        },
+        {
+          "step_index": 40,
+          "source_timestep": 181,
+          "destination_timestep": 161,
+          "source_snr": 3.6009636203032147,
+          "destination_snr": 4.322190619335511,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1718,
+            "numerically_unresolved": 2
+          },
+          "gain_status_counts": {
+            "negative": 1030,
+            "positive": 690
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 198,
+          "underflow_count": 155,
+          "high_sscd_negative_gain_count": 32,
+          "log_probability_gain_quantiles": {
+            "0": -229.1319061688264,
+            "0.01": -111.83524015811278,
+            "0.25": -19.670751618948998,
+            "0.5": -2.114190390559088,
+            "0.75": 3.9093673987731563,
+            "0.99": 54.30732927044938,
+            "1": 236.41666687163524
+          }
+        },
+        {
+          "step_index": 41,
+          "source_timestep": 161,
+          "destination_timestep": 141,
+          "source_snr": 4.322190619335511,
+          "destination_snr": 5.264940422778143,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1719,
+            "numerically_unresolved": 1
+          },
+          "gain_status_counts": {
+            "negative": 1029,
+            "positive": 691
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 198,
+          "underflow_count": 157,
+          "high_sscd_negative_gain_count": 33,
+          "log_probability_gain_quantiles": {
+            "0": -241.22068883840984,
+            "0.01": -129.61423144663698,
+            "0.25": -24.628933602498364,
+            "0.5": -2.9226883265873767,
+            "0.75": 4.774416969107733,
+            "0.99": 66.01946028368722,
+            "1": 317.45871412573615
+          }
+        },
+        {
+          "step_index": 42,
+          "source_timestep": 141,
+          "destination_timestep": 121,
+          "source_snr": 5.264940422778143,
+          "destination_snr": 6.539752504080591,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1029,
+            "positive": 691
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 199,
+          "underflow_count": 164,
+          "high_sscd_negative_gain_count": 34,
+          "log_probability_gain_quantiles": {
+            "0": -234.08438123669475,
+            "0.01": -164.27172207420023,
+            "0.25": -32.26633843262243,
+            "0.5": -3.5139038558518223,
+            "0.75": 5.870456645905506,
+            "0.99": 87.28554482319541,
+            "1": 419.83657013607444
+          }
+        },
+        {
+          "step_index": 43,
+          "source_timestep": 121,
+          "destination_timestep": 101,
+          "source_snr": 6.539752504080591,
+          "destination_snr": 8.344066869619168,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1029,
+            "positive": 691
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 200,
+          "underflow_count": 169,
+          "high_sscd_negative_gain_count": 35,
+          "log_probability_gain_quantiles": {
+            "0": -299.6930108947272,
+            "0.01": -217.6983879387364,
+            "0.25": -46.57333825439855,
+            "0.5": -5.100238135166364,
+            "0.75": 7.1789793937023205,
+            "0.99": 128.4046140347476,
+            "1": 600.1592395656917
+          }
+        },
+        {
+          "step_index": 44,
+          "source_timestep": 101,
+          "destination_timestep": 81,
+          "source_snr": 8.344066869619168,
+          "destination_snr": 11.068203136239388,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1051,
+            "positive": 669
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 200,
+          "underflow_count": 175,
+          "high_sscd_negative_gain_count": 42,
+          "log_probability_gain_quantiles": {
+            "0": -425.66195382751175,
+            "0.01": -306.36788557075954,
+            "0.25": -73.38487170566805,
+            "0.5": -7.865623145815334,
+            "0.75": 8.703987760207383,
+            "0.99": 206.6161192710558,
+            "1": 933.8254427265201
+          }
+        },
+        {
+          "step_index": 45,
+          "source_timestep": 81,
+          "destination_timestep": 61,
+          "source_snr": 11.068203136239388,
+          "destination_snr": 15.60653404310497,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1067,
+            "positive": 653
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 198,
+          "underflow_count": 182,
+          "high_sscd_negative_gain_count": 47,
+          "log_probability_gain_quantiles": {
+            "0": -641.2401496217353,
+            "0.01": -463.1372386413638,
+            "0.25": -116.55872969972552,
+            "0.5": -11.456759324239101,
+            "0.75": 12.17951022235502,
+            "0.99": 379.0731665733852,
+            "1": 1577.2847217382514
+          }
+        },
+        {
+          "step_index": 46,
+          "source_timestep": 61,
+          "destination_timestep": 41,
+          "source_snr": 15.60653404310497,
+          "destination_snr": 24.55757043969972,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1083,
+            "positive": 637
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 199,
+          "underflow_count": 187,
+          "high_sscd_negative_gain_count": 47,
+          "log_probability_gain_quantiles": {
+            "0": -1076.198815572774,
+            "0.01": -783.4745705574139,
+            "0.25": -214.09917854948435,
+            "0.5": -22.160338719637366,
+            "0.75": 17.889890610531438,
+            "0.99": 767.3119865246131,
+            "1": 2001.7193746611592
+          }
+        },
+        {
+          "step_index": 47,
+          "source_timestep": 41,
+          "destination_timestep": 21,
+          "source_snr": 24.55757043969972,
+          "destination_snr": 49.970099465909996,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1720
+          },
+          "gain_status_counts": {
+            "negative": 1082,
+            "positive": 638
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 200,
+          "underflow_count": 193,
+          "high_sscd_negative_gain_count": 55,
+          "log_probability_gain_quantiles": {
+            "0": -2344.67153582396,
+            "0.01": -1773.748067911017,
+            "0.25": -501.92244355758885,
+            "0.5": -44.393543042824604,
+            "0.75": 49.08403355971677,
+            "0.99": 2175.5306531726874,
+            "1": 4643.58146772522
+          }
+        },
+        {
+          "step_index": 48,
+          "source_timestep": 21,
+          "destination_timestep": 1,
+          "source_snr": 49.970099465909996,
+          "destination_snr": 585.8621799356373,
+          "eligible_count": 1720,
+          "condition_met_count": 0,
+          "condition_status_counts": {
+            "estimated_not_met": 1719,
+            "numerically_unresolved": 1
+          },
+          "gain_status_counts": {
+            "negative": 1024,
+            "positive": 696
+          },
+          "conditional_gain_status_counts": {},
+          "saturated_count": 200,
+          "underflow_count": 198,
+          "high_sscd_negative_gain_count": 61,
+          "log_probability_gain_quantiles": {
+            "0": -38295.384475966915,
+            "0.01": -27768.826426336655,
+            "0.25": -6825.003151178593,
+            "0.5": -376.30641037831083,
+            "0.75": 1527.9421538017923,
+            "0.99": 48374.013040791426,
+            "1": 85431.77535278164
+          }
+        }
+      ]
+    }
+  },
+  "hard_contract_status": "passed",
+  "validation_status": "hard_contract_checks_completed; inspect_preserved_numerical_findings",
+  "formal_numerical_certification": false
+}

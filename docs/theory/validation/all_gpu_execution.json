@@ -1,0 +1,174 @@
+{
+  "sdv1_ddim_g7.5_T50_N20": {
+    "analysis_hash": "81085d1787c9e3f4f09b4f879ff3150cb94b3468ef01ae8b8b48e3104106bd83",
+    "complete": true,
+    "schema_version": 3,
+    "current_failed_record_count": 0,
+    "feedback_source_sha256": "9cc530d31455370646fbbf1be8459c3940fe52033dea78ac00446aebded77fde",
+    "expected_counts": {
+      "endpoint_rows": 4960,
+      "initial_rows": 4960,
+      "prompts": 248,
+      "seeds_per_prompt": 20,
+      "trajectory_rows": 248000
+    },
+    "resolved_devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2"
+    ],
+    "worker_count": 3,
+    "workers": [
+      {
+        "device": "cuda:0",
+        "assigned_records": 83,
+        "completed_records": 83,
+        "failed_records": 0,
+        "duration_seconds": 144.1671473479364
+      },
+      {
+        "device": "cuda:1",
+        "assigned_records": 83,
+        "completed_records": 83,
+        "failed_records": 0,
+        "duration_seconds": 145.54680320387706
+      },
+      {
+        "device": "cuda:2",
+        "assigned_records": 82,
+        "completed_records": 82,
+        "failed_records": 0,
+        "duration_seconds": 143.8172570830211
+      }
+    ]
+  },
+  "sdv1_ddpm_g7.5_T50_N20": {
+    "analysis_hash": "2fe4344cda4ba068436d6361d2c8413c265e9c9ba6efb791a719044d7f45e467",
+    "complete": true,
+    "schema_version": 3,
+    "current_failed_record_count": 0,
+    "feedback_source_sha256": "9cc530d31455370646fbbf1be8459c3940fe52033dea78ac00446aebded77fde",
+    "expected_counts": {
+      "endpoint_rows": 5200,
+      "initial_rows": 5200,
+      "prompts": 260,
+      "seeds_per_prompt": 20,
+      "trajectory_rows": 260000
+    },
+    "resolved_devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2"
+    ],
+    "worker_count": 3,
+    "workers": [
+      {
+        "device": "cuda:0",
+        "assigned_records": 87,
+        "completed_records": 87,
+        "failed_records": 0,
+        "duration_seconds": 167.0204718769528
+      },
+      {
+        "device": "cuda:1",
+        "assigned_records": 87,
+        "completed_records": 87,
+        "failed_records": 0,
+        "duration_seconds": 213.96921560913324
+      },
+      {
+        "device": "cuda:2",
+        "assigned_records": 86,
+        "completed_records": 86,
+        "failed_records": 0,
+        "duration_seconds": 165.87498938804492
+      }
+    ]
+  },
+  "sdv2_ddim_g7.5_T50_N20": {
+    "analysis_hash": "59fd66475728e525fa8f189e3ac1ca8a865309214114aa16a046e87ea63df7f7",
+    "complete": true,
+    "schema_version": 3,
+    "current_failed_record_count": 0,
+    "feedback_source_sha256": "9cc530d31455370646fbbf1be8459c3940fe52033dea78ac00446aebded77fde",
+    "expected_counts": {
+      "endpoint_rows": 1720,
+      "initial_rows": 1720,
+      "prompts": 86,
+      "seeds_per_prompt": 20,
+      "trajectory_rows": 86000
+    },
+    "resolved_devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2"
+    ],
+    "worker_count": 3,
+    "workers": [
+      {
+        "device": "cuda:0",
+        "assigned_records": 29,
+        "completed_records": 29,
+        "failed_records": 0,
+        "duration_seconds": 52.57437798497267
+      },
+      {
+        "device": "cuda:1",
+        "assigned_records": 29,
+        "completed_records": 29,
+        "failed_records": 0,
+        "duration_seconds": 54.51439489307813
+      },
+      {
+        "device": "cuda:2",
+        "assigned_records": 28,
+        "completed_records": 28,
+        "failed_records": 0,
+        "duration_seconds": 55.69535348797217
+      }
+    ]
+  },
+  "realvis_ddim_g7.5_T50_N20": {
+    "analysis_hash": "4749db8a1e496cc4419220452e93c90a45aa540d5a7e464a0991843b216411c9",
+    "complete": true,
+    "schema_version": 3,
+    "current_failed_record_count": 0,
+    "feedback_source_sha256": "9cc530d31455370646fbbf1be8459c3940fe52033dea78ac00446aebded77fde",
+    "expected_counts": {
+      "endpoint_rows": 4860,
+      "initial_rows": 4860,
+      "prompts": 243,
+      "seeds_per_prompt": 20,
+      "trajectory_rows": 243000
+    },
+    "resolved_devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2"
+    ],
+    "worker_count": 3,
+    "workers": [
+      {
+        "device": "cuda:0",
+        "assigned_records": 81,
+        "completed_records": 81,
+        "failed_records": 0,
+        "duration_seconds": 138.85398354008794
+      },
+      {
+        "device": "cuda:1",
+        "assigned_records": 81,
+        "completed_records": 81,
+        "failed_records": 0,
+        "duration_seconds": 141.9577883160673
+      },
+      {
+        "device": "cuda:2",
+        "assigned_records": 81,
+        "completed_records": 81,
+        "failed_records": 0,
+        "duration_seconds": 140.15954216895625
+      }
+    ]
+  }
+}
