@@ -1,3 +1,103 @@
+> The active figure organization is now [four_stage_experiments.md](four_stage_experiments.md). Seven-primary filenames and roles below describe the preceding design; compatible mathematical measurements and numerical contracts remain reusable. Matching LaTeX is unavailable; historical label strings are author-supplied, not verified source labels.
+
+# Fixed seven-statement evidence pipeline
+
+The current default is seven fixed primary designs and twelve designated appendix
+outputs, with terminal components conditional on a supported contract. This
+redesign is code-only: its new tests, measurements, and plots have not been run.
+Earlier failure-repair tests do not validate this change. The historical report
+below is preserved verbatim and is not evidence for the new suite. The precision update is [numerical_refinement_plan.md](numerical_refinement_plan.md), refining [final_evidence_plan.md](final_evidence_plan.md); mathematical scope and
+author decisions are in [submission_alignment.md](submission_alignment.md).
+
+## Current stage dependencies
+
+1. Existing preparation, generation, SSCD, and proximity retain their normal
+   resume behavior. `--recompute-experiments` bypasses these upstream stages.
+2. `direct_probes.run_direct_probes` resumes independent target forward losses,
+   conditional Gaussian recovery, unique native unconditional probes, and
+   configured forward-marginal excess losses. Existing exact prompt embeddings,
+   bounded batches, and one component-only denoiser per device are reused.
+3. After model workers exit, `direct_reduce.run_direct_analysis` resumes existing
+   vector cores, current-reference measurements, endpoint measurements, and
+   separately cached original Proposition 5 variation integrals. Their prior
+   identities are unchanged by the evidence redesign.
+4. `evidence_reduce.run_evidence_analysis` adds separately resumable initial
+   geometry, paired target-error, terminal-bound, and matched Gaussian-control
+   scalars. Missing supplements read preserved initial/final vectors. A separate
+   cache evaluates the same reference law and Gaussian bank on the fixed
+   97-point analytical SNR grid. Spawned workers use one parent progress bar;
+   these tasks do not load a model or repeat original integrals.
+5. `numerical_reduce.run_precision_analysis` adds separately resumable fixed-input
+   gain signs and original-condition enclosures. `--refine-numerics` requires
+   compatible saved evidence and cannot invoke learned or upstream stages.
+   Normal analysis includes this policy automatically.
+6. `evidence_figures.build_evidence_plot_inputs` creates the fixed primary and
+   appendix inputs, exact ECDFs, uncertainty summaries, and consistency audits.
+   Original direct audits remain available; unfavorable outcomes are retained.
+7. The existing role lock, staged publication, and paired publisher install the
+   complete paper role. Plot-only reads saved compact inputs without steps 2–6.
+
+The existing `theory_measurements/direct_probes/` and
+`theory_measurements/direct_analysis/<hash>/` backing caches remain reusable.
+New tasks live under `theory_measurements/evidence_supplements/<hash>/` and
+`theory_measurements/reference_analytical/<hash>/`. Chunk, device, and batch
+choices affect execution rather than intended observations. Only missing or
+incompatible tasks are recomputed; a style change performs no measurement.
+
+Canonical figures remain below
+`theory/experiment_S0_N<N>/{main,appendix,diagnostics}` within the model run.
+Paper bundle schema is 4 and compact metric schema is `precise-evidence-2`.
+Numerical inputs and policies have separate identities under
+`theory_measurements/numerical_refinement/`; neither invalidates old observations.
+Earlier compact figure inputs require an analysis upgrade; compatible genuine
+measurements are reused, not renamed into new quantities. The default `paper`
+route cannot select a retired candidate gallery from a historical setting.
+
+## Integration payloads and failure recovery
+
+Integration payload schema 2 still stores only finite, contiguous CPU tensors
+and logical identifiers. Undefined scalar diagnostics remain in Parquet;
+resuming restores exact seed alignment. Evidence supplements do not alter this
+payload contract or invalidate completed learned tasks and direct vector cores.
+A failed missing supplement or reference-grid point retains completed work.
+There is no need to delete caches or use `--overwrite` to retry:
+
+```bash
+./run_all.sh --model sdv1 --scheduler ddim --recompute-experiments --device auto
+./run_all.sh --model sdv1 --scheduler ddim --plot
+```
+
+## Mathematical interpretation and publication
+
+All law-based comparisons use the same declared finite `D_K`, mean `mu_K`,
+posterior, and target radius. Conditional target error and unconditional
+reference error remain distinct. The first three results retain their
+finite-SNR scope; the analytical extension does not claim a network limit.
+
+Theorem 1 uses independent forward loss and Gaussian recovery at pair level,
+with matched unconditional controls and Monte Carlo bootstrap intervals.
+Lemma 4 distinguishes independent replay from a constructed matched update.
+Proposition 5 compares strict feedback and original strict-condition coverage
+on identical populations, keeping unresolved mass and zero coverage visible.
+Lemma 6 forms Q and the complete bound per sample before aggregation.
+
+The terminal correction uses pre-update quantities only. Original clean
+applicability remains unchanged. Non-clean supported rows carry the explicit
+finite-terminal-update extension and `manuscript_extension_required=true`.
+Gaussian noise bounds retain their predeclared run-level probability scope.
+The three exact terminal ECDFs share weights and preserve zero/infinite mass.
+Legacy numerical QA remains an assessment. New directed intervals certify only
+their declared fixed-input operations; source sensitivity and reference
+identification remain separate. Unknown mass stays in the structural denominator.
+
+Missing inputs have precise statuses and recomputation instructions. Failed
+consistency checks block publication; they are not converted into missing or
+favorable data. The author must run the unexecuted regressions and pipeline,
+inspect the resulting audits, and resolve the manuscript decisions in the
+alignment note before treating the suite as ready for submission.
+
+## Historical behavioral-pipeline report (unchanged)
+
 # Fixed paper pipeline and migration audit
 
 The default theory stage now publishes the reviewed paper selection, using the working candidate measurements. Historical saved suite choices cannot send `run_all.sh` back to the exploratory gallery or old four-figure renderer. No active stage creates `theory_v2`; fresh shared scalar reductions use `theory_measurements` and candidate sufficient statistics remain under `theory_candidates`.

@@ -1,3 +1,78 @@
+# Four-stage quantity and schema dictionary
+
+The active plan is [four_stage_experiments.md](four_stage_experiments.md), bundle schema **5**, metric schema **`four-stage-evidence-1`**. Backing direct/probe/integration measurements keep their existing independent identities. All vector norms are raw L2; display RMSE is L2/sqrt(d) exactly once, and Gaussian exponents always use raw squared L2.
+
+| Logical table | Population and quantities |
+|---|---|
+| `reference_law` | Immutable support/alias/mass manifest, full mean vector receipt, weighted spread S_K, and per-target maximum whole-support radius R_K |
+| `initial_samples` | Pair/seed genuine Gaussian target errors, mean/reference errors, exact initialization and SSCD provenance; generated-state diagnostics are explicitly distinguished |
+| `initial_pairs` | A_c=sqrt(L_hat/(d*SNR_T)), paired conditional/control RMS Y_c/U_c, independent forward and paired Gaussian bootstrap, pair mean SSCD |
+| `initial_baseline_summary` | One canonical observation per unique Gaussian seed; B_T_K, S_K, ratio (undefined for zero spread), seed count and uncertainty; repeated observations have disagreement audits |
+| `feedback_endpoints` | Alias plus explicit additive joins to preserved all-step `matched_updates`: coefficients, endpoint contract, H/G, original V and M, numerical/source/reconstruction status |
+| `feedback_response` | Initial fixed-grid per-sample log-probability response and distinct log-odds gain; s=0,1/g,1 included; full-curve missingness/status retained |
+| `trajectory_metrics` | Chronological k, native label, normalized progress, raw and normalized conditional/unconditional target errors, D, paired Q, full reference bound, noise gap and schedule scale |
+| `branch_motion` | Consecutive prediction C=2<Delta,v_c>/d, U=-2<Delta,v_u>/d, `gap_motion_quadratic`=||v_c-v_u||²/d, squared-gap change/residual, target-error changes |
+| `trajectory_shapes` | Raw-curve peak/tie/plateau/completeness descriptors, fixed-phase gaps, rise/decline and upward/downward variation; related prompt and mixed-outcome summaries |
+| `terminal_metrics` | Alias plus preserved additive joins to `terminal`: actual saved final error, B_obs/B_ref, independent correction/mode, applicability, slack, ratios, and reference-bound looseness |
+| `counterfactual_unconditional` | Optional learned empty-prompt target-error change at paired matched next inputs, same-context saved-prediction parity; no default inference requirement |
+| `plot_data` | Immutable compact renderer inputs, shared-population summaries and transform settings; no raw tensor dependency for plotting |
+
+The source keys contain run, record/pair, target identity, seed, chronological step and native source/destination labels where applicable. Outcome groups use paired-target same-seed SSCD > 0.75 versus <= 0.75. Prompt mass is equal within each represented group and divided among eligible member seeds. Initial main points are pair-level without an outcome split; their colors are pair mean SSCD. Motion components use means on identical rows so additivity is retained. Other group curves use descriptive weighted medians/IQRs. Unresolved signs remain in structural denominators.
+
+Missing variation remains missing despite a resolved condition sign. Numerical arithmetic/quadrature, source sensitivity, and empirical-reference identification have separate status fields. Bootstrap intervals are empirical Monte Carlo uncertainty, IQRs are descriptive spread, and probabilistic terminal bounds carry their own saved simultaneous-run scope. None is relabeled a theorem certificate.
+
+The historical dictionary below is retained to interpret compatible backing columns; it does not select the active figure registry.
+
+# Backing direct measurements and previous compact schema
+
+The preceding direct suite used paper bundle schema **2** and metric schema
+**`direct-statements-1`**. Its backing measurement formula version remains
+**`direct-seven-statements-1`** so compatible numerical shards stay reusable.
+Older numerical columns keep their original meanings; the historical dictionary
+below remains for interpreting those artifacts. It does not describe the active
+default renderer. No measurements or tests were executed for this code change.
+
+| Table | Input law and unit of observation | Direct quantities |
+|---|---|---|
+| `forward_loss_draws` | Independent forward corruption of one target, pair/step/draw | Raw squared epsilon loss, clean target error, forward identity residual, precision/RNG identity |
+| `forward_loss_summary` | Pair/step mean over independent draws | Measured loss mean and MC SE, clean squared-error mean, SNR, Pinsker upper bound |
+| `gaussian_conditional` | Fixed Gaussian seed for each pair/native measured step | Conditional target L2/squared L2/MSE/RMSE; SSCD only for an exactly matching saved initialization |
+| `gaussian_reference` | Unique Gaussian run/seed/native step | Reference–law mean distance, learned–law mean distance, learned–reference error, decomposition cross term and proof bound |
+| `forward_unconditional_loss` | Optional independent mixture atom/noise draw | Total, optimal and direct nonnegative excess losses; forward/Gaussian laws stay separate |
+| `initial` | Every retained generated pair/seed at k=0 | Both full-vector Corollary 3 discrepancies and distinct g/(g−1) triangle RHS terms |
+| `trajectory` | Every retained generated pair/seed/current step | Conditional error, unconditional reference error, target log probability/complement, whole-law radius, samplewise Lemma 6 RHS/gap |
+| `matched_updates` | Every retained generated pair/seed/update | Independent or constructed Lemma 4 displacement, vector residual, original Proposition 5 variation/margin, independent endpoint and integrated gains, signed lower bound |
+| `terminal` | Every retained generated pair/seed at last prediction and actual final output | Exact Theorem 7 RHS, raw endpoint distance, clean-update structure/numeric gates and decomposition residual/cross term |
+
+Every squared-L2 value sums over latent coordinates. MSE is squared L2/d;
+coordinate RMSE is L2/sqrt(d), not RMSE divided again. Exponential posteriors use
+raw squared L2 before any display normalization. Source precision is recorded;
+conversion from native predictions to epsilon occurs once, and already-canonical
+cached epsilon is never converted again.
+
+`target_id` identifies the paired target image hash; law atom IDs and payload
+hashes are separate. Pair identity includes run/original_index/record_id/target_id.
+Generated/Gaussian observations use a seed, forward observations a draw identity.
+Stored k=0 is manuscript T; k=T−1 is the last prediction (manuscript 1). Saved
+k+1 is the actual update output. Destination coefficients come from the saved
+native scheduler contract, never from subtracting one from a training timestep.
+
+The posterior, exact mean and maximum target-relative radius share one declared
+law. The default gives equal mass to distinct cached target atoms before
+selection; supplied manifest masses are validated and exact duplicates have
+aggregated mass. The full training marginal and single-target training condition
+are not inferred from checkpoint parameters, model-output centers or SSCD.
+
+The original Proposition 5 variation is the integral of the full posterior-mean
+norm difference along the matched displacement. Embedded quadrature error and
+source sensitivity are estimates, not rigorous enclosures; estimated positive,
+negative, unresolved, strict/nonstrict and zero-shift statuses remain distinct.
+The signed lower bound is retained even when negative. Theorem 7 structural
+inapplicability remains distinct from unavailable numbers or reconstruction
+failure; no alternate clean projection replaces the saved endpoint.
+
+## Historical scalar schemas (preserved reference)
+
 # Theory measurement and scalar-schema dictionary
 
 This dictionary describes the corrective implementation of the current working
@@ -562,3 +637,9 @@ continuous SSCD colorbar. Typography is STIXGeneral/STIX math, nominal 4×4 inch
 150-DPI PNG plus PDF, 15-point axis labels, 12-point ticks, compact legends, light
 grids, tight output, and rasterized dense artists. Reference lines identify their
 meaning; finite negative data and numerical uncertainty remain visible.
+
+## Precision refinement (unexecuted revision)
+
+See [numerical_refinement_plan.md](numerical_refinement_plan.md) for exact auxiliary bounds and scopes. `numerical_log_probability_gain` retains H; `numerical_log_odds_gain` is stable G and must never replace H's magnitude. `numerical_affine_*` refers to the reconstructed affine endpoint, while the primary gain refers to the recorded endpoint. `condition_sign_status` may be negative while `condition_value_status` remains unavailable. Directed bounds and legacy embedded quadrature estimates have separate fields. `fixed_cache_gain_sign`, `source_robust_gain_sign`, and `reference_model_identification` describe distinct uncertainty layers. Budget exhaustion is unknown mass, not a zero gain or variation.
+
+The Corollary-3 premise is `(ec+bu)/||x_star-mu_K||`; its full error decomposition uses the saved vector inner product. Lemma-6 Q is the paired maximum before aggregation. The terminal looseness is `(g-1)*(S_raw-D_raw)`, decomposed into the radius-tail slack and the reference-triangle slack. All of these are saved scalar audits; none changes the empirical law or replaces the manuscript statement.

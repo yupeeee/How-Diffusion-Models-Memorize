@@ -35,7 +35,7 @@ STATEMENT_IDS = (
     "terminal_reproduction",
 )
 DEFAULT_REGISTRY_PATH = (
-    Path(__file__).resolve().parents[3] / "docs/theory/statement_registry.json"
+    Path(__file__).resolve().parents[3] / "docs/theory/legacy_statement_registry.json"
 )
 
 

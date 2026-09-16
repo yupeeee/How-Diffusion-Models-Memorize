@@ -1,4 +1,4 @@
-"""Prepare the fixed paper suite from shared, validated candidate measurements."""
+"""Publish the four mechanism experiments from shared immutable measurements."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from utils.common.io import atomic_write_json, canonical_hash, file_sha256
-from .contracts import TheoryError, numerical_config, read_object
+from .contracts import FOUR_STAGE_OPTION_KEYS, TheoryError, numerical_config, read_object
 from .paper_contracts import (
     BUNDLE_SCHEMA_VERSION,
     METRIC_SCHEMA_VERSION,
@@ -21,9 +21,11 @@ from .paper_contracts import (
     retire_obsolete_figures,
     retire_legacy_figures,
     staged_publication,
+    saved_scientific_configuration,
     write_plot_table,
 )
 from .paper_registry import REGISTRY_VERSION, paper_registry
+from .progress import StageProgress
 
 
 def _clean(value):
@@ -137,325 +139,185 @@ def _save_table(stage, relative, frame, numerical_files):
 
 
 def run_paper(
-    project_root,
-    *,
-    source_analysis=None,
-    source_logs=None,
-    diagnostics=False,
-    recompute=False,
-    device="auto",
-    candidate_chunk_size=256,
-    query_chunk_size=16,
-    **configuration,
+    project_root, *, source_analysis=None, source_logs=None, diagnostics=False,
+    recompute=False, refine_numerics=False, device="auto", candidate_chunk_size=256, query_chunk_size=16,
+    probe_batch_size=8, **configuration,
 ):
-    """Analysis only: preserve source shards and publish compact paper inputs."""
-    from .candidate_contracts import read_tables
-    from .paper_measurements import build_nonfeedback_plot_inputs
-    from .paper_feedback import build_feedback_plot_inputs
+    """Publish direct measurements transactionally, preserving all upstream caches.
+
+    Recompute authorizes a changed scientific configuration. Valid independent
+    task shards are still reused: it does not repeat denoiser calls unnecessarily.
+    """
+    from .numerical_reduce import run_precision_analysis
+    from .four_stage_reduce import prepare_four_stage_primary, run_four_stage_analysis
+    from .four_stage_figures import build_four_stage_plot_inputs
+    from .counterfactual_probes import run_counterfactual_analysis
+    from .gaussian_controls import run_gaussian_control_analysis
     from .paper_plotting import render_paper
 
+    if source_analysis is not None or source_logs is not None:
+        raise TheoryError(
+            "Legacy candidate/archived-log migration cannot supply the new measured losses. "
+            "Run direct analysis against the declared protected generation caches without "
+            "--source-analysis/--source-logs; historical candidate bundles remain preserved."
+        )
     root = Path(project_root).absolute()
     config = numerical_config(**configuration)
     output = PaperPaths.build(root, **config).output_directory
     with publication_lock(output):
-        previous_config = (
-            read_object(output / "run_config.json")
-            if (output / "run_config.json").exists()
-            else None
-        )
-        if (
-            previous_config
-            and previous_config["scientific_config"] != config
-            and not recompute
-        ):
+        previous_config = (read_object(output / "run_config.json")
+                           if (output / "run_config.json").exists() else None)
+        if (previous_config and previous_config.get("schema_version") == BUNDLE_SCHEMA_VERSION
+                and saved_scientific_configuration(previous_config) != config and not recompute):
             raise TheoryError(
-                "Active paper center/tolerance/configuration differs; use explicit --recompute-experiments to archive and reconfigure it"
+                "Active paper scientific configuration differs; use --recompute-experiments "
+                "to archive the previous publication and measure the requested configuration"
             )
-        if (
-            previous_config
-            and not recompute
-            and source_analysis is None
-            and source_logs is None
-        ):
-            try:
-                from .candidate_contracts import validate_candidate_sources
-
-                source = Path(previous_config["source_analysis"]["path"])
-                validate_candidate_sources(source, root)
-                if (
-                    file_sha256(source / "analysis_manifest.json")
-                    != previous_config["scientific_identity"]["source_manifest_sha256"]
-                ):
-                    raise TheoryError("Source analysis changed")
-                source_manifest = read_object(source / "analysis_manifest.json")
-                if not _source_recipe_current(source_manifest, diagnostics=diagnostics):
-                    raise TheoryError(
-                        "Candidate measurement definitions changed or lack source provenance"
-                    )
-                if diagnostics and not source_manifest.get("complete"):
-                    raise TheoryError("Integrated diagnostics need analysis")
-                load_paper_inputs(
-                    output, expected_config=config, diagnostics=diagnostics
+        base_config = {key: value for key, value in config.items() if key not in FOUR_STAGE_OPTION_KEYS}
+        if not refine_numerics:
+            with StageProgress("Preparing fast endpoints and trajectory measurements"):
+                prepare_four_stage_primary(
+                    root, config=base_config, device=device,
+                    candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
                 )
-            except (TheoryError, OSError, KeyError):
-                pass
-            else:
-                previous = read_object(output / "figure_manifest.json")
-                with staged_publication(output) as stage:
-                    render_paper(stage, diagnostics=diagnostics)
-                    retire_obsolete_figures(stage, previous)
-                return output
-        source, manifest, mode = _source_bundle(
-            root,
-            config,
-            source_analysis=source_analysis,
-            diagnostics=diagnostics,
-            device=device,
-            candidate_chunk_size=candidate_chunk_size,
-            query_chunk_size=query_chunk_size,
-        )
-        print(f"Paper measurements: {source}", flush=True)
-        tables = read_tables(source, include_dose=True, include_controls=False)
-        supplement_receipt = {"status": "saved_scalar_contracts"}
-        if source_logs is not None:
-            from .paper_measurements import extend_terminal_accounting, SAMPLE_KEYS
-
-            # A compact paper refresh may reuse independently audited terminal
-            # terms when their source identity and measurement implementation agree.
-            prior_terminal = output / "terminal.csv"
-            prior_identity = (
-                previous_config.get("scientific_identity", {})
-                if previous_config
-                else {}
+        with StageProgress("Numerical refinement and collecting saved measurement tables"):
+            result = run_precision_analysis(
+                root, config=base_config, refine_only=refine_numerics, device=device, probe_batch_size=probe_batch_size,
+                candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
             )
-            reuse_terminal = (
-                prior_terminal.is_file()
-                and prior_identity.get("source_manifest_sha256")
-                == file_sha256(source / "analysis_manifest.json")
-                and prior_identity.get("measurement_sources", {}).get(
-                    "paper_measurements.py"
-                )
-                == measurement_sources()["paper_measurements.py"]
-                and prior_identity.get("terminal_supplement", {}).get("source_logs")
-                == str(Path(source_logs).resolve())
+        base_analysis = {"path": str(result["directory"]), "analysis_hash": result["provenance"]["analysis_hash"],
+                         "mode": "preserved_numerical_and_evidence_measurements"}
+        with StageProgress("Checking and collecting initial Gaussian controls"):
+            result = run_gaussian_control_analysis(
+                root, result=result, config=base_config, device=device, probe_batch_size=probe_batch_size,
+                candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
+                allow_compute=not refine_numerics,
             )
-            if reuse_terminal:
-                previous_summary = read_object(output / "summary.json")
-                if (
-                    file_sha256(prior_terminal)
-                    != previous_summary["numerical_files"]["terminal.csv"]
-                ):
-                    raise TheoryError("Saved terminal accounting cache was modified")
-                saved = pd.read_csv(
-                    prior_terminal,
-                    dtype={k: str for k in SAMPLE_KEYS},
-                    keep_default_na=False,
-                    float_precision="round_trip",
+        with StageProgress("Collecting four-stage tables and baseline/trajectory summaries"):
+            result = run_four_stage_analysis(
+                root, result=result, config=config, device=device, probe_batch_size=probe_batch_size,
+                candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
+                allow_compute=not refine_numerics,
+            )
+        if config.get("counterfactual_unconditional", False):
+            with StageProgress("Checking and collecting optional learned counterfactuals"):
+                result = run_counterfactual_analysis(
+                    root, result=result, config=config, device=device, probe_batch_size=probe_batch_size,
+                    candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
+                    allow_compute=not refine_numerics,
                 )
-                columns = [
-                    name for name in saved if name.startswith("terminal_accounting_")
-                ]
-                left = tables["endpoint"].copy()
-                for key in SAMPLE_KEYS:
-                    left[key] = left[key].astype(str)
-                left = left.drop(columns=[name for name in columns if name in left])
-                tables["endpoint"] = left.merge(
-                    saved[list(SAMPLE_KEYS) + columns],
-                    on=list(SAMPLE_KEYS),
-                    how="left",
-                    validate="one_to_one",
-                )
-            from .reduce import _resolve_theory_devices
-            from tqdm.auto import tqdm
-
-            supplement_device = _resolve_theory_devices(device)[0]
-            with tqdm(
-                total=0,
-                desc="[Theory] Terminal records",
-                unit="record",
-            ) as progress:
-
-                def advance(completed, total):
-                    progress.total = total
-                    progress.update(completed - progress.n)
-
-                supplement, supplement_receipt = extend_terminal_accounting(
-                    tables["endpoint"],
-                    manifest=manifest,
-                    source_logs=Path(source_logs),
-                    device=supplement_device,
-                    progress=advance,
-                )
-            if reuse_terminal:
-                supplement_receipt = prior_identity["terminal_supplement"]
-            if not supplement.empty:
-                keys = list(SAMPLE_KEYS)
-                overlap = (set(supplement) & set(tables["endpoint"])) - set(keys)
-                tables["endpoint"] = (
-                    tables["endpoint"]
-                    .drop(columns=list(overlap))
-                    .merge(supplement, on=keys, how="left", validate="one_to_one")
-                )
-        # Always save available diagnostic inputs, independently of figure selection.
-        frames, nonfeedback = build_nonfeedback_plot_inputs(
-            tables, config=config, diagnostics=True
-        )
-        auxiliary = _auxiliary(frames, nonfeedback)
-        feedback_frames, feedback = build_feedback_plot_inputs(tables, config=config)
-        auxiliary.update(_auxiliary(feedback_frames, feedback))
-        frames.update(feedback_frames)
-        figures = {**nonfeedback["figures"], **feedback["figures"]}
-        identity = {
-            "config": config,
-            "metric_schema_version": METRIC_SCHEMA_VERSION,
+        tables, provenance = result["tables"], result["provenance"]
+        with StageProgress("Reducing plot inputs, bootstrap intervals, and figure audits"):
+            frames, metadata = build_four_stage_plot_inputs(tables, config=config, provenance=provenance)
+        registry_options = {"counterfactual": config.get("counterfactual_unconditional", False)}
+        auxiliary = _auxiliary(frames, metadata)
+        figures = metadata["figures"]
+        # Compact science depends on measured scalar contents and formula recipes,
+        # never on worker placement, wall time, batch size or figure styling.
+        identity = _clean({
+            "config": config, "metric_schema_version": METRIC_SCHEMA_VERSION,
             "measurement_sources": measurement_sources(),
-            "source_analysis_hash": manifest["analysis_hash"],
-            "source_manifest_sha256": file_sha256(source / "analysis_manifest.json"),
-            "terminal_supplement": supplement_receipt,
+            "analysis_hash": provenance["analysis_hash"],
+            "reference_law_hash": provenance["reference_law_hash"],
+            "scalar_sources": {name: {key: value for key, value in spec.items() if key in {"sha256", "rows"}}
+                               for name, spec in result["files"].items()},
+        })
+        scientific_hash = canonical_hash(identity)
+        audit = _clean({"schema_version": 2, "audit_version": "four-stage-evidence-audit-1",
+                        "scientific_hash": scientific_hash, **metadata.get("audit", {})})
+        failed_figures = {name: item for name, item in figures.items()
+                          if item["status"] in {"error", "blocked", "missing"}}
+        audit["blocking"] = bool(audit.get("blocking", False) or failed_figures)
+        unavailable_required = {
+            entry["stem"]: figures[entry["stem"]]
+            for entry in paper_registry(diagnostics=diagnostics, **registry_options)
+            if figures[entry["stem"]]["status"] == "unavailable"
+            and not entry.get("allow_unavailable", entry["category"] == "diagnostics")
         }
-        scientific_hash = canonical_hash(_clean(identity))
-        audit = _clean(
-            {
-                "schema_version": 1,
-                "audit_version": "paper-audit-1",
-                "scientific_hash": scientific_hash,
-                "nonfeedback": nonfeedback["audit"],
-                "feedback": feedback["audit"],
-                "terminal_supplement": supplement_receipt,
-                "blocking": bool(
-                    nonfeedback["audit"].get("blocking", False)
-                    or feedback["audit"].get("blocking", False)
-                ),
-            }
-        )
-        failed_figures = {
-            name: m
-            for name, m in figures.items()
-            if m["status"] in {"error", "blocked", "missing"}
-        }
-        audit["blocking"] = audit["blocking"] or bool(failed_figures)
-        if audit["blocking"]:
+        if audit["blocking"] or unavailable_required:
             failed = output.parent / ".failed-attempts" / output.name / scientific_hash
             failed.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(failed / "audit.json", audit)
+            atomic_write_json(failed / "audit.json", {**audit, "unavailable_required": list(unavailable_required)})
             atomic_write_json(failed / "figure_status.json", _clean(figures))
             for name, frame in auxiliary.items():
                 _save_table(failed, name + ".csv", frame, {})
-            raise TheoryError(
-                f"Paper correctness audit blocked publication; offending identities and reasons: {failed}"
-            )
-        previous = (
-            read_object(output / "figure_manifest.json")
-            if (output / "figure_manifest.json").exists()
-            else {}
-        )
-        run_config = _clean(
-            {
-                "schema_version": BUNDLE_SCHEMA_VERSION,
-                "metric_schema_version": METRIC_SCHEMA_VERSION,
-                "scientific_config": config,
-                "scientific_identity": identity,
-                "scientific_hash": scientific_hash,
-                "registry_version": REGISTRY_VERSION,
-                "source_analysis": {
-                    "path": str(source),
-                    "analysis_hash": manifest["analysis_hash"],
-                    "mode": mode,
-                },
-                "provenance": {
-                    "source_manifest_sha256": identity["source_manifest_sha256"],
-                    "manuscript_sha256": manifest.get(
-                        "manuscript_sha256",
-                        manifest.get("endpoint_identity", {}).get("manuscript_sha256"),
-                    ),
-                    "matching_latex_source": "not available in checkout; PDF mapping retained",
-                    "center_metadata": manifest.get("center_metadata"),
-                    "support_metadata": manifest.get("support_metadata"),
-                    "scheduler_adapter": manifest.get("scheduler_adapter"),
-                    "terminal_supplement": supplement_receipt,
-                },
-            }
-        )
-        archive_previous = (
-            previous_config is not None
-            and previous_config["scientific_hash"] != scientific_hash
-        )
-        with staged_publication(output, archive_previous=archive_previous) as stage:
-            numerical_files = {}
-            plot_data = {}
-            for entry in paper_registry(diagnostics=True):
-                name = entry["stem"]
-                if name not in figures:
-                    raise TheoryError(f"Missing paper measurement contract: {name}")
-                if name in frames and len(frames[name].columns):
-                    plot_data[name] = _save_table(
-                        stage, f"plot_data/{name}.csv", frames[name], numerical_files
-                    )
-            for name, frame in auxiliary.items():
-                _save_table(stage, f"audit_data/{name}.csv", frame, numerical_files)
-            for name, table in (
-                ("initial", tables["initial"]),
-                ("terminal", tables["endpoint"]),
-            ):
-                _save_table(stage, name + ".csv", table, numerical_files)
-            _save_table(
-                stage,
-                "failed.csv",
-                pd.DataFrame(columns=["record_id", "reason"]),
-                numerical_files,
-            )
-            logical = {
-                "schema_version": 1,
-                "source_analysis": str(source),
-                "source_manifest_sha256": identity["source_manifest_sha256"],
-                "tables": {
-                    name: {"path": str(source / name), "sha256": digest}
-                    for name, digest in manifest["numerical_files"].items()
-                    if name.startswith(
-                        (
-                            "trajectory_metrics/",
-                            "integration_shards/",
-                            "dose_shards/",
-                            "controls_shards/",
-                        )
-                    )
-                },
-                "reading_policy": "Authoritative scalar shards; analysis only. Plotting reads compact plot_data CSVs.",
-            }
-            for name, value in (
-                ("run_config.json", run_config),
-                ("audit.json", audit),
-                ("logical_tables.json", logical),
-            ):
-                atomic_write_json(stage / name, value)
-                numerical_files[name] = file_sha256(stage / name)
-            atomic_write_json(
-                stage / "registry.json",
-                {
-                    "version": REGISTRY_VERSION,
-                    "figures": paper_registry(diagnostics=True),
-                },
-            )
-            summary = _clean(
-                {
-                    "schema_version": 1,
-                    "complete": True,
-                    "scientific_hash": scientific_hash,
-                    "figures": figures,
-                    "plot_data": plot_data,
-                    "numerical_files": numerical_files,
-                    "counts": {
-                        "initial_rows": len(tables["initial"]),
-                        "terminal_rows": len(tables["endpoint"]),
-                        "trajectory_rows": len(tables["trajectory"]),
-                    },
+            if unavailable_required and not audit["blocking"]:
+                from .paper_contracts import recompute_command
+                raise TheoryError(f"Required evidence inputs unavailable; statuses retained: {failed}. "
+                                  f"Run {recompute_command(config)}")
+            raise TheoryError(f"Paper correctness audit blocked publication; retained identities and reasons: {failed}")
+        previous = (read_object(output / "figure_manifest.json")
+                    if (output / "figure_manifest.json").exists() else {})
+        run_config = _clean({
+            "schema_version": BUNDLE_SCHEMA_VERSION,
+            "metric_schema_version": METRIC_SCHEMA_VERSION,
+            "scientific_config": base_config,
+            "supplemental_config": {key: value for key, value in config.items() if key in FOUR_STAGE_OPTION_KEYS},
+            "scientific_identity": identity,
+            "scientific_hash": scientific_hash, "registry_version": REGISTRY_VERSION,
+            "source_analysis": base_analysis,
+            "supplemental_analysis": {"path": str(result["directory"]), "analysis_hash": provenance["analysis_hash"],
+                                      "mode": "four_stage_additive_measurements"},
+            "provenance": provenance,
+        })
+        archive_previous = previous_config is not None and previous_config.get("scientific_hash") != scientific_hash
+        with StageProgress("Publishing paper bundle"), staged_publication(output, archive_previous=archive_previous) as stage:
+            with StageProgress("Saving scalar tables and publication metadata") as progress:
+                numerical_files, plot_data = {}, {}
+                for entry in paper_registry(diagnostics=True, **registry_options):
+                    name = entry["stem"]
+                    if name not in figures:
+                        raise TheoryError(f"Missing paper measurement contract: {name}")
+                    if name in frames and len(frames[name].columns):
+                        progress.set_detail(f"plot_data/{name}.csv: {len(frames[name]):,} rows")
+                        plot_data[name] = _save_table(stage, f"plot_data/{name}.csv", frames[name], numerical_files)
+                for name, frame in auxiliary.items():
+                    progress.set_detail(f"audit_data/{name}.csv: {len(frame):,} rows")
+                    _save_table(stage, "audit_data/" + name + ".csv", frame, numerical_files)
+                baseline = tables.get("initial_baseline_summary", auxiliary.get("initial_baseline_summary"))
+                if baseline is not None:
+                    progress.set_detail("initial_baseline_summary.csv")
+                    _save_table(stage, "initial_baseline_summary.csv", baseline, numerical_files)
+                    atomic_write_json(stage / "initial_baseline_summary.json", _clean({
+                        "schema_version": 1, "rows": baseline.to_dict("records"),
+                        "scope": "unique_Gaussian_seed_mean_baseline_about_declared_empirical_law",
+                    }))
+                    numerical_files["initial_baseline_summary.json"] = file_sha256(stage / "initial_baseline_summary.json")
+                for name in ("initial", "terminal"):
+                    progress.set_detail(f"{name}.csv: {len(tables[name]):,} rows")
+                    _save_table(stage, name + ".csv", tables[name], numerical_files)
+                _save_table(stage, "failed.csv", pd.DataFrame(columns=["record_id", "reason"]), numerical_files)
+                scalar_aliases = {}
+                for logical_name, source_name in (("initial_pairs", "initial_loss_recovery"),):
+                    if source_name in plot_data:
+                        scalar_aliases[logical_name] = plot_data[source_name]
+                for logical_name, source_name in (("feedback_endpoints", "matched_updates"), ("terminal_metrics", "terminal")):
+                    if logical_name not in result["files"] and source_name in result["files"]:
+                        scalar_aliases[logical_name] = {"base_table": source_name,
+                            "additive_join": result.get("logical_joins", {}).get(source_name)}
+                logical = {
+                    "schema_version": 2, "source_analysis": str(result["directory"]),
+                    "tables": result["files"], "scalar_aliases": scalar_aliases,
+                    "additive_joins": result.get("logical_joins", {}),
+                    "reading_policy": "Analysis-only scalar tables; plot mode reads compact plot_data CSVs only.",
                 }
-            )
-            atomic_write_json(stage / "summary.json", summary)
-            load_paper_inputs(stage, expected_config=config, diagnostics=diagnostics)
+                for name, value in (("run_config.json", run_config), ("audit.json", audit), ("logical_tables.json", logical)):
+                    progress.set_detail(name)
+                    atomic_write_json(stage / name, _clean(value))
+                    numerical_files[name] = file_sha256(stage / name)
+                atomic_write_json(stage / "registry.json", {"version": REGISTRY_VERSION, "figures": paper_registry(diagnostics=True, **registry_options)})
+                summary = _clean({
+                    "schema_version": 2, "complete": True, "scientific_hash": scientific_hash,
+                    "figures": figures, "plot_data": plot_data, "numerical_files": numerical_files,
+                    "counts": {"initial_rows": len(tables["initial"]), "terminal_rows": len(tables["terminal"]),
+                               "trajectory_rows": len(tables["trajectory"])},
+                })
+                progress.set_detail("summary.json")
+                atomic_write_json(stage / "summary.json", summary)
+            with StageProgress("Validating saved scalar publication"):
+                load_paper_inputs(stage, expected_config=config, diagnostics=diagnostics)
             render_paper(stage, diagnostics=diagnostics)
-            retire_obsolete_figures(stage, previous)
-        retirement = retire_legacy_figures(root, output, source, manifest)
-        atomic_write_json(output / "migration.json", retirement)
+            with StageProgress("Retiring verified obsolete figures"):
+                retire_obsolete_figures(stage, previous)
         print(f"Paper outputs: {output}", flush=True)
     return output

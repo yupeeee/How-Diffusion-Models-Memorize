@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -818,12 +818,16 @@ def _summary_text(statistics: AnalysisStatistics) -> str:
 def publish_figures(
     output: Path,
     figures: Sequence[tuple[Figure, Mapping[str, str]]],
+    *,
+    progress: Callable[[str, str], None] | None = None,
 ) -> None:
     """Publish PNG/PDF pairs through the existing recoverable transaction.
 
     Nested output names must be safe relative same-stem PNG/PDF pairs. The
     established proximity entry points keep their original private publisher
     and behavior. Callers own figure lifetime and must close figures in finally.
+    Optional progress receives (relative filename, "saving" or "saved") around
+    each export; it does not change the paired rollback/install transaction.
     """
     output = Path(output).absolute()
     destinations: set[Path] = set()
@@ -861,12 +865,17 @@ def publish_figures(
                 raise PlottingError(f"figure parent is not a directory: {ancestor}")
     for parent in sorted(parents, key=lambda path: len(path.parts)):
         parent.mkdir(parents=True, exist_ok=True)
-    _publish_figures(output, figures)
+    if progress is None:
+        _publish_figures(output, figures)
+    else:
+        _publish_figures(output, figures, progress=progress)
 
 
 def _publish_figures(
     output: Path,
     figures: Sequence[tuple[Figure, Mapping[str, str]]],
+    *,
+    progress: Callable[[str, str], None] | None = None,
 ) -> None:
     """Render every artifact, then install all files as one recoverable set."""
 
@@ -880,6 +889,8 @@ def _publish_figures(
                 destination = output / filenames[file_format]
                 temporary = _temporary_sibling(destination)
                 staged.append((temporary, destination))
+                if progress is not None:
+                    progress(filenames[file_format], "saving")
                 figure.savefig(
                     temporary,
                     format=file_format,
@@ -889,6 +900,8 @@ def _publish_figures(
                 )
                 with temporary.open("rb") as handle:
                     os.fsync(handle.fileno())
+                if progress is not None:
+                    progress(filenames[file_format], "saved")
         for _temporary, destination in staged:
             if destination.exists() and not (
                 destination.is_file() or destination.is_symlink()

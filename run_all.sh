@@ -20,9 +20,26 @@ DOWNLOAD_WEBSTER=0
 PLOT_ONLY=0
 OVERWRITE=0
 RECOMPUTE=0
+REFINE_NUMERICS=0
 INCLUDE_DIAGNOSTICS=0
 FIGURE_SUITE="paper"
 TARGET_ERROR_TOLERANCE=""
+NUM_LOSS_SEEDS=""
+LOSS_SEED=""
+LOSS_TIMESTEPS=""
+NUM_UNCONDITIONAL_LOSS_SEEDS=""
+MEASURE_UNCONDITIONAL_LOSS=""
+PROBE_BATCH_SIZE=""
+REFERENCE_LAW=""
+REFERENCE_MANIFEST=""
+REFERENCE_SNR_DECADES=""
+TERMINAL_NOISE_RUN_ALPHA=""
+NUMERICAL_DECIMAL_PRECISION=""
+NUMERICAL_MAX_DECIMAL_PRODUCTS=""
+NUMERICAL_MAX_VARIATION_NODES=""
+NUMERICAL_VARIATION_ABSOLUTE_WIDTH=""
+COUNTERFACTUAL_UNCONDITIONAL=0
+COUNTERFACTUAL_STEPS=""
 
 usage() {
     cat <<'EOF'
@@ -32,9 +49,10 @@ Run sdv1/ddim, sdv1/ddpm, sdv2/ddim, and realvis/ddim.
 Explicit model/scheduler options filter these supported pairs; requests with
 no matching pair fail before any stage. --scheduler ddpm selects sdv1 only.
 Protected generation, SSCD, and GMM proximity retain their existing defaults.
-Theory reduces existing caches once per model/scheduler, then reloads scalar
-outputs to render four main and eight core appendix figures, plus two terminal
-figures when applicable. No theory stage performs inference.
+Theory resumes shared denoiser probes and one analytical trajectory pass per
+model/scheduler, then renders four mechanism experiments and their
+fixed eleven appendices from saved scalar inputs. Probe workers use all visible GPUs.
+The reference-only SNR extension and terminal bounds use separate reusable caches.
 
 Options:
   --download            Run/resume shared Webster preparation once first
@@ -44,8 +62,18 @@ Options:
   --target-error-tolerance FLOAT
                         Independently supplied raw latent L2 tolerance (optional)
   --recompute-experiments
-                        Rebuild theory from existing protected caches only;
+                        Resume/rebuild theory, including missing learned probes;
                         bypass download, generation, SSCD and proximity rebuilding
+  --refine-numerics     Refine existing posterior signs/condition intervals only;
+                        no upstream work or learned-probe inference
+  --numerical-decimal-precision INT
+                        Flagged-row base precision (default: 64; retry doubles it)
+  --numerical-max-decimal-products INT
+                        Per-row product budget (default: 2000000; zero disables fallback)
+  --numerical-max-variation-nodes INT
+                        Per-row interval node budget (default: 65)
+  --numerical-variation-absolute-width FLOAT
+                        Requested raw-L2 enclosure width (default: 1e-6)
   --overwrite           Explicitly regenerate protected generation/SSCD caches
                         and rebuild derived theory (normal pipeline only)
   --model MODEL         sdv1, sdv2, realvis, or all (default: all three)
@@ -53,7 +81,25 @@ Options:
   --g FLOAT             Guidance scale (default: 7.5; finite values supported)
   --T INTEGER           Inference steps (default: 50)
   --N INTEGER           Experiment seeds 0..N-1; reference N..2N-1 (default: 20)
-  --center NAME         reference-initial (default), zero, or cached-baseline
+  --num-loss-seeds INT   Forward-target draws (analysis default: 64)
+  --loss-seed INT        Independent probe RNG root (analysis default: 0)
+  --loss-timesteps NAME  initial (default) or saved
+  --num-unconditional-loss-seeds INT
+                        Forward-marginal draws (default: 256); enables this stage
+  --unconditional-loss  Enable optional forward-marginal losses
+  --no-unconditional-loss Disable optional forward-marginal losses
+  --counterfactual-unconditional
+                        Optional learned unconditional comparison at matched inputs
+  --counterfactual-steps LIST
+                        Fixed comma-separated update indices (default: 0); requires opt-in
+  --probe-batch-size INT Denoiser batch size, execution only (default: 8)
+  --reference-law NAME   cached-targets (default) or manifest
+  --reference-manifest PATH Required with --reference-law manifest
+  --reference-snr-decades FLOAT
+                        Analytical-only 97-point grid depth (default: 6)
+  --terminal-noise-run-alpha FLOAT
+                        Simultaneous terminal Gaussian noise failure budget (default: 0.05)
+  --center NAME         Legacy diagnostics only: reference-initial, zero, cached-baseline
   --cached-baseline PATH Existing independent baseline for cached-baseline center
   --use-mu              Deprecated alias for --center cached-baseline;
                         requires --cached-baseline, never estimates a new center
@@ -69,8 +115,9 @@ Options:
   --per-host-concurrency INT Concurrent requests per host (default: 4)
   -h, --help            Show help
 
-The default center is the fixed mean of initial unconditional clean estimates
-from unique reference seeds. It is not the known training-distribution mean.
+Direct comparisons use the exact mean of one declared reference law: by default,
+uniform distinct compatible cached targets before selection. This finite law is
+not asserted to be the full training law. Legacy center options do not redefine it.
 All selected experiment seeds remain in the analysis, including failed recovery.
 
 --plot validates every requested scalar bundle and saved proximity metadata
@@ -79,8 +126,11 @@ fits selection, decodes images, or modifies numerical logs. Copied scalar bundle
 can also be plotted using theory_validation.sh --bundle PATH --plot.
 --plot cannot be combined with --download, --overwrite, or --recompute-experiments.
 --recompute-experiments cannot be combined with --download or --overwrite.
-Fresh Gaussian sweeps and independent loss draws are legacy-only utilities;
---evaluation-source, --num-loss-seeds, --loss-seed, and --num-baseline-seeds error.
+--refine-numerics is a separate cache-only analysis mode; missing inputs report
+an explicit recomputation command. Numerical refinement is automatic in normal analysis.
+Plot mode inherits omitted measurement settings from each saved bundle.
+--loss-timesteps saved enables marginal losses unless explicitly disabled.
+--evaluation-source and --num-baseline-seeds remain unsupported.
 Legacy theorem/gallery/baseline wrappers remain explicitly invokable utilities.
 The PYTHON environment variable is honored. Any failed stage stops the matrix.
 EOF
@@ -176,8 +226,15 @@ while (($# > 0)); do
         --download) DOWNLOAD_WEBSTER=1; shift; continue ;;
         --plot) PLOT_ONLY=1; shift; continue ;;
         --recompute-experiments) RECOMPUTE=1; shift; continue ;;
+        --refine-numerics) REFINE_NUMERICS=1; shift; continue ;;
+        --counterfactual-unconditional) COUNTERFACTUAL_UNCONDITIONAL=1; shift; continue ;;
         --diagnostics|--include-diagnostics) INCLUDE_DIAGNOSTICS=1; shift; continue ;;
         --overwrite) OVERWRITE=1; shift; continue ;;
+        --unconditional-loss|--no-unconditional-loss)
+            if [[ -n "$MEASURE_UNCONDITIONAL_LOSS" && "$MEASURE_UNCONDITIONAL_LOSS" != "$1" ]]; then
+                invalid_value "$1" "conflicting unconditional-loss flags"
+            fi
+            MEASURE_UNCONDITIONAL_LOSS="$1"; shift; continue ;;
         --use-mu) set_center cached-baseline; shift; continue ;;
         --no-mu) set_center zero; shift; continue ;;
         -h|--help) usage; exit 0 ;;
@@ -196,14 +253,28 @@ while (($# > 0)); do
         --center) destination=CENTER_VALUE ;;
         --cached-baseline) destination=CACHED_BASELINE ;;
         --target-error-tolerance) destination=TARGET_ERROR_TOLERANCE ;;
+        --num-loss-seeds) destination=NUM_LOSS_SEEDS ;;
+        --loss-seed) destination=LOSS_SEED ;;
+        --loss-timesteps) destination=LOSS_TIMESTEPS ;;
+        --num-unconditional-loss-seeds) destination=NUM_UNCONDITIONAL_LOSS_SEEDS ;;
+        --probe-batch-size) destination=PROBE_BATCH_SIZE ;;
+        --counterfactual-steps) destination=COUNTERFACTUAL_STEPS ;;
+        --reference-law) destination=REFERENCE_LAW ;;
+        --reference-manifest) destination=REFERENCE_MANIFEST ;;
+        --reference-snr-decades) destination=REFERENCE_SNR_DECADES ;;
+        --terminal-noise-run-alpha) destination=TERMINAL_NOISE_RUN_ALPHA ;;
+        --numerical-decimal-precision) destination=NUMERICAL_DECIMAL_PRECISION ;;
+        --numerical-max-decimal-products) destination=NUMERICAL_MAX_DECIMAL_PRODUCTS ;;
+        --numerical-max-variation-nodes) destination=NUMERICAL_MAX_VARIATION_NODES ;;
+        --numerical-variation-absolute-width) destination=NUMERICAL_VARIATION_ABSOLUTE_WIDTH ;;
         --selection-strategy) destination=SELECTION_STRATEGY ;;
         --downscale) destination=DOWNSCALE_FACTOR ;;
         --device) destination=DEVICE ;;
         --direct-workers) destination=DIRECT_WORKERS ;;
         --direct-attempts) destination=DIRECT_ATTEMPTS ;;
         --per-host-concurrency) destination=PER_HOST_CONCURRENCY ;;
-        --evaluation-source|--num-loss-seeds|--loss-seed|--num-baseline-seeds)
-            invalid_value "$option" "removed from cache-only theory; invoke the explicit legacy experiment wrapper for independent inference" ;;
+        --evaluation-source|--num-baseline-seeds)
+            invalid_value "$option" "unsupported; use the direct probe measurement options" ;;
         *) printf 'run_all.sh: unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
     if [[ "$1" == *=* ]]; then
@@ -220,10 +291,10 @@ case "$MODEL" in all|sdv1|sdv2|realvis) ;; *) invalid_value "--model" "$MODEL" ;
 case "$SCHEDULER" in all|ddim|ddpm) ;; *) invalid_value "--scheduler" "$SCHEDULER" ;; esac
 case "$CENTER" in reference-initial|zero|cached-baseline) ;; *) invalid_value "--center" "$CENTER" ;; esac
 [[ "$SELECTION_STRATEGY" == "gmm" ]] || invalid_value "--selection-strategy" "$SELECTION_STRATEGY"
-if [[ "$CENTER" == cached-baseline && -z "$CACHED_BASELINE" ]]; then
+if [[ "$CENTER" == cached-baseline && -z "$CACHED_BASELINE" && "$PLOT_ONLY" == 0 && "$REFINE_NUMERICS" == 0 ]]; then
     invalid_value "--cached-baseline" "required for the existing independent baseline center"
 fi
-if [[ "$CENTER" != cached-baseline && -n "$CACHED_BASELINE" ]]; then
+if [[ "$CENTER" != cached-baseline && -n "$CACHED_BASELINE" && "$PLOT_ONLY" == 0 && "$REFINE_NUMERICS" == 0 ]]; then
     invalid_value "--cached-baseline" "requires --center cached-baseline"
 fi
 MODEL_SCHEDULER_PAIRS=()
@@ -252,7 +323,10 @@ if ((RECOMPUTE)); then
     ((!DOWNLOAD_WEBSTER)) || invalid_value "--recompute-experiments" "cannot be combined with --download"
     ((!OVERWRITE)) || invalid_value "--recompute-experiments" "cannot be combined with --overwrite"
 fi
-if ((!PLOT_ONLY && !RECOMPUTE)); then
+if ((REFINE_NUMERICS)); then
+    ((!PLOT_ONLY && !RECOMPUTE && !DOWNLOAD_WEBSTER && !OVERWRITE)) || invalid_value "--refine-numerics" "cannot be combined with --plot, --recompute-experiments, --download, or --overwrite"
+fi
+if ((!PLOT_ONLY && !RECOMPUTE && !REFINE_NUMERICS)); then
     normalize_positive_integer "--downscale" "$DOWNSCALE_FACTOR" DOWNSCALE_FACTOR
 fi
 if ((DOWNLOAD_WEBSTER)); then
@@ -265,7 +339,70 @@ if ((DOWNLOAD_WEBSTER)); then
 fi
 CACHE_OVERWRITE_ARGUMENTS=()
 if ((OVERWRITE)); then CACHE_OVERWRITE_ARGUMENTS=(--overwrite); fi
-THEORY_CENTER_ARGUMENTS=(--center "$CENTER")
+THEORY_CENTER_ARGUMENTS=()
+if ((CENTER_EXPLICIT)); then THEORY_CENTER_ARGUMENTS=(--center "$CENTER"); fi
+THEORY_MEASUREMENT_ARGUMENTS=()
+if ((COUNTERFACTUAL_UNCONDITIONAL)); then
+    THEORY_MEASUREMENT_ARGUMENTS+=(--counterfactual-unconditional)
+fi
+if [[ -n "$COUNTERFACTUAL_STEPS" ]]; then
+    ((COUNTERFACTUAL_UNCONDITIONAL || PLOT_ONLY || REFINE_NUMERICS)) || invalid_value --counterfactual-steps "requires --counterfactual-unconditional"
+    [[ "$COUNTERFACTUAL_STEPS" =~ ^[0-9]+(,[0-9]+)*$ ]] || invalid_value --counterfactual-steps "expected comma-separated nonnegative integers"
+    THEORY_MEASUREMENT_ARGUMENTS+=(--counterfactual-steps "$COUNTERFACTUAL_STEPS")
+fi
+for option_variable in "num-loss-seeds:NUM_LOSS_SEEDS" "num-unconditional-loss-seeds:NUM_UNCONDITIONAL_LOSS_SEEDS" "probe-batch-size:PROBE_BATCH_SIZE" "numerical-decimal-precision:NUMERICAL_DECIMAL_PRECISION" "numerical-max-variation-nodes:NUMERICAL_MAX_VARIATION_NODES"; do
+    option="--${option_variable%%:*}"; variable="${option_variable#*:}"
+    if [[ -n "${!variable}" ]]; then
+        normalize_positive_integer "$option" "${!variable}" "$variable"
+        THEORY_MEASUREMENT_ARGUMENTS+=("$option" "${!variable}")
+    fi
+done
+if [[ -n "$NUMERICAL_MAX_DECIMAL_PRODUCTS" ]]; then
+    normalize_nonnegative_integer --numerical-max-decimal-products "$NUMERICAL_MAX_DECIMAL_PRODUCTS" NUMERICAL_MAX_DECIMAL_PRODUCTS 9223372036854775807
+    THEORY_MEASUREMENT_ARGUMENTS+=(--numerical-max-decimal-products "$NUMERICAL_MAX_DECIMAL_PRODUCTS")
+fi
+if [[ -n "$NUMERICAL_DECIMAL_PRECISION" ]] && decimal_greater_than 32 "$NUMERICAL_DECIMAL_PRECISION"; then
+    invalid_value --numerical-decimal-precision "must be at least 32"
+fi
+if [[ -n "$NUMERICAL_VARIATION_ABSOLUTE_WIDTH" ]]; then
+    normalize_finite_float --numerical-variation-absolute-width "$NUMERICAL_VARIATION_ABSOLUTE_WIDTH" NUMERICAL_VARIATION_ABSOLUTE_WIDTH
+    LC_ALL=C awk -v value="$NUMERICAL_VARIATION_ABSOLUTE_WIDTH" 'BEGIN {exit !(value > 0)}' || invalid_value --numerical-variation-absolute-width "must be positive"
+    THEORY_MEASUREMENT_ARGUMENTS+=(--numerical-variation-absolute-width "$NUMERICAL_VARIATION_ABSOLUTE_WIDTH")
+fi
+if [[ -n "$LOSS_SEED" ]]; then
+    normalize_nonnegative_integer --loss-seed "$LOSS_SEED" LOSS_SEED 9223372036854775807
+    THEORY_MEASUREMENT_ARGUMENTS+=(--loss-seed "$LOSS_SEED")
+fi
+if [[ -n "$LOSS_TIMESTEPS" ]]; then
+    case "$LOSS_TIMESTEPS" in initial|saved) ;; *) invalid_value --loss-timesteps "$LOSS_TIMESTEPS" ;; esac
+    THEORY_MEASUREMENT_ARGUMENTS+=(--loss-timesteps "$LOSS_TIMESTEPS")
+fi
+if [[ -n "$REFERENCE_LAW" ]]; then
+    case "$REFERENCE_LAW" in cached-targets|manifest) ;; *) invalid_value --reference-law "$REFERENCE_LAW" ;; esac
+    THEORY_MEASUREMENT_ARGUMENTS+=(--reference-law "$REFERENCE_LAW")
+fi
+if [[ -n "$REFERENCE_MANIFEST" ]]; then
+    if [[ "$REFERENCE_LAW" == cached-targets || ( -z "$REFERENCE_LAW" && "$PLOT_ONLY" == 0 && "$REFINE_NUMERICS" == 0 ) ]]; then
+        invalid_value --reference-manifest "requires --reference-law manifest"
+    fi
+    THEORY_MEASUREMENT_ARGUMENTS+=(--reference-manifest "$REFERENCE_MANIFEST")
+fi
+if [[ "$REFERENCE_LAW" == manifest && -z "$REFERENCE_MANIFEST" && "$PLOT_ONLY" == 0 && "$REFINE_NUMERICS" == 0 ]]; then
+    invalid_value --reference-law "manifest requires --reference-manifest PATH"
+fi
+if [[ -n "$REFERENCE_SNR_DECADES" ]]; then
+    normalize_finite_float --reference-snr-decades "$REFERENCE_SNR_DECADES" REFERENCE_SNR_DECADES
+    LC_ALL=C awk -v value="$REFERENCE_SNR_DECADES" 'BEGIN {exit !(value > 0 && value <= 12)}' || invalid_value --reference-snr-decades "must be in (0,12]"
+    THEORY_MEASUREMENT_ARGUMENTS+=(--reference-snr-decades "$REFERENCE_SNR_DECADES")
+fi
+if [[ -n "$TERMINAL_NOISE_RUN_ALPHA" ]]; then
+    normalize_finite_float --terminal-noise-run-alpha "$TERMINAL_NOISE_RUN_ALPHA" TERMINAL_NOISE_RUN_ALPHA
+    LC_ALL=C awk -v value="$TERMINAL_NOISE_RUN_ALPHA" 'BEGIN {exit !(value > 0 && value < 1)}' || invalid_value --terminal-noise-run-alpha "must be in (0,1)"
+    THEORY_MEASUREMENT_ARGUMENTS+=(--terminal-noise-run-alpha "$TERMINAL_NOISE_RUN_ALPHA")
+fi
+if [[ -n "$MEASURE_UNCONDITIONAL_LOSS" ]]; then
+    THEORY_MEASUREMENT_ARGUMENTS+=("$MEASURE_UNCONDITIONAL_LOSS")
+fi
 if [[ -n "$TARGET_ERROR_TOLERANCE" ]]; then
     normalize_finite_float --target-error-tolerance "$TARGET_ERROR_TOLERANCE" TARGET_ERROR_TOLERANCE
     [[ "$TARGET_ERROR_TOLERANCE" != -* ]] || invalid_value --target-error-tolerance "must be nonnegative raw latent L2"
@@ -287,7 +424,7 @@ run_model_scheduler() {
     local COMMON_ARGUMENTS=(--model "$MODEL" --scheduler "$SCHEDULER" --g "$GUIDANCE_SCALE" --T "$NUM_INFERENCE_STEPS" --N "$NUM_SEEDS")
     local REFERENCE_ARGUMENTS=("${COMMON_ARGUMENTS[@]}" --seed-start "$NUM_SEEDS")
     local EXPERIMENT_ARGUMENTS=("${COMMON_ARGUMENTS[@]}" --seed-start 0)
-    local THEORY_ARGUMENTS=("${COMMON_ARGUMENTS[@]}" "${THEORY_CENTER_ARGUMENTS[@]}" "${THEORY_FIGURE_ARGUMENTS[@]}")
+    local THEORY_ARGUMENTS=("${COMMON_ARGUMENTS[@]}" "${THEORY_CENTER_ARGUMENTS[@]}" "${THEORY_FIGURE_ARGUMENTS[@]}" "${THEORY_MEASUREMENT_ARGUMENTS[@]}")
     if ((PLOT_ONLY)); then
         STAGE_TOTAL=3
         run_stage 'Plotting frozen reference proximity' "$PROJECT_ROOT/compute_proximity.sh" "${REFERENCE_ARGUMENTS[@]}" --selection-strategy gmm --plot
@@ -295,9 +432,14 @@ run_model_scheduler() {
         run_stage 'Plotting saved theory scalars' "$PROJECT_ROOT/theory_validation.sh" "${THEORY_ARGUMENTS[@]}" --plot
         return
     fi
+    if ((REFINE_NUMERICS)); then
+        STAGE_TOTAL=1
+        run_stage 'Refining saved theory numerics and rendering derived scalars' "$PROJECT_ROOT/theory_validation.sh" "${THEORY_ARGUMENTS[@]}" --device "$DEVICE" --refine-numerics
+        return
+    fi
     if ((RECOMPUTE)); then
         STAGE_TOTAL=1
-        run_stage 'Rebuilding theory from protected caches only' "$PROJECT_ROOT/theory_validation.sh" "${THEORY_ARGUMENTS[@]}" --device "$DEVICE" --recompute-experiments
+        run_stage 'Resuming direct theory measurements and missing learned probes' "$PROJECT_ROOT/theory_validation.sh" "${THEORY_ARGUMENTS[@]}" --device "$DEVICE" --recompute-experiments
         return
     fi
     run_stage 'Checking/resuming reference trajectories' "$PROJECT_ROOT/generate.sh" "${REFERENCE_ARGUMENTS[@]}" --device "$DEVICE" --downscale "$DOWNSCALE_FACTOR" "${CACHE_OVERWRITE_ARGUMENTS[@]}"
@@ -307,7 +449,7 @@ run_model_scheduler() {
     run_stage 'Rebuilding frozen GMM reference proximity' "$PROJECT_ROOT/compute_proximity.sh" "${REFERENCE_ARGUMENTS[@]}" --selection-strategy gmm --overwrite
     run_stage 'Rebuilding saved experiment proximity' "$PROJECT_ROOT/compute_proximity.sh" "${EXPERIMENT_ARGUMENTS[@]}" --selection-strategy gmm --overwrite
     if ((OVERWRITE)); then THEORY_ARGUMENTS+=(--recompute-experiments); fi
-    run_stage 'Reducing theory once and plotting saved scalars' "$PROJECT_ROOT/theory_validation.sh" "${THEORY_ARGUMENTS[@]}" --device "$DEVICE"
+    run_stage 'Measuring four-stage mechanism suite and plotting saved scalars' "$PROJECT_ROOT/theory_validation.sh" "${THEORY_ARGUMENTS[@]}" --device "$DEVICE"
 }
 
 cd "$PROJECT_ROOT"
@@ -318,7 +460,7 @@ trap 'status=$?; printf "run_all.sh: pipeline failed for %s (exit %s)\n" "$RUN_C
 # Validate the entire matrix before any renderer can write a figure.
 if ((PLOT_ONLY)); then
     for pair in "${MODEL_SCHEDULER_PAIRS[@]}"; do
-        "$PROJECT_ROOT/theory_validation.sh" --model "${pair%%:*}" --scheduler "${pair#*:}" --g "$GUIDANCE_SCALE" --T "$NUM_INFERENCE_STEPS" --N "$NUM_SEEDS" "${THEORY_CENTER_ARGUMENTS[@]}" "${THEORY_FIGURE_ARGUMENTS[@]}" --validate-only --validate-proximity
+        "$PROJECT_ROOT/theory_validation.sh" --model "${pair%%:*}" --scheduler "${pair#*:}" --g "$GUIDANCE_SCALE" --T "$NUM_INFERENCE_STEPS" --N "$NUM_SEEDS" "${THEORY_CENTER_ARGUMENTS[@]}" "${THEORY_FIGURE_ARGUMENTS[@]}" "${THEORY_MEASUREMENT_ARGUMENTS[@]}" --validate-only --validate-proximity
     done
 fi
 if ((DOWNLOAD_WEBSTER)); then

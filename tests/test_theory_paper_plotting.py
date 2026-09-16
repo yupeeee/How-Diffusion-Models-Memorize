@@ -13,6 +13,7 @@ from utils.experiments import plotting as shared
 from utils.experiments.theory import paper_plotting as plotting
 from utils.experiments.theory.contracts import TheoryError, numerical_config
 from utils.experiments.theory.paper_contracts import (
+    BUNDLE_SCHEMA_VERSION,
     METRIC_SCHEMA_VERSION,
     load_paper_inputs,
     measurement_sources,
@@ -28,7 +29,7 @@ def compact_fixture(root, *, terminal=False, diagnostics=False):
     identity = {"config": scientific, "measurement_sources": measurement_sources()}
     digest = canonical_hash(identity)
     config = dict(
-        schema_version=1,
+        schema_version=BUNDLE_SCHEMA_VERSION,
         metric_schema_version=METRIC_SCHEMA_VERSION,
         scientific_config=scientific,
         scientific_identity=identity,
@@ -53,7 +54,114 @@ def compact_fixture(root, *, terminal=False, diagnostics=False):
             trend={"slope": 0.03, "intercept": 0.01},
             symlog_linthresh=0.02,
         )
-        if entry["kind"] == "scatter":
+        if entry["kind"] == "pair_loss":
+            frame = pd.DataFrame(dict(
+                x=[.1, .2, 1., 4.], y=[.3, .4, 1.1, 3.],
+                control_y=[.8, 1., 2., 4.], mean_terminal_sscd=[-.1, .5, .8, 1.1],
+                x_low=[.08, .15, .8, 3.5], x_high=[.12, .25, 1.2, 4.5],
+                y_low=[.2, .3, 1., 2.5], y_high=[.4, .5, 1.2, 3.5],
+                record_id=["NA", "0001", "1e5", "null"],
+            ))
+            metadata["counts"] = {"pairs": 4, "gaussian_seeds_per_pair": 2, "forward_draws": 64}
+        elif entry["kind"] == "four_response":
+            grid = sorted(set([k/40 for k in range(41)] + [1/scientific["guidance_scale"]]))
+            frame = pd.DataFrame([
+                dict(group=group, s=s, median=sign*s, q25=sign*s-.05*s, q75=sign*s+.05*s,
+                     minimum=sign*s-.1*s, maximum=sign*s+.1*s, denominator_weight=1., eligible_count=2)
+                for group, sign in zip(GROUPS, (1., -2.)) for s in grid])
+            metadata.update(dose_grid=grid, guidance_scale=scientific["guidance_scale"], symlog_linthresh=1e-3,
+                            cfg_endpoint_label="Reconstructed matched CFG")
+        elif entry["kind"] == "four_chronological":
+            metrics = [("gap", .2), ("joint_error", .5)] if stem == "branch_gap_synchronization" else (
+                [("conditional", .3), ("unconditional", .5)] if stem == "branch_target_errors" else
+                [("gap", .2), ("joint_error", .5), ("bound", 1.)])
+            frame = pd.DataFrame([
+                dict(group=group, metric=metric, step_index=k, snr=snr, median=value,
+                     q25=value*.8, q75=value*1.2, minimum=value*.7, maximum=value*1.3,
+                     denominator_weight=1., segment_id=0)
+                for group in GROUPS for metric, value in metrics
+                for k, snr in [(0, .01), (1, .1), (2, 10.)]])
+            metadata["prediction_steps"] = 3
+        elif entry["kind"] == "four_peak":
+            frame = pd.DataFrame([
+                dict(group=group, step_index=k, fraction=value, denominator_weight=1., sample_count=1)
+                for group in GROUPS for k, value in [(0, .1), (1, .2), (2, .5)]])
+            metadata.update(prediction_steps=3, shape_group_counts={group: {
+                "samples": 5, "resolved_peak_count": 4, "unassigned_weight_fraction": .2,
+                "status_counts": {"resolved_peak": 4, "flat": 1}} for group in GROUPS})
+        elif entry["kind"] == "four_motion":
+            group = entry["outcome_group"]
+            frame = pd.DataFrame([
+                dict(group=group, metric=metric, step_index=k, mean=value, minimum=value-.1,
+                     maximum=value+.1, denominator_weight=1.)
+                for metric, value in [("conditional", .3), ("unconditional", -.1), ("quadratic", .04), ("change", .24)]
+                for k in (0, 1)])
+            metadata.update(prediction_steps=3, group=group)
+        elif entry["kind"] in {"four_terminal_scatter", "four_counterfactual"}:
+            scope = "original_clean_terminal_theorem" if terminal else "finite_terminal_update_extension_deterministic"
+            frame = pd.DataFrame(dict(x=[0., .2, 1., 4.], y=[0., .1, .8, 3.], terminal_sscd=[-.1, .5, .8, 1.1],
+                                      applicable=[True]*4, terminal_scope=[scope]*4, step_index=[0]*4,
+                                      counterfactual_I_net=[0., .1, .2, 1.]))
+            metadata.update(axis_scale="linear", terminal_scope=scope, original_clean_counts={"applicable": 4 if terminal else 0, "total": 4},
+                            zero_counts={"x": 1, "y": 1, "both": 1}, manuscript_extension_required=not terminal)
+        elif entry["kind"] in {"reference_convergence", "reference_native_sweep", "four_reference"}:
+            native_sweep = entry["kind"] in {"reference_native_sweep", "four_reference"}
+            rows = []
+            for metric in ("reference", "learned", "reference_error"):
+                for k, snr in enumerate((.01, .1, 10.) if native_sweep else (.01,)):
+                    value = {"reference": .5, "learned": .7, "reference_error": .3}[metric] + k
+                    rows.append(dict(metric=metric, source_range="native" if native_sweep else "native_initial", segment_id=0, step_index=k,
+                                     snr=snr, median=value, q25=value*.8, q75=value*1.2, minimum=value*.7, maximum=value*1.3))
+            if not native_sweep or entry["kind"] == "four_reference":
+                rows += [dict(metric="reference", source_range="analytical", segment_id=0, step_index=-1,
+                              snr=snr, median=v, q25=v*.8, q75=v*1.2, minimum=v*.7, maximum=v*1.3)
+                         for snr, v in ((1e-8, .0005), (1e-5, .02), (.01, .5))]
+            frame = pd.DataFrame(rows)
+            metadata["reference_scale_rmse"] = 1.
+            metadata["native_sweep_figure"] = "appendix/lemma2_native_gaussian_sweep"
+        elif entry["kind"] == "injection_geometry":
+            frame = pd.DataFrame(dict(x=[-1., .5, 1., 4.], y=[.3, .8, 0., 3.],
+                                      terminal_sscd=[.1, .5, .8, 1.], marker_class=["observed"]*4))
+        elif entry["kind"] == "feedback_fractions":
+            frame = pd.DataFrame([
+                dict(group=group, metric=metric, step_index=k, snr=snr, denominator_weight=1.,
+                     fraction=f if metric == "feedback" else 0.,
+                     upper_fraction=min(1., f+.1) if metric == "feedback" else .1,
+                     unresolved_count=1)
+                for group in GROUPS for metric in ("feedback", "condition")
+                for k, snr, f in [(0, .01, .2), (1, .1, .5), (2, 10., .1)]
+            ])
+            metadata["condition_zero_overlap"] = True
+        elif entry["kind"] == "numerical_resolution":
+            frame = pd.DataFrame([
+                dict(group=group, metric=metric, step_index=k, snr=snr,
+                     resolved_fraction=resolved, unknown_fraction=1-resolved,
+                     denominator_weight=1., unresolved_count=1)
+                for group in GROUPS
+                for metric in ("feedback", "condition", "source_robust_feedback")
+                for k, snr, resolved in [(0, .01, .3), (1, .1, .8), (2, 10., .6)]
+            ])
+            metadata["numerical_resolution_table"] = "audit_data/proposition5_numerical_causes.csv"
+        elif entry["kind"] == "synchronization_curves":
+            frame = pd.DataFrame([
+                dict(group=group, metric=metric, step_index=k, snr=snr, median=v,
+                     q25=v*.8, q75=v*1.2, minimum=v*.7, maximum=v*1.3)
+                for group in GROUPS for metric, v in [("joint_error", .5), ("gap", .2), ("bound", 1.)]
+                for k, snr in [(0, .01), (1, .1), (2, 10.)]
+            ])
+        elif entry["kind"] in {"terminal_cdf", "terminal_components"}:
+            components = entry["kind"] == "terminal_components"
+            key = "component" if components else "distribution"
+            names = ("conditional", "guidance", "scheduler") if components else ("actual", "observable", "reference")
+            frame = pd.DataFrame([
+                {key: name, "value": value, "cdf": cdf}
+                for name in names for value, cdf in [(.2, .25), (1., .75), (4., 1.)]
+            ])
+            metadata.update(zero_mass={name: 0. for name in names},
+                            terminal_scope="original_clean_terminal_theorem" if terminal else "finite_terminal_update_extension_deterministic",
+                            original_clean_counts={"applicable": 4 if terminal else 0, "total": 4},
+                            manuscript_extension_required=not terminal)
+        elif entry["kind"] == "scatter":
             frame = pd.DataFrame(
                 dict(
                     x=[-1.0, 0.2, 1.0, 4.0],
@@ -61,8 +169,25 @@ def compact_fixture(root, *, terminal=False, diagnostics=False):
                     terminal_sscd=[-0.1, 0.5, 0.8, 1.1],
                     record_id=["NA", "0001", "1e5", "null"],
                     seed=["0", "1", "0", "1"],
+                    marker_class=["observed"] * 4,
+                    applicable=[True] * 4,
                 )
             )
+            if stem == "lemma4_matched_displacement":
+                frame["marker_class"] = ["independently_checked", "constructed"] * 2
+                frame["direct_lemma4_verification_source"] = [
+                    "independent_deterministic_affine_counterfactual",
+                    "constructed_shared_innovation_from_saved_endpoint_not_independent",
+                ] * 2
+            if entry.get("terminal_applicability"):
+                frame["applicable"] = terminal
+                frame["marker_class"] = "observed" if terminal else "inapplicable"
+                metadata["clean_update_prerequisite"] = {"applicable": 4 if terminal else 0, "total": 4}
+            if entry.get("frequency_intervals"):
+                frame["x"] = [.1, .3, .7, 1.]
+                frame["y"] = [.05, .2, .5, .8]
+                frame["frequency_low"] = [0., .1, .4, .7]
+                frame["frequency_high"] = [.1, .3, .6, .9]
         elif entry["kind"] == "ecdf":
             records = []
             if "distribution" in entry["required_columns"]:
@@ -138,6 +263,7 @@ def compact_fixture(root, *, terminal=False, diagnostics=False):
             )
         else:
             metric_branches = {
+                "lemma2_unconditional_baseline": ["reference", "learned", "reference_error"],
                 "synchronization_bound_components": [
                     "gap",
                     "conditional",
@@ -212,12 +338,12 @@ def test_fixed_registry_has_exact_paper_selection():
                 if e["category"] == "appendix" and not e.get("conditional_terminal")
             ]
         )
-        == 8
+        == 11
     )
-    assert len([e for e in entries if e.get("conditional_terminal")]) == 2
+    assert not any(e.get("conditional_terminal") for e in entries)
     assert all(len(e["outputs"]) == 2 for e in entries)
     assert all(
-        "\\frac" not in str(e["axes"]) and "RMSE" not in str(e["axes"]) for e in entries
+        "\\frac" not in str(e["axes"]) and "Empirical" not in str(e["axes"]) for e in entries
     )
     assert all("mu_ref" not in e["formula"] for e in entries)
     assert all("\n" not in label for e in entries for label in e["axes"].values())
@@ -235,12 +361,12 @@ def test_real_exports_single_page_single_axes_and_no_numeric_mutation(
     seen = []
     real_publish = plotting.publish_figures
 
-    def capture(output, items):
+    def capture(output, items, **options):
         for figure, names in items:
             assert len([a for a in figure.axes if a.get_label() != "<colorbar>"]) == 1
             assert list(figure.get_size_inches()) == [4.0, 4.0]
             seen.append(names)
-        real_publish(output, items)
+        real_publish(output, items, **options)
 
     monkeypatch.setattr(plotting, "publish_figures", capture)
 
@@ -253,8 +379,8 @@ def test_real_exports_single_page_single_axes_and_no_numeric_mutation(
     monkeypatch.setattr(np, "load", forbidden)
     monkeypatch.setattr(pd, "read_parquet", forbidden)
     manifest = plotting.render_paper(root)
-    assert len(seen) == 14
-    assert len(manifest["files"]) == 29
+    assert len(seen) == 15
+    assert len(manifest["files"]) == 31
     assert not plt.get_fignums()
     for names in seen:
         assert (root / names["png"]).read_bytes().startswith(b"\x89PNG")
@@ -269,13 +395,13 @@ def test_real_exports_single_page_single_axes_and_no_numeric_mutation(
         file_sha256(root / name) == digest for name, digest in manifest["files"].items()
     )
     config, summary, audit, frames = load_paper_inputs(root)
-    assert frames["initial_recovery"].record_id.tolist() == [
+    assert frames["initial_loss_recovery"].record_id.tolist() == [
         "NA",
         "0001",
         "1e5",
         "null",
     ]
-    assert frames["initial_recovery"].terminal_sscd.tolist() == [-0.1, 0.5, 0.8, 1.1]
+    assert frames["initial_loss_recovery"].mean_terminal_sscd.tolist() == [-0.1, 0.5, 0.8, 1.1]
     second = plotting.render_paper(root)
     assert second["files"].keys() == manifest["files"].keys()
     assert all(
@@ -313,7 +439,7 @@ def test_export_failure_keeps_old_pair_manifest_and_closes_figures(
 
 
 @pytest.mark.parametrize(
-    "relative", ["main/initial_recovery.png", "figure_captions.md"]
+    "relative", ["main/initial_loss_recovery.png", "figure_captions.md"]
 )
 def test_unowned_collision_is_checked_before_any_export(
     tmp_path, monkeypatch, relative
@@ -334,9 +460,9 @@ def test_unowned_collision_is_checked_before_any_export(
 
 
 def test_saved_signs_extrema_trend_and_ambiguity_are_drawn_without_refitting(tmp_path):
-    root = compact_fixture(tmp_path / "paper")
-    config, summary, _audit, frames = load_paper_inputs(root)
-    entries = {e["stem"]: e for e in paper_registry()}
+    root = compact_fixture(tmp_path / "paper", diagnostics=True)
+    config, summary, _audit, frames = load_paper_inputs(root, diagnostics=True)
+    entries = {e["stem"]: e for e in paper_registry(True)}
 
     def draw(stem):
         return plotting._draw(
@@ -371,9 +497,9 @@ def test_saved_signs_extrema_trend_and_ambiguity_are_drawn_without_refitting(tmp
 
 
 def test_invalid_saved_limits_and_ambiguity_do_not_hide_data(tmp_path):
-    root = compact_fixture(tmp_path / "paper")
-    config, summary, _audit, frames = load_paper_inputs(root)
-    entries = {e["stem"]: e for e in paper_registry()}
+    root = compact_fixture(tmp_path / "paper", diagnostics=True)
+    config, summary, _audit, frames = load_paper_inputs(root, diagnostics=True)
+    entries = {e["stem"]: e for e in paper_registry(True)}
     stem = "joint_target_recovery_early"
     with pytest.raises(TheoryError, match="crop"):
         plotting._draw(entries[stem], frames[stem], {"x_limits": [0, 1]}, config)
@@ -412,12 +538,12 @@ def test_optional_diagnostics_use_saved_all_population_and_analytical_snr(tmp_pa
         "estimated_and_resolved_distinct"
     ]
     assert entries["terminal_error_terms"]["outputs"] == {}
-    assert not (root / "appendix/terminal_error_terms.png").exists()
+    assert not (root / "diagnostics/terminal_error_terms.png").exists()
     assert not plt.get_fignums()
 
 
 def test_early_late_alias_omits_duplicate_file_with_named_reason(tmp_path):
-    root = compact_fixture(tmp_path / "paper")
+    root = compact_fixture(tmp_path / "paper", diagnostics=True)
     import json
 
     path = root / "summary.json"
@@ -428,12 +554,12 @@ def test_early_late_alias_omits_duplicate_file_with_named_reason(tmp_path):
         alias_of="joint_target_recovery_early",
     )
     atomic_write_json(path, summary)
-    manifest = plotting.render_paper(root)
+    manifest = plotting.render_paper(root, diagnostics=True)
     entry = next(
         e for e in manifest["figures"] if e["stem"] == "joint_target_recovery_late"
     )
     assert entry["status"] == "alias" and entry["outputs"] == {}
-    assert not (root / "appendix/joint_target_recovery_late.pdf").exists()
+    assert not (root / "diagnostics/joint_target_recovery_late.pdf").exists()
 
 
 def test_dimensionless_and_mixed_axis_units_are_explicit_in_registry():

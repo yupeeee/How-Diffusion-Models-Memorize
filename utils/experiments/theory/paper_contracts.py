@@ -12,14 +12,15 @@ import shlex
 import tempfile
 import uuid
 
+import numpy as np
 import pandas as pd
 
 from utils.common.cli import generation_cache_namespace, generation_cache_parent_name
 from utils.common.io import atomic_write_json, canonical_hash, file_sha256
-from .contracts import TheoryError, numerical_config, read_object
+from .contracts import FOUR_STAGE_OPTION_KEYS, TheoryError, numerical_config, read_object
 
-METRIC_SCHEMA_VERSION = "paper-measurements-1"
-BUNDLE_SCHEMA_VERSION = 1
+METRIC_SCHEMA_VERSION = "four-stage-evidence-1"
+BUNDLE_SCHEMA_VERSION = 5
 ID_COLUMNS = {
     "original_index",
     "record_id",
@@ -28,6 +29,11 @@ ID_COLUMNS = {
     "seed",
     "target_atom_id",
     "atom_id",
+    "draw_id",
+    "noise_draw_id",
+    "probe_id",
+    "input_law_id",
+    "reference_law_id",
 }
 
 
@@ -86,7 +92,7 @@ def contained_path(root, relative):
 
 
 def recompute_command(config):
-    c = config.get("scientific_config", config)
+    c = saved_scientific_configuration(config) if "scientific_config" in config else config
     command = (
         "./run_all.sh --model "
         + c["model_name"]
@@ -99,10 +105,56 @@ def recompute_command(config):
     )
 
     if c.get("cached_baseline"):
-        command += " --cached-baseline " + shlex.quote(c["cached_baseline"])
+        command += " --cached-baseline " + shlex.quote(str(c["cached_baseline"]))
     if c.get("target_error_tolerance") is not None:
         command += " --target-error-tolerance " + str(c["target_error_tolerance"])
+    for key in ("num_loss_seeds", "loss_seed", "loss_timesteps", "num_unconditional_loss_seeds", "reference_law", "reference_manifest", "reference_snr_decades", "terminal_noise_run_alpha", "numerical_decimal_precision", "numerical_max_decimal_products", "numerical_max_variation_nodes", "numerical_variation_absolute_width"):
+        if c.get(key) is not None:
+            command += " --" + key.replace("_", "-") + " " + shlex.quote(str(c[key]))
+    if c.get("counterfactual_unconditional"):
+        command += " --counterfactual-unconditional --counterfactual-steps " + shlex.quote(",".join(map(str, c.get("counterfactual_steps", [0]))))
+    if "measure_unconditional_loss" in c:
+        command += " --unconditional-loss" if c["measure_unconditional_loss"] else " --no-unconditional-loss"
     return command
+
+
+
+def saved_scientific_configuration(saved):
+    """Merge optional supplements only at the paper boundary.
+
+    The base scientific_config remains readable by the unchanged numerical
+    cache loader, so an optional denoiser supplement cannot invalidate probes.
+    """
+    if not isinstance(saved.get("scientific_config"), dict):
+        raise TheoryError("Missing paper scientific configuration")
+    optional = saved.get("supplemental_config", {})
+    if not isinstance(optional, dict) or set(optional) - set(FOUR_STAGE_OPTION_KEYS):
+        raise TheoryError("Unknown paper supplemental configuration")
+    return numerical_config(**(saved["scientific_config"] | optional))
+
+
+def saved_plot_configuration(bundle, *, requested, explicit_keys=(), portable=False):
+    """Inherit saved measurement settings without opening sources or initializing models.
+
+    Repository model/scheduler/g/T/N remain mandatory identity checks. A copied
+    bundle supplies those too unless explicitly overridden by the caller.
+    """
+    saved = saved_scientific_configuration(read_object(contained_path(bundle, "run_config.json")))
+    keys = set(explicit_keys)
+    if not portable:
+        keys.update(("model_name", "scheduler_name", "guidance_scale",
+                     "num_inference_steps", "num_seeds"))
+    candidate = dict(saved)
+    candidate.update({key: requested[key] for key in keys if key in requested})
+    candidate = numerical_config(**candidate)
+    # Resolve manifest paths as identity strings only. Plotting never opens them.
+    if candidate != saved:
+        conflicts = sorted(key for key in candidate if candidate[key] != saved.get(key))
+        raise TheoryError(
+            "Explicit plot settings conflict with saved measurements: "
+            + ", ".join(conflicts) + ". Recompute with " + recompute_command(candidate)
+        )
+    return candidate
 
 
 def measurement_sources():
@@ -110,10 +162,40 @@ def measurement_sources():
     return {
         name: file_sha256(base / name)
         for name in (
-            "paper_measurements.py",
-            "paper_feedback.py",
-            "candidate_summaries.py",
+            "four_stage_figures.py",
+            "four_stage_measurements.py",
+            "four_stage_reduce.py",
+            "counterfactual_probes.py",
+            "gaussian_controls.py",
+            "supplemental_cache.py",
+            "direct_figures.py",
+            "evidence_figures.py",
+            "evidence_measurements.py",
+            "evidence_reduce.py",
+            "evidence_reference.py",
+            "numerical_reduce.py",
+            "numerical_refinement.py",
+            "numerical_intervals.py",
+            "numerical_screening.py",
+            "direct_measurements.py",
+            "direct_integration.py",
+            "reference_law.py",
+            "direct_probes.py",
+            "direct_probe_math.py",
+            "direct_probe_cache.py",
+            "direct_reduce.py",
+            "support.py",
+            "scheduler_adapter.py",
+            "candidate_integration.py",
+            "candidate_feedback.py",
+            "feedback.py",
+            "metrics.py",
             "summaries.py",
+            "cache_reader.py",
+            "../../models/probe_loading.py",
+            "../../models/sampling.py",
+            "../../models/prediction_conversion.py",
+            "../../models/schedulers.py",
         )
     }
 
@@ -124,7 +206,10 @@ def frame_schema(frame):
         values = frame[name]
         if name in ID_COLUMNS or name.endswith("_id"):
             schema[name] = "string"
-        elif pd.api.types.is_bool_dtype(values.dtype):
+        elif pd.api.types.is_bool_dtype(values.dtype) or (
+            len(values.dropna()) > 0
+            and all(isinstance(value, (bool, np.bool_)) for value in values.dropna())
+        ):
             schema[name] = "boolean"
         elif pd.api.types.is_integer_dtype(values.dtype):
             schema[name] = "integer"
@@ -199,23 +284,22 @@ def load_paper_inputs(
     """Read compact CSVs and stored metadata only; never open backing shards."""
     bundle = reject_symlinks(bundle)
     config = read_object(contained_path(bundle, "run_config.json"))
-    command = recompute_command(config)
+    combined_config = saved_scientific_configuration(config)
+    command = recompute_command(combined_config)
     try:
         if (
             config.get("schema_version") != BUNDLE_SCHEMA_VERSION
             or config.get("metric_schema_version") != METRIC_SCHEMA_VERSION
         ):
             raise TheoryError("Obsolete paper measurement schema")
-        if expected_config is not None and config[
-            "scientific_config"
-        ] != numerical_config(**expected_config):
+        if expected_config is not None and combined_config != numerical_config(**expected_config):
             raise TheoryError(
                 "Paper scientific configuration differs (including center/tolerance)"
             )
         identity = config["scientific_identity"]
         if (
             canonical_hash(identity) != config["scientific_hash"]
-            or identity["config"] != config["scientific_config"]
+            or identity["config"] != combined_config
         ):
             raise TheoryError("Paper scientific identity/hash differs")
         if check_recipe and identity["measurement_sources"] != measurement_sources():
@@ -247,7 +331,7 @@ def load_paper_inputs(
                 raise TheoryError(f"Missing/stale compact paper input: {name}")
         from .paper_registry import paper_registry
 
-        entries = paper_registry(diagnostics=diagnostics)
+        entries = paper_registry(diagnostics=diagnostics, counterfactual=combined_config.get("counterfactual_unconditional", False))
         if isinstance(entries, dict):
             entries = entries.get("figures", entries.get("entries", []))
         frames = {}
@@ -259,7 +343,7 @@ def load_paper_inputs(
             status = metadata.get("status")
             if status in {"error", "blocked", "missing"}:
                 raise TheoryError(f"{stem}: {metadata.get('reason', status)}")
-            if status == "unavailable" and entry["category"] != "diagnostics":
+            if status == "unavailable" and not entry.get("allow_unavailable", entry["category"] == "diagnostics"):
                 raise TheoryError(
                     f"Required paper figure {stem} is unavailable: {metadata.get('reason')}"
                 )

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Reduce protected trajectory caches, or render an independent scalar bundle."""
+"""Measure the four-stage mechanism suite, or render a saved scalar bundle."""
 
 from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 from typing import Sequence
 
@@ -16,6 +17,31 @@ from utils.common.cli import (  # noqa: E402
     finite_float,
     positive_integer,
 )
+
+
+def _configure_dependency_warnings():
+    # Diffusers ConfigMixin injects this obsolete option internally, and Hub
+    # removes it before downloading. Limit the exception to that exact warning;
+    # do not change dependencies, model loading, or scientific cache identities.
+    warnings.filterwarnings(
+        "ignore",
+        message=(
+            r"\AThe `local_dir_use_symlinks` argument is deprecated and ignored in "
+            r"`hf_hub_download`\. Downloading to a local directory does not use symlinks anymore\.\Z"
+        ),
+        category=UserWarning,
+        module=r"\Ahuggingface_hub\.utils\._validators\Z",
+    )
+
+
+def nonnegative_integer(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("expected a nonnegative integer") from error
+    if number < 0 or str(value).strip() != str(number):
+        raise argparse.ArgumentTypeError("expected a nonnegative integer")
+    return number
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,9 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate all scalar inputs without writing figures",
     )
     mode.add_argument(
+        "--refine-numerics", action="store_true",
+        help="refine saved posterior/condition numerics only; requires existing evidence inputs; never runs learned probes or upstream stages",
+    )
+    mode.add_argument(
         "--recompute-experiments",
         action="store_true",
-        help="rebuild only derived theory from existing caches",
+        help="resume direct theory measurements, including missing denoiser probes; preserve upstream caches",
     )
     parser.add_argument(
         "--bundle",
@@ -96,21 +126,50 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source-analysis",
         type=Path,
-        help="explicit validated candidate scalar bundle for analysis migration",
+        help="retired candidate migration flag; direct analysis requires measured losses",
     )
     parser.add_argument(
         "--source-logs",
         type=Path,
-        help="explicit matching archived logs for missing terminal accounting during migration",
+        help="retired archived-log migration flag; restore declared protected sources for direct analysis",
     )
     parser.add_argument("--candidate-chunk-size", type=positive_integer, default=256)
     parser.add_argument("--query-chunk-size", type=positive_integer, default=16)
-    for old in (
-        "--evaluation-source",
-        "--num-loss-seeds",
-        "--loss-seed",
-        "--num-baseline-seeds",
-    ):
+    parser.add_argument("--num-loss-seeds", type=positive_integer, default=None,
+                        help="independent forward-target draws (analysis default: 64)")
+    parser.add_argument("--loss-seed", type=nonnegative_integer, default=None,
+                        help="domain-separated probe RNG root (analysis default: 0)")
+    parser.add_argument("--loss-timesteps", choices=("initial", "saved"), default=None,
+                        help="forward losses at initial or all saved inputs (default: initial)")
+    parser.add_argument("--num-unconditional-loss-seeds", type=positive_integer, default=None,
+                        help="forward-marginal draws (default: 256; explicit count enables stage)")
+    marginal = parser.add_mutually_exclusive_group()
+    marginal.add_argument("--unconditional-loss", dest="measure_unconditional_loss",
+                          action="store_true", default=None)
+    marginal.add_argument("--no-unconditional-loss", dest="measure_unconditional_loss",
+                          action="store_false")
+    parser.add_argument("--counterfactual-unconditional", action="store_true", default=None,
+                        help="opt in to learned empty-prompt probes at matched next inputs; no rollout")
+    parser.add_argument("--counterfactual-steps", default=None,
+                        help="fixed comma-separated chronological nonterminal updates (default: 0)")
+    parser.add_argument("--probe-batch-size", type=positive_integer, default=8,
+                        help="execution-only denoiser batch size; default: 8")
+    parser.add_argument("--reference-law", choices=("cached-targets", "manifest"), default=None)
+    parser.add_argument("--reference-manifest", type=Path, default=None,
+                        help="explicit validated atoms/weights manifest for --reference-law manifest")
+    parser.add_argument("--reference-snr-decades", type=finite_float, default=None,
+                        help="fixed 97-point analytical-only grid spans this many decades below initial SNR (default: 6)")
+    parser.add_argument("--terminal-noise-run-alpha", type=finite_float, default=None,
+                        help="predeclared simultaneous terminal Gaussian noise failure budget per run (default: 0.05)")
+    parser.add_argument("--numerical-decimal-precision", type=positive_integer, default=None,
+                        help="base Decimal precision for flagged rows; retry uses twice this precision (default: 64)")
+    parser.add_argument("--numerical-max-decimal-products", type=nonnegative_integer, default=None,
+                        help="fixed per-row Decimal product budget (default: 2000000)")
+    parser.add_argument("--numerical-max-variation-nodes", type=positive_integer, default=None,
+                        help="fixed per-row variation enclosure node budget (default: 65)")
+    parser.add_argument("--numerical-variation-absolute-width", type=finite_float, default=None,
+                        help="requested variation enclosure width, raw latent L2 (default: 1e-6)")
+    for old in ("--evaluation-source", "--num-baseline-seeds"):
         parser.add_argument(old, help=argparse.SUPPRESS)
     return parser
 
@@ -187,24 +246,17 @@ def validate_saved_proximity(project_root: Path, config: dict) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
-    for old in (
-        "evaluation_source",
-        "num_loss_seeds",
-        "loss_seed",
-        "num_baseline_seeds",
-    ):
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(tokens)
+    explicit_options = {token.split("=", 1)[0] for token in tokens if token.startswith("--")}
+    for old in ("evaluation_source", "num_baseline_seeds"):
         if getattr(args, old) is not None:
             parser.error(
-                f"--{old.replace('_', '-')} is removed from cache-only theory; invoke the explicit legacy wrapper for independent inference"
+                f"--{old.replace('_', '-')} is unsupported; use the direct probe measurement options"
             )
     if args.target_error_tolerance is not None and args.target_error_tolerance < 0:
         parser.error(
             "--target-error-tolerance must be nonnegative in raw latent L2 units"
-        )
-    if args.bundle and args.target_error_tolerance is not None:
-        parser.error(
-            "A copied bundle uses its saved tolerance; recompute analysis to change it"
         )
     if args.bundle and not (args.plot or args.validate_only):
         parser.error("--bundle requires --plot or --validate-only")
@@ -213,14 +265,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--validate-proximity requires --validate-only for a repository run"
         )
     if (
-        not args.bundle
+        not (args.plot or args.validate_only or args.refine_numerics)
         and args.center == "cached-baseline"
         and args.cached_baseline is None
     ):
         parser.error(
             "--center cached-baseline requires --cached-baseline with an existing independent baseline"
         )
-    if args.cached_baseline and args.center != "cached-baseline":
+    if args.cached_baseline and args.center != "cached-baseline" and not (args.plot or args.validate_only or args.refine_numerics):
         parser.error("--cached-baseline requires --center cached-baseline")
     if (args.source_analysis or args.source_logs) and (
         args.plot or args.validate_only or args.bundle
@@ -236,28 +288,81 @@ def main(argv: Sequence[str] | None = None) -> int:
         render_saved_paper,
         validate_paper_bundle,
         recompute_command,
+        saved_plot_configuration,
+        saved_scientific_configuration,
     )
 
-    config = numerical_config(
-        model_name=args.model,
-        scheduler_name=args.scheduler,
-        guidance_scale=args.g,
-        num_inference_steps=args.T,
-        num_seeds=args.N,
-        center=args.center,
-        cached_baseline=args.cached_baseline,
+    base = dict(
+        model_name=args.model, scheduler_name=args.scheduler,
+        guidance_scale=args.g, num_inference_steps=args.T, num_seeds=args.N,
+        center=args.center, cached_baseline=args.cached_baseline,
         target_error_tolerance=args.target_error_tolerance,
     )
+    science_keys = ("num_loss_seeds", "loss_seed", "loss_timesteps",
+                    "num_unconditional_loss_seeds", "measure_unconditional_loss",
+                    "reference_law", "reference_manifest",
+                    "reference_snr_decades", "terminal_noise_run_alpha",
+                    "numerical_decimal_precision", "numerical_max_decimal_products",
+                    "numerical_max_variation_nodes", "numerical_variation_absolute_width",
+                    "counterfactual_unconditional", "counterfactual_steps")
+    science = {key: getattr(args, key) for key in science_keys if getattr(args, key) is not None}
+    config = dict(base)
     try:
-        bundle = (
-            args.bundle.absolute()
-            if args.bundle
-            else PaperPaths.build(PROJECT_ROOT, **config).output_directory
-        )
+        config = numerical_config(**base)
+        bundle = args.bundle.absolute() if args.bundle else PaperPaths.build(
+            PROJECT_ROOT, **config
+        ).output_directory
+        if args.plot or args.validate_only or args.refine_numerics:
+            flag_keys = {
+                "--model": "model_name", "--scheduler": "scheduler_name",
+                "--g": "guidance_scale", "--T": "num_inference_steps", "--N": "num_seeds",
+                "--center": "center", "--use-mu": "center", "--no-mu": "center",
+                "--cached-baseline": "cached_baseline",
+                "--target-error-tolerance": "target_error_tolerance",
+                **{"--" + key.replace("_", "-"): key for key in science_keys},
+                "--unconditional-loss": "measure_unconditional_loss",
+                "--no-unconditional-loss": "measure_unconditional_loss",
+            }
+            requested = {**base, **science}
+            if args.refine_numerics:
+                from utils.experiments.theory.contracts import NUMERICAL_KEYS
+                requested = {key: value for key, value in requested.items() if key not in NUMERICAL_KEYS}
+            config = saved_plot_configuration(
+                bundle, requested=requested,
+                explicit_keys={key for flag, key in flag_keys.items() if flag in explicit_options
+                               and (not args.refine_numerics or key not in NUMERICAL_KEYS)},
+                portable=bool(args.bundle),
+            )
+            if args.refine_numerics:
+                config = numerical_config(**(config | {key: value for key, value in science.items() if key in NUMERICAL_KEYS}))
+        else:
+            # Preserve recorded draw counts/streams on derived recomputation.
+            # Explicit options still replace them; absent optional counterfactual
+            # flags do not opt a fresh measurement run into new inference.
+            saved_path = bundle / "run_config.json"
+            if saved_path.is_file():
+                from utils.experiments.theory.contracts import read_object, FOUR_STAGE_OPTION_KEYS
+                inherited = saved_scientific_configuration(read_object(saved_path))
+                science = {**{key: inherited[key] for key in science_keys
+                              if key in inherited and key not in FOUR_STAGE_OPTION_KEYS}, **science}
+                if args.reference_law == "cached-targets" and args.reference_manifest is None:
+                    science.pop("reference_manifest", None)
+                for key, flags in (("center", {"--center", "--use-mu", "--no-mu"}),
+                                   ("cached_baseline", {"--cached-baseline"}),
+                                   ("target_error_tolerance", {"--target-error-tolerance"})):
+                    if not flags.intersection(explicit_options) and key in inherited:
+                        base[key] = inherited[key]
+                if (base["center"] != "cached-baseline"
+                        and {"--center", "--use-mu", "--no-mu"}.intersection(explicit_options)
+                        and "--cached-baseline" not in explicit_options):
+                    base["cached_baseline"] = None
+            if args.num_unconditional_loss_seeds is not None and args.measure_unconditional_loss is None:
+                science["measure_unconditional_loss"] = True
+            config = numerical_config(**base, **science)
         if args.plot or args.validate_only:
             validate_paper_bundle(
                 bundle,
-                expected_config=None if args.bundle else config,
+                expected_config=config,
                 diagnostics=args.diagnostics,
             )
             if args.validate_proximity:
@@ -276,7 +381,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.plot:
                 render_saved_paper(
                     bundle,
-                    expected_config=None if args.bundle else config,
+                    expected_config=config,
                     diagnostics=args.diagnostics,
                 )
         else:
@@ -285,11 +390,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             bundle = run_paper(
                 PROJECT_ROOT,
                 **config,
-                recompute=args.recompute_experiments,
+                recompute=args.recompute_experiments or args.refine_numerics,
+                refine_numerics=args.refine_numerics,
                 diagnostics=args.diagnostics,
                 device=args.device,
                 candidate_chunk_size=args.candidate_chunk_size,
                 query_chunk_size=args.query_chunk_size,
+                probe_batch_size=args.probe_batch_size,
                 source_analysis=args.source_analysis,
                 source_logs=args.source_logs,
             )
@@ -304,6 +411,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
+
+# Spawned workers re-import the entry point as __mp_main__. Apply the same
+# presentation-only warning policy there without importing any learned model.
+if __name__ in {"__main__", "__mp_main__"}:
+    _configure_dependency_warnings()
 
 if __name__ == "__main__":
     raise SystemExit(main())

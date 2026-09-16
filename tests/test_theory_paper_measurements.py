@@ -574,7 +574,7 @@ def test_clean_update_does_not_override_terminal_theorem_guidance_domain(guidanc
 
 def test_every_nonfeedback_figure_has_exact_units_and_population_weighting():
     from utils.experiments.theory.paper_measurements import FIGURE_AXIS_UNITS
-    from utils.experiments.theory.paper_registry import paper_registry
+    from utils.experiments.theory.paper_registry import LEGACY_CORE, LEGACY_TERMINAL, LEGACY_DIAGNOSTICS
 
     tables = tables_fixture()
     tables["reference_initial"]["initial_candidate_reference_movement_rmse"] = [
@@ -589,7 +589,7 @@ def test_every_nonfeedback_figure_has_exact_units_and_population_weighting():
     )
     expected = {
         entry["stem"]
-        for entry in paper_registry(diagnostics=True)
+        for entry in LEGACY_CORE + LEGACY_TERMINAL + LEGACY_DIAGNOSTICS
         if not entry["legacy_design_id"].startswith("PF")
     }
     assert set(FIGURE_AXIS_UNITS) == set(metadata["figures"]) == expected

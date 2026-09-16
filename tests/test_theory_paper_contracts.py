@@ -74,7 +74,8 @@ def test_scientific_and_recipe_mismatches_require_analysis(tmp_path):
             ),
         )
     config = json.loads((bundle / "run_config.json").read_text())
-    config["scientific_identity"]["measurement_sources"]["paper_feedback.py"] = "stale"
+    first_source = next(iter(config["scientific_identity"]["measurement_sources"]))
+    config["scientific_identity"]["measurement_sources"][first_source] = "stale"
     from utils.common.io import canonical_hash
 
     config["scientific_hash"] = canonical_hash(config["scientific_identity"])
@@ -187,7 +188,7 @@ def test_plot_preflight_never_hashes_backing_or_audit_csvs(tmp_path, monkeypatch
 def test_stage_links_immutable_csv_and_replacement_cannot_mutate_active(tmp_path):
     output = tmp_path / "paper"
     compact_fixture(output)
-    table = output / "plot_data" / "initial_recovery.csv"
+    table = output / "plot_data" / "initial_loss_recovery.csv"
     before = file_sha256(table)
     with c.publication_lock(output):
         with pytest.raises(RuntimeError):
@@ -221,3 +222,21 @@ def test_interrupted_staging_is_recovered_without_touching_active(tmp_path):
         assert not stage.exists()
         assert not marker.exists()
         assert file_sha256(output / "summary.json") == digest
+
+
+def test_nullable_boolean_objects_remain_flags_in_compact_csv(tmp_path):
+    frame = pd.DataFrame({
+        "direct_prop5_nonnegative_condition": pd.Series([True, None, False], dtype=object),
+        "direct_theorem7_condition_certified": pd.Series([False, True, None], dtype=object),
+        "record_id": ["True", "False", "NA"],
+    })
+    path = tmp_path / "nullable.csv"
+    spec = c.write_plot_table(frame, path)
+    assert spec["schema"]["direct_prop5_nonnegative_condition"] == "boolean"
+    assert spec["schema"]["direct_theorem7_condition_certified"] == "boolean"
+    restored = c.read_plot_table(path, spec)
+    assert str(restored.direct_prop5_nonnegative_condition.dtype) == "boolean"
+    assert restored.direct_prop5_nonnegative_condition.iloc[0]
+    assert pd.isna(restored.direct_prop5_nonnegative_condition.iloc[1])
+    assert not restored.direct_prop5_nonnegative_condition.iloc[2]
+    assert restored.record_id.tolist() == ["True", "False", "NA"]

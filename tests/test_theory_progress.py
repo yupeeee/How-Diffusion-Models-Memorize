@@ -154,3 +154,53 @@ def test_exception_closes_partial_progress_without_hiding_failure(bars):
     assert not progress._thread.is_alive()
     with pytest.raises(ValueError, match="closed"):
         progress.queue.put(("late", "reduced", "cpu"))
+
+
+def test_stage_logs_start_finish_and_elapsed_without_creating_a_bar(monkeypatch):
+    from types import SimpleNamespace
+    messages = []
+    monkeypatch.setattr(theory_progress, "tqdm", SimpleNamespace(write=lambda message, **options: messages.append(message)))
+    with theory_progress.StageProgress("Saving scalar tables") as stage:
+        stage.set_detail("audit_data/feedback.csv: 100 rows")
+    assert messages[0] == "[Theory] Saving scalar tables"
+    assert messages[-1].startswith("[Theory] Finished: Saving scalar tables (")
+    assert not stage._thread.is_alive()
+
+
+def test_post_record_stage_heartbeat_reports_active_work_and_stops(monkeypatch):
+    from types import SimpleNamespace
+    messages, heartbeat = [], Event()
+    def write(message, **options):
+        messages.append(message)
+        if "still running" in message:
+            heartbeat.set()
+    monkeypatch.setattr(theory_progress, "tqdm", SimpleNamespace(write=write))
+    with theory_progress.StageProgress("Reducing plot inputs", heartbeat_seconds=.01) as stage:
+        stage.set_detail("paired bootstrap intervals")
+        assert heartbeat.wait(2), "Post-record work stayed silent"
+    assert any("still running" in message and "paired bootstrap intervals" in message for message in messages)
+    assert messages[-1].startswith("[Theory] Finished: Reducing plot inputs")
+    assert not stage._thread.is_alive()
+
+
+def test_stage_failure_is_reported_and_propagated(monkeypatch):
+    from types import SimpleNamespace
+    messages = []
+    monkeypatch.setattr(theory_progress, "tqdm", SimpleNamespace(write=lambda message, **options: messages.append(message)))
+    with pytest.raises(ValueError, match="failed serialization"):
+        with theory_progress.StageProgress("Writing metadata") as stage:
+            raise ValueError("failed serialization")
+    assert messages[-1].startswith("[Theory] Failed: Writing metadata (")
+    assert not any("Finished" in message for message in messages)
+    assert not stage._thread.is_alive()
+
+
+def test_worker_does_not_start_stage_logger_or_extra_bar(monkeypatch):
+    monkeypatch.setattr(theory_progress, "parent_process", lambda: object())
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Worker started a competing progress display")
+    monkeypatch.setattr(theory_progress, "Thread", forbidden)
+    monkeypatch.setattr(theory_progress.StageProgress, "_write", forbidden)
+    with theory_progress.StageProgress("Worker") as stage:
+        stage.set_detail("hidden")
+    assert not stage.enabled

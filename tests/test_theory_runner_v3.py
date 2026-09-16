@@ -91,4 +91,4 @@ def test_cli_diagnostics_renderer_receives_saved_scalar_bundle(tmp_path, monkeyp
         )
         == 0
     )
-    assert calls == [(bundle.resolve(), {"expected_config": None, "diagnostics": True})]
+    assert calls == [(bundle.resolve(), {"expected_config": numerical_config(model_name="sdv1", scheduler_name="ddim", num_seeds=2), "diagnostics": True})]

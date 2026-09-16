@@ -179,8 +179,9 @@ class FiniteSupport:
         logits += self.log_weights[start:end] - self.log_weights[target]
         return logits, difference
 
-    def evaluate(self, z, target_id, alpha, sigma, unconditional=None):
+    def evaluate(self, z, target_id, alpha, sigma, unconditional=None, *, include_mean=False):
         query, lead = self._queries(z)
+        means = torch.full_like(query, torch.nan) if include_mean else None
         target = self.aliases.get(str(target_id))
         a, s = float(alpha), float(sigma)
         keys = [
@@ -269,6 +270,8 @@ class FiniteSupport:
                 entropy -= torch.where(probability > 0, probability * logp, 0).sum(
                     dim=1
                 )
+            if means is not None:
+                means[qs:qe] = self.flat[target] + mean_difference
             mean_error = mean_difference.norm(dim=1) / math.sqrt(self.dimension)
             # sigmoid(log_comp) is stable even when target p rounds to one.
             non_target_mass = torch.sigmoid(log_comp)
@@ -309,10 +312,20 @@ class FiniteSupport:
                 )
             for key, value in values.items():
                 result[key][qs:qe] = value
-        return {
+        output = {
             k: v.reshape(lead) if isinstance(v, torch.Tensor) else v
             for k, v in result.items()
         }
+        if means is not None:
+            output["posterior_mean"] = means.reshape(*lead, *self.latent_shape)
+        return output
+
+    def posterior_mean(self, z, alpha, sigma):
+        """Transient vector mean from the same chunked posterior as scalar metrics."""
+        result = self.evaluate(z, self.atom_ids[0], alpha, sigma, include_mean=True)
+        if "posterior_mean" not in result:
+            raise ValueError("Posterior mean unavailable: " + result["support_status"])
+        return result["posterior_mean"]
 
     def feedback(self, z_u, z_g, target_id, alpha, sigma):
         """Matched target log-odds gain, stabilized via competitor log weights."""

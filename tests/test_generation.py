@@ -2203,34 +2203,25 @@ def test_lemma2_trajectory_reducers_do_not_run_model_inference() -> None:
         assert snippet in source
 
 
-def test_readme_documents_cache_only_theory_and_provenance() -> None:
+def test_readme_documents_direct_theory_and_plot_isolation() -> None:
     import json
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     registry = json.loads((ROOT / "docs/theory/statement_registry.json").read_text())
     assert len(registry["statements"]) == 7
-    documented_figures = {
-        entry[field]["id"]
-        for entry in registry["statements"]
-        for field in ("main_figure", "diagnostic_figure")
-        if entry.get(field) is not None
-    }
-    assert documented_figures == {
-        "initial_recovery", "unconditional_center", "posterior_feedback",
-        "target_synchronization", "target_injection", "terminal_terms",
-    }
-    assert all(figure in readme for figure in documented_figures)
-    for required in (
-        "--recompute-experiments", "--bundle", "--plot", "--overwrite",
-        "--center reference-initial", "--cached-baseline PATH", "--use-mu",
-        "reference seeds `N..2N-1`", "including unsuccessful reproductions",
-        "not the known data mean",
-        "four default figures", "figure tables", "legacy utilities",
-        "source identities/hashes", "applicability_report.json", "PYTHON",
-        "--include-diagnostics", "cache-theory-3.0-proposition5",
-        "never reads raw tensors", "preserving the previous",
+    for stem in (
+        "theorem1_loss_recovery", "lemma2_unconditional_baseline",
+        "corollary3_initial_cfg_amplification", "lemma4_matched_displacement",
+        "proposition5_posterior_feedback", "lemma6_target_specific_synchronization",
+        "theorem7_final_reproduction",
     ):
-        assert required in readme
+        assert stem in readme
+    for flag in ("--recompute-experiments", "--bundle", "--plot", "--overwrite",
+                 "--num-loss-seeds", "--loss-seed", "--loss-timesteps",
+                 "--num-unconditional-loss-seeds", "--reference-law", "--probe-batch-size", "PYTHON"):
+        assert flag in readme
+    assert "Analysis may run missing learned denoiser probes" in readme
+    assert "plotting uses saved compact scalars only" in readme
     assert (ROOT / "docs/theory/quantity_dictionary.md").is_file()
 
 
@@ -2291,6 +2282,13 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
             "candidate_contracts.py", "candidate_feedback.py", "candidate_integration.py",
             "candidate_metrics.py", "candidate_summaries.py", "candidate_reduce.py",
             "candidate_registry.py", "candidate_plotting.py",
+            "paper_contracts.py", "paper_feedback.py", "paper_measurements.py",
+            "paper_plotting.py", "paper_reduce.py", "paper_registry.py",
+            "direct_figures.py", "direct_integration.py", "direct_measurements.py",
+            "direct_probe_cache.py", "direct_probe_math.py", "direct_probes.py",
+            "direct_reduce.py", "reference_law.py",
+            "evidence_reduce.py", "evidence_reference.py", "evidence_measurements.py",
+            "evidence_figures.py", "evidence_plotting.py",
         },
         "utils/metrics": {"__init__.py", "sscd.py"},
         "utils/models": {
@@ -2299,6 +2297,7 @@ def test_source_tree_has_only_the_current_modules_and_imports() -> None:
             "latent.py",
             "loading.py",
             "prediction_conversion.py",
+            "probe_loading.py",
             "registry.py",
             "sampling.py",
             "schedule_metadata.py",

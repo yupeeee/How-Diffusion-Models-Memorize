@@ -1,0 +1,722 @@
+{
+  "schema_version": 2,
+  "formula_version": "revised-section3-v2-proposition5",
+  "manuscript_source": {
+    "path": "revised.pdf",
+    "sha256": "fd447e263b921e94203558e6b03e2a9aabaa03ab8deb5cec7545427aed4f112f",
+    "section3_pages": [
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "proof_pages": [
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20
+    ],
+    "mapping_status": "verified_against_revised_pdf",
+    "formal_result_count": 7
+  },
+  "evidence_classes": {
+    "algebraic_qa": "Saved-tensor reconstruction or identity; subject to numerical precision; not independent memorization evidence.",
+    "finite_noise_observation": "Finite actual learned-branch or endpoint observation; does not establish a population or asymptotic claim.",
+    "candidate_distribution_diagnostic": "Exact calculation for an explicitly declared finite candidate distribution, not the learned model posterior or full training law.",
+    "unavailable": "Needs missing population information, unrecorded states or new model evaluations.",
+    "model_center_diagnostic": "Dispersion relative to a declared estimated model-output center, not agreement with the training mean.",
+    "identified_training_reference": "Only for an independently identified actual training law.",
+    "not_applicable": "The declared mathematical conditions do not apply; distinct from unavailable inputs or computational failure."
+  },
+  "conventions": {
+    "paper_guidance_domain": "fixed g>1",
+    "algebra_guidance_domain": "finite real g where a particular algebra formula uses absolute coefficients; distinct from supported generation settings",
+    "latent_units": "scaled VAE latent; paper uses raw L2, RMSE=L2/sqrt(d)",
+    "indexing": "cache k=0..T-1 labels denoiser inputs, state k+1 is update output; cache k is not the manuscript forward-noise index t; no branch exists at latents[:,T]",
+    "reference_error_warning": "Unconditional target error is not unconditional Bayes-reference error. Candidate reference errors use explicit K qualification.",
+    "center_warning": "mu_ref is a fixed reference-initial learned unconditional center, held out from experiment seeds but built from the reference seed bank also used for selection",
+    "support_warning": "Declared finite candidate distribution D_candidate is not identified with manuscript full training distribution D",
+    "loss_warning": "effective_target_noise_residual_mse is exact cache algebra and is not L_t(c)",
+    "proof_kl_direction": "D.1 equation (31) uses KL(forward || N(0,I)); optional initialized-to-forward KL is a separate analytic diagnostic, with reverse KL direction",
+    "rendering": "Four default designs; optional injection and applicable terminal_terms; matched displacement is numerical QA without a figure. Every emitted figure has PNG/PDF plus caption/provenance sidecars."
+  },
+  "definitions": [
+    {
+      "label": "Definition 1",
+      "title": "Target-specific memorization",
+      "manuscript_page": 3,
+      "equation": "||x_0-x_star||_2 <= tau, tau>=0",
+      "assumptions": [
+        "Fixed training pair with Pr(X=x_star,C=c)>0",
+        "A declared raw latent tolerance tau"
+      ],
+      "observable": "terminal_l2",
+      "designated_result_figure": null,
+      "caveat": "No favorable tolerance is chosen post hoc. Without a declared tau, report continuous errors and existing SSCD rather than a binary memorization claim."
+    }
+  ],
+  "statements": [
+    {
+      "semantic_id": "initial_recovery",
+      "label": "Theorem 1",
+      "title": "Initial conditional recovery",
+      "section": "3",
+      "manuscript_page": 4,
+      "proof": "Appendix D.1, pp. 14-15, equations (25)-(36)",
+      "mapping_status": "verified_against_revised_pdf",
+      "exact_statement": "If L_T(c)/SNR_T -> 0, then e_T(c) ->_p 0 and hat_x_T(c) ->_p x_star.",
+      "equations": [
+        {
+          "label": "(7)",
+          "expression": "L_t(c)=E_epsilon[||epsilon-epsilon_t(alpha_t*x_star+sigma_t*epsilon,c)||_2^2]"
+        },
+        {
+          "label": "Theorem 1",
+          "expression": "L_T(c)/SNR_T -> 0 => e_T(c) ->_p 0 => hat_x_T(c) ->_p x_star"
+        },
+        {
+          "label": "(33), proof bound",
+          "expression": "Pr(e_T(c)>r) <= L_T(c)/(SNR_T*r^2) + TV(N(0,I),N(alpha_T*x_star,sigma_T^2 I))"
+        }
+      ],
+      "assumptions": [
+        "fixed finite empirical training latent marginal D with mean mu",
+        "null conditioning law Law(X | C=empty)=D",
+        "variance-preserving alpha_t^2+sigma_t^2=1, alpha_t>0 and sigma_t>0 for t>=1",
+        "fixed guidance g>1 in the manuscript",
+        "all manuscript norms are raw Euclidean latent L2",
+        "Equation (6): Pr(X=x_star | C=c)=1 under the training law; this is unverified by a paired cache",
+        "alpha_T -> 0 with d,P,x_star,c,g held fixed; x_T ~ N(0,I)",
+        "L_T(c)/SNR_T -> 0"
+      ],
+      "observables": [
+        {
+          "quantity": "unconditional_target_error_rmse",
+          "definition": "||m_u-x_star||/sqrt(d), not the paper unconditional reference error",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "conditional_target_error_rmse",
+          "definition": "||m_c-x_star||/sqrt(d); equal to paper e_t(c)/sqrt(d) only under Equation (6)",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "initial_snr",
+          "definition": "Saved SNR at actual initial model evaluation",
+          "units": "dimensionless",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "effective_target_noise_residual_mse",
+          "definition": "||(epsilon_c-(z-alpha*x_star)/sigma)||^2/d",
+          "units": "squared epsilon coordinate",
+          "evidence_classification": "algebraic_qa"
+        }
+      ],
+      "unavailable_quantities": [
+        {
+          "quantity": "L_T(c)",
+          "reason": "Pair-specific population forward loss (7) requires independent forward-corruption evaluations; reverse-trajectory target residual is an algebraic identity, not this loss.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "high-noise convergence",
+          "reason": "One finite initialization schedule does not identify a high-noise limiting family.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "single-target training-law condition",
+          "reason": "A paired target and reproduction observations cannot verify Pr(X=x_star|C=c)=1.",
+          "evidence_classification": "unavailable"
+        }
+      ],
+      "evidence_classification": "finite_noise_observation",
+      "main_figure": {
+        "id": "initial_recovery",
+        "formats": [
+          "png",
+          "pdf"
+        ],
+        "x": "unconditional_target_error_rmse",
+        "y": "conditional_target_error_rmse",
+        "title": "Finite-noise initial target recovery",
+        "evidence_classification": "finite_noise_observation"
+      },
+      "source_label": "thm:initial_conditional_recovery",
+      "diagnostic_figure": null,
+      "caption": "Finite-noise paired initial target errors, with same-seed terminal SSCD. This does not measure the forward-loss premise or demonstrate a zero-SNR limit."
+    },
+    {
+      "semantic_id": "unconditional_center",
+      "label": "Lemma 2",
+      "title": "Initial unconditional baseline",
+      "section": "3",
+      "manuscript_page": 4,
+      "proof": "Appendix D.2, pp. 15-17, equations (37)-(51)",
+      "mapping_status": "verified_against_revised_pdf",
+      "exact_statement": "bar_x_T(empty) ->_p mu. If additionally e_T(empty) ->_p 0, then hat_x_T(empty) ->_p mu.",
+      "equations": [
+        {
+          "label": "Lemma 2",
+          "expression": "bar_x_T(empty) ->_p mu; e_T(empty) ->_p 0 => hat_x_T(empty) ->_p mu"
+        },
+        {
+          "label": "(45), proof bound",
+          "expression": "||bar_x_T(z,empty)-mu|| <= M*(exp(2*B_T(z))-1), B_T(z)=(alpha_T*M*||z||+alpha_T^2*M^2/2)/sigma_T^2, ||X||<=M"
+        }
+      ],
+      "assumptions": [
+        "fixed finite empirical training latent marginal D with mean mu",
+        "null conditioning law Law(X | C=empty)=D",
+        "variance-preserving alpha_t^2+sigma_t^2=1, alpha_t>0 and sigma_t>0 for t>=1",
+        "fixed guidance g>1 in the manuscript",
+        "all manuscript norms are raw Euclidean latent L2",
+        "alpha_T -> 0 with d,P,x_star,c,g held fixed; x_T ~ N(0,I)",
+        "Finite support of D",
+        "For learned-estimate conclusion: e_T(empty) ->_p 0"
+      ],
+      "observables": [
+        {
+          "quantity": "unconditional_center_rmse",
+          "definition": "||m_u-mu_ref||/sqrt(d), fixed reference-initial center",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "initial_unique_seed_count",
+          "definition": "Unique seeds after cross-prompt unconditional initialization deduplication",
+          "units": "count",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "mc_standard_error_rmse",
+          "definition": "Monte Carlo standard error of the reference-initial sample mean",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        }
+      ],
+      "unavailable_quantities": [
+        {
+          "quantity": "mu=E_D[X]",
+          "reason": "Preserved target candidates and unconditional outputs do not identify the full training-distribution mean; mu_ref is explicitly an empirical fixed center.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "e_t(empty)=||m_u-bar_x_t(empty)||_2",
+          "reason": "Requires the true training-distribution posterior mean. Unconditional target error ||m_u-x_star|| is a different quantity.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "high-noise convergence",
+          "reason": "Reverse states at later saved timesteps are not independent Gaussian probes.",
+          "evidence_classification": "unavailable"
+        }
+      ],
+      "evidence_classification": "model_center_diagnostic",
+      "main_figure": {
+        "id": "unconditional_center",
+        "formats": [
+          "png",
+          "pdf"
+        ],
+        "x": "unconditional_center_rmse",
+        "y": "empirical_cumulative_fraction",
+        "title": "Initial unconditional dispersion around the reference center",
+        "evidence_classification": "model_center_diagnostic"
+      },
+      "source_label": "lem:initial_unconditional_baseline",
+      "diagnostic_figure": null,
+      "caption": "Initial unconditional dispersion around the reference center. Unique evaluation seed inputs only; held-out concentration around an estimated model-output center does not identify the training mean."
+    },
+    {
+      "semantic_id": "target_injection",
+      "label": "Corollary 3",
+      "title": "Initial CFG amplification",
+      "section": "3",
+      "manuscript_page": 5,
+      "proof": "Appendix D.3, p. 17, equations (52)-(54)",
+      "mapping_status": "verified_against_revised_pdf",
+      "exact_statement": "hat_x_T(c;g)-hat_x_T(empty)=g*(hat_x_T(c)-hat_x_T(empty)) ->_p g*(x_star-mu), and hat_x_T(c;g) ->_p mu+g*(x_star-mu).",
+      "equations": [
+        {
+          "label": "Corollary 3",
+          "expression": "hat_x_T(c;g)-hat_x_T(empty)=g*Delta_T ->_p g*(x_star-mu); hat_x_T(c;g) ->_p mu+g*(x_star-mu)"
+        }
+      ],
+      "assumptions": [
+        "fixed finite empirical training latent marginal D with mean mu",
+        "null conditioning law Law(X | C=empty)=D",
+        "variance-preserving alpha_t^2+sigma_t^2=1, alpha_t>0 and sigma_t>0 for t>=1",
+        "fixed guidance g>1 in the manuscript",
+        "all manuscript norms are raw Euclidean latent L2",
+        "Equation (6): Pr(X=x_star | C=c)=1 under the training law; this is unverified by a paired cache",
+        "alpha_T -> 0 with d,P,x_star,c,g held fixed; x_T ~ N(0,I)",
+        "All conditions of Theorem 1",
+        "e_T(empty) ->_p 0"
+      ],
+      "observables": [
+        {
+          "quantity": "a_parallel",
+          "definition": "dot(g*D,x_star-mu_ref)/||x_star-mu_ref||^2",
+          "units": "dimensionless",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "off_target",
+          "definition": "||g*D-a_parallel*(x_star-mu_ref)||/||x_star-mu_ref||",
+          "units": "dimensionless",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "injection_total_residual_rmse",
+          "definition": "||g*D-g*(x_star-mu_ref)||/sqrt(d)",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "guided_clean_estimate_identity",
+          "definition": "m_g=m_u+g*(m_c-m_u)",
+          "units": "latent coordinates",
+          "evidence_classification": "algebraic_qa"
+        }
+      ],
+      "unavailable_quantities": [
+        {
+          "quantity": "mu=E_D[X]",
+          "reason": "Preserved target candidates and unconditional outputs do not identify the full training-distribution mean; mu_ref is explicitly an empirical fixed center.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "e_t(empty)=||m_u-bar_x_t(empty)||_2",
+          "reason": "Requires the true training-distribution posterior mean. Unconditional target error ||m_u-x_star|| is a different quantity.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "L_T(c)",
+          "reason": "Pair-specific population forward loss (7) requires independent forward-corruption evaluations; reverse-trajectory target residual is an algebraic identity, not this loss.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "nondegenerate target direction",
+          "reason": "If ||x_star-center||=0, projection and angle are undefined; keep raw unnormalized errors.",
+          "evidence_classification": "unavailable"
+        }
+      ],
+      "evidence_classification": "finite_noise_observation",
+      "main_figure": null,
+      "source_label": "cor:initial_cfg_amplification",
+      "diagnostic_figure": {
+        "id": "target_injection",
+        "formats": [
+          "png",
+          "pdf"
+        ],
+        "x": "a_parallel",
+        "y": "off_target",
+        "evidence_classification": "model_center_diagnostic"
+      }
+    },
+    {
+      "semantic_id": "matched_displacement",
+      "label": "Lemma 4",
+      "title": "Matched one-step CFG displacement",
+      "section": "3",
+      "manuscript_page": 5,
+      "proof": "Appendix D.4, p. 17, equations (55)-(57)",
+      "mapping_status": "verified_against_revised_pdf",
+      "exact_statement": "For every reverse update satisfying Equation (4), x_{t-1}-x_cf_{t-1}=g*kappa_t*Delta_t.",
+      "equations": [
+        {
+          "label": "(4)",
+          "expression": "x_{t-1}=a_t+kappa_t*hat_x_t(c;g), kappa_t>0"
+        },
+        {
+          "label": "(12)",
+          "expression": "x_cf_{t-1}=a_t+kappa_t*hat_x_t(empty)"
+        },
+        {
+          "label": "Lemma 4",
+          "expression": "x_{t-1}-x_cf_{t-1}=g*kappa_t*Delta_t"
+        }
+      ],
+      "assumptions": [
+        "fixed finite empirical training latent marginal D with mean mu",
+        "null conditioning law Law(X | C=empty)=D",
+        "variance-preserving alpha_t^2+sigma_t^2=1, alpha_t>0 and sigma_t>0 for t>=1",
+        "fixed guidance g>1 in the manuscript",
+        "all manuscript norms are raw Euclidean latent L2",
+        "Affine update Equation (4), kappa_t>0",
+        "Current state, history, coefficients and realized sampler randomness held fixed",
+        "Only the clean estimate changes; DDPM matched steps share the same noise draw"
+      ],
+      "observables": [
+        {
+          "quantity": "predicted_shift_rmse",
+          "definition": "abs(g*B)*||D||/sqrt(d)",
+          "units": "latent RMSE",
+          "evidence_classification": "algebraic_qa"
+        },
+        {
+          "quantity": "matched_shift_rmse",
+          "definition": "||guided_next-matched_unconditional_next||/sqrt(d) with same current state/noise",
+          "units": "latent RMSE",
+          "evidence_classification": "algebraic_qa"
+        },
+        {
+          "quantity": "matched_displacement_identity_rmse",
+          "definition": "Norm of reconstructed same-state/noise displacement minus g*B*D, divided by sqrt(d)",
+          "units": "latent RMSE",
+          "evidence_classification": "algebraic_qa"
+        }
+      ],
+      "unavailable_quantities": [
+        {
+          "quantity": "matched affine step under clipping or unsupported variance",
+          "reason": "Nonlinear clipping/thresholding or unknown learned variance can invalidate the affine substitution; mark per-step applicability.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "independent counterfactual outcome",
+          "reason": "The matched state is algebraically reconstructed; no independently sampled unconditional trajectory outcome is measured.",
+          "evidence_classification": "unavailable"
+        }
+      ],
+      "evidence_classification": "algebraic_qa",
+      "main_figure": null,
+      "source_label": "lem:matched_one_step_cfg_displacement",
+      "diagnostic_figure": null
+    },
+    {
+      "semantic_id": "posterior_feedback",
+      "label": "Proposition 5",
+      "title": "Matched one-step target-posterior feedback",
+      "section": "3",
+      "manuscript_page": 6,
+      "proof": "Appendix D.5, pp. 18-19, equations (58)-(76)",
+      "mapping_status": "verified_against_revised_pdf",
+      "exact_statement": "For t=2,...,T, ||Delta_t|| >= e_t(c)+e_t(empty)+V_t implies p_{t-1}(x_{t-1}) >= p_{t-1}(x_cf_{t-1}); strict hypothesis implies strict conclusion.",
+      "equations": [
+        {
+          "label": "(15)",
+          "expression": "V_t=integral_0^1 ||bar_x_{t-1}(x_cf_{t-1}+s*g*kappa_t*Delta_t,empty)-bar_x_t(x_t,empty)|| ds"
+        },
+        {
+          "label": "Proposition 5",
+          "expression": "||Delta_t|| >= e_t(c)+e_t(empty)+V_t => p_{t-1}(x_{t-1}) >= p_{t-1}(x_cf_{t-1})"
+        },
+        {
+          "label": "(69)-(72), proof",
+          "expression": "log[p_{t-1}(x_{t-1})/p_{t-1}(x_cf_{t-1})] >= alpha_{t-1}*g*kappa_t/sigma_{t-1}^2 * ||Delta_t||*(||Delta_t||-e_t(c)-e_t(empty)-V_t)"
+        }
+      ],
+      "assumptions": [
+        "fixed finite empirical training latent marginal D with mean mu",
+        "null conditioning law Law(X | C=empty)=D",
+        "variance-preserving alpha_t^2+sigma_t^2=1, alpha_t>0 and sigma_t>0 for t>=1",
+        "fixed guidance g>1 in the manuscript",
+        "all manuscript norms are raw Euclidean latent L2",
+        "Equation (6): Pr(X=x_star | C=c)=1 under the training law; this is unverified by a paired cache",
+        "Equation (4) matched affine update and kappa_t>0",
+        "t=2,...,T; positive destination alpha and sigma",
+        "Same current state, history and realized noise"
+      ],
+      "observables": [
+        {
+          "quantity": "candidate_conditional_error_l2",
+          "definition": "||m_c-x*|| under the single-target conditional idealization",
+          "units": "raw latent L2",
+          "evidence_classification": "candidate_distribution_diagnostic"
+        },
+        {
+          "quantity": "candidate_reference_error_u_l2",
+          "definition": "||m_u-mean_K,current(x_current)||",
+          "units": "raw latent L2",
+          "evidence_classification": "candidate_distribution_diagnostic"
+        },
+        {
+          "quantity": "candidate_variation_l2",
+          "definition": "Integral_0^1 ||mean_K,next(x_cf+s*g*kappa*Delta)-mean_K,current(x_current)|| ds",
+          "units": "raw latent L2",
+          "evidence_classification": "candidate_distribution_diagnostic"
+        },
+        {
+          "quantity": "candidate_condition_margin_rmse",
+          "definition": "(||Delta||-e_c-e_u,K-V_K)/sqrt(d)",
+          "units": "latent RMSE",
+          "evidence_classification": "candidate_distribution_diagnostic"
+        },
+        {
+          "quantity": "candidate_log_probability_gain",
+          "definition": "log p_K,next(x_next)-log p_K,next(x_cf)",
+          "units": "log probability",
+          "evidence_classification": "candidate_distribution_diagnostic"
+        },
+        {
+          "quantity": "candidate_condition_status",
+          "definition": "estimated_met / estimated_not_met / numerically_unresolved with recorded quadrature/source sensitivity",
+          "units": "categorical",
+          "evidence_classification": "candidate_distribution_diagnostic"
+        }
+      ],
+      "unavailable_quantities": [
+        {
+          "quantity": "e_t(empty)=||m_u-bar_x_t(empty)||_2",
+          "reason": "Requires the true training-distribution posterior mean. Unconditional target error ||m_u-x_star|| is a different quantity.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "p_t(z)=Pr_D(X=x_star | alpha_t X+sigma_t epsilon=z)",
+          "reason": "The preserved cache does not identify the full training distribution or its posterior; a candidate posterior is separately labeled a surrogate.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "V_t",
+          "reason": "True cross-step posterior means along the entire continuous segment are not in the cache. A candidate-support margin or quadrature approximation is not V_t.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "paper feedback RHS/slack",
+          "reason": "Depends on unavailable e_t(empty), V_t and the single-target reference identification; leave null with reasons.",
+          "evidence_classification": "unavailable"
+        }
+      ],
+      "evidence_classification": "candidate_distribution_diagnostic",
+      "main_figure": {
+        "id": "posterior_feedback",
+        "formats": [
+          "png",
+          "pdf"
+        ],
+        "x": "candidate_condition_margin_rmse",
+        "y": "candidate_log_probability_gain",
+        "title": "Matched posterior feedback under the candidate distribution",
+        "evidence_classification": "candidate_distribution_diagnostic",
+        "yscale": "symlog",
+        "base": 10,
+        "linthresh": 0.001
+      },
+      "source_label": "prop:matched_one_step_target_posterior_feedback",
+      "diagnostic_figure": null,
+      "caption": "Matched posterior feedback under the candidate distribution. The manuscript Equation15 condition is evaluated for the declared finite candidate law; numerical coverage is estimated, not a certificate or identification of the actual training posterior."
+    },
+    {
+      "semantic_id": "target_synchronization",
+      "label": "Lemma 6",
+      "title": "Target-specific synchronization",
+      "section": "3",
+      "manuscript_page": 6,
+      "proof": "Appendix D.6, pp. 19-20, equations (77)-(80)",
+      "mapping_status": "verified_against_revised_pdf",
+      "exact_statement": "For t=1,...,T, ||Delta_t|| <= e_t(c)+e_t(empty)+R*(1-p_t), where R=max_{u in supp(D)}||u-x_star||.",
+      "equations": [
+        {
+          "label": "Lemma 6",
+          "expression": "||Delta_t|| <= e_t(c)+e_t(empty)+R*(1-p_t)"
+        },
+        {
+          "label": "(78), proof",
+          "expression": "||bar_x_t(empty)-x_star|| <= R*(1-p_t)"
+        }
+      ],
+      "assumptions": [
+        "fixed finite empirical training latent marginal D with mean mu",
+        "null conditioning law Law(X | C=empty)=D",
+        "variance-preserving alpha_t^2+sigma_t^2=1, alpha_t>0 and sigma_t>0 for t>=1",
+        "fixed guidance g>1 in the manuscript",
+        "all manuscript norms are raw Euclidean latent L2",
+        "Equation (6): Pr(X=x_star | C=c)=1 under the training law; this is unverified by a paired cache",
+        "Finite training support D; R is maximum raw target distance over that full support"
+      ],
+      "observables": [
+        {
+          "quantity": "joint_target_error_rmse",
+          "definition": "max(||m_u-x_star||,||m_c-x_star||)/sqrt(d)",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "branch_gap_rmse",
+          "definition": "||m_c-m_u||/sqrt(d)",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "late_suffix_joint_max_rmse",
+          "definition": "Maximum joint error on the observed suffix grid, monotone by construction",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "surrogate_target_posterior",
+          "definition": "Target mass in the declared finite candidate distribution",
+          "units": "probability",
+          "evidence_classification": "candidate_distribution_diagnostic"
+        },
+        {
+          "quantity": "network_to_surrogate_rmse",
+          "definition": "||m_u-m_D(z_k)||/sqrt(d); not true Bayes reference error",
+          "units": "latent RMSE",
+          "evidence_classification": "candidate_distribution_diagnostic"
+        }
+      ],
+      "unavailable_quantities": [
+        {
+          "quantity": "e_t(empty)=||m_u-bar_x_t(empty)||_2",
+          "reason": "Requires the true training-distribution posterior mean. Unconditional target error ||m_u-x_star|| is a different quantity.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "p_t(z)=Pr_D(X=x_star | alpha_t X+sigma_t epsilon=z)",
+          "reason": "The preserved cache does not identify the full training distribution or its posterior; a candidate posterior is separately labeled a surrogate.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "R=max_{u in supp(D)} ||u-x_star||_2",
+          "reason": "Full training support is unavailable; a candidate-set support radius is not this R.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "continuous-time supremum",
+          "reason": "A sampled-grid suffix maximum does not certify all continuous times or all missing model evaluations.",
+          "evidence_classification": "unavailable"
+        }
+      ],
+      "evidence_classification": "finite_noise_observation",
+      "main_figure": {
+        "id": "target_synchronization",
+        "formats": [
+          "png",
+          "pdf"
+        ],
+        "x": "snr",
+        "y": [
+          "conditional_target_error_rmse",
+          "unconditional_target_error_rmse"
+        ],
+        "title": "Target-specific branch errors by terminal SSCD group",
+        "evidence_classification": "finite_noise_observation"
+      },
+      "source_label": "lem:target_specific_synchronization",
+      "diagnostic_figure": null,
+      "caption": "Prompt-balanced branch target-error summaries in prespecified terminal SSCD groups. Paired joint errors remain in tables; marginal medians do not verify Lemma6 Bayes-reference premises."
+    },
+    {
+      "semantic_id": "terminal_reproduction",
+      "label": "Theorem 7",
+      "title": "Final reproduction",
+      "section": "3",
+      "manuscript_page": 6,
+      "proof": "Appendix D.7, p. 20, equations (81)-(84)",
+      "mapping_status": "verified_against_revised_pdf",
+      "exact_statement": "||x_0-x_star|| <= g*e_1(c)+(g-1)*[e_1(empty)+R*(1-p_1)]. If the right-hand side is <= tau, the sample memorizes x_star under Definition 1.",
+      "equations": [
+        {
+          "label": "(5)",
+          "expression": "a_1=0, kappa_1=1, x_0=hat_x_1(c;g)"
+        },
+        {
+          "label": "Theorem 7",
+          "expression": "||x_0-x_star|| <= g*e_1(c)+(g-1)*(e_1(empty)+R*(1-p_1))"
+        },
+        {
+          "label": "(16)",
+          "expression": "x_0-x_star=(hat_x_1(c)-x_star)+(g-1)*Delta_1"
+        }
+      ],
+      "assumptions": [
+        "fixed finite empirical training latent marginal D with mean mu",
+        "null conditioning law Law(X | C=empty)=D",
+        "variance-preserving alpha_t^2+sigma_t^2=1, alpha_t>0 and sigma_t>0 for t>=1",
+        "fixed guidance g>1 in the manuscript",
+        "all manuscript norms are raw Euclidean latent L2",
+        "Equation (6): Pr(X=x_star | C=c)=1 under the training law; this is unverified by a paired cache",
+        "Terminal clean-update condition Equation (5), which does not follow from Equation (4)",
+        "Pre-endpoint errors/reference/posterior at the final actual denoiser evaluation",
+        "For a memorization assertion, predeclare raw latent tolerance tau>=0"
+      ],
+      "observables": [
+        {
+          "quantity": "terminal_rmse",
+          "definition": "||latents[:,T]-x_star||/sqrt(d)",
+          "units": "latent RMSE",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "terminal_l2",
+          "definition": "||latents[:,T]-x_star||, same units as protected proximity",
+          "units": "latent L2",
+          "evidence_classification": "finite_noise_observation"
+        },
+        {
+          "quantity": "operational_bound_rmse",
+          "definition": "|A|*state_err+|B|*(|1-g|*e_u+|g|*e_c)+|A+B-1|*||x_star||/sqrt(d)+R_noise",
+          "units": "latent RMSE",
+          "evidence_classification": "algebraic_qa"
+        },
+        {
+          "quantity": "same_seed_terminal_sscd",
+          "definition": "Existing target SSCD joined by scientific run, original_index and actual seed",
+          "units": "SSCD score",
+          "evidence_classification": "finite_noise_observation"
+        }
+      ],
+      "unavailable_quantities": [
+        {
+          "quantity": "e_t(empty)=||m_u-bar_x_t(empty)||_2",
+          "reason": "Requires the true training-distribution posterior mean. Unconditional target error ||m_u-x_star|| is a different quantity.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "p_t(z)=Pr_D(X=x_star | alpha_t X+sigma_t epsilon=z)",
+          "reason": "The preserved cache does not identify the full training distribution or its posterior; a candidate posterior is separately labeled a surrogate.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "R=max_{u in supp(D)} ||u-x_star||_2",
+          "reason": "Full training support is unavailable; a candidate-set support radius is not this R.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "exact paper bound",
+          "reason": "The expression is verified against the manuscript but its full training-law inputs remain unidentified. Candidate/operational bounds are separately named.",
+          "evidence_classification": "unavailable"
+        },
+        {
+          "quantity": "paper terminal clean update",
+          "reason": "Must inspect actual last scheduler coefficients/configuration; no automatic assumption that A=0 and B=1.",
+          "evidence_classification": "unavailable"
+        }
+      ],
+      "evidence_classification": "finite_noise_observation",
+      "main_figure": null,
+      "source_label": "thm:final_reproduction",
+      "diagnostic_figure": {
+        "id": "terminal_terms",
+        "formats": [
+          "png",
+          "pdf"
+        ],
+        "x": "terminal_A_rmse",
+        "y": "terminal_B_rmse",
+        "requires": "terminal_clean_applicable",
+        "evidence_classification": "finite_noise_observation"
+      }
+    }
+  ],
+  "default_figure_ids": [
+    "initial_recovery",
+    "unconditional_center",
+    "posterior_feedback",
+    "target_synchronization"
+  ],
+  "diagnostic_figure_ids": [
+    "target_injection",
+    "terminal_terms"
+  ]
+}

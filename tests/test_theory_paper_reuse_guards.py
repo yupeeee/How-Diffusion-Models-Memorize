@@ -116,61 +116,29 @@ def test_source_selection_only_requires_current_integration_for_diagnostics(
         assert not calls
 
 
-@pytest.mark.parametrize("diagnostics", [False, True])
-def test_existing_paper_reuse_checks_integration_recipe_for_diagnostics(
-    tmp_path, monkeypatch, diagnostics
-):
-    """An otherwise valid compact publication cannot bypass an integration update."""
-    output = paper_contracts.PaperPaths.build(tmp_path, **CONFIG).output_directory
-    compact_fixture(output, diagnostics=True)
-    source = tmp_path / "candidate_source"
-    source.mkdir()
-    manifest = _source_manifest()
-    manifest["source_code"]["candidate_integration.py"] = "0" * 64
-    atomic_write_json(source / "analysis_manifest.json", manifest)
-    config = read_json(output / "run_config.json")
-    config["source_analysis"] = {"path": str(source)}
-    config["scientific_identity"]["source_manifest_sha256"] = file_sha256(
-        source / "analysis_manifest.json"
-    )
-    config["scientific_hash"] = canonical_hash(config["scientific_identity"])
-    atomic_write_json(output / "run_config.json", config)
-    for name in ("summary.json", "audit.json"):
-        data = read_json(output / name)
-        data["scientific_hash"] = config["scientific_hash"]
-        atomic_write_json(output / name, data)
-    atomic_write_json(output / "figure_manifest.json", {})
-    monkeypatch.setattr(
-        candidate_contracts, "validate_candidate_sources", lambda *a: None
-    )
-    rendered = []
-    monkeypatch.setattr(
-        paper_plotting, "render_paper", lambda *a, **k: rendered.append(k)
-    )
-
-    class AnalysisRequired(Exception):
-        pass
-
-    def select_source(*args, **kwargs):
-        assert kwargs["diagnostics"] is True
-        raise AnalysisRequired("integration-only source changed")
-
-    monkeypatch.setattr(
-        paper_reduce, "_source_bundle", select_source if diagnostics else _forbidden
-    )
-    if diagnostics:
-        with pytest.raises(AnalysisRequired, match="integration-only"):
-            paper_reduce.run_paper(tmp_path, diagnostics=True, device="cpu", **CONFIG)
-        assert not rendered
-    else:
-        assert paper_reduce.run_paper(tmp_path, device="cpu", **CONFIG) == output
-        assert len(rendered) == 1
+def test_direct_integral_recipe_is_required_without_diagnostics(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from utils.experiments.theory import cache_reader, direct_reduce, four_stage_reduce
+    # The precision wrapper validates source metadata before consulting the
+    # existing resumable direct stage; this fixture isolates that routing.
+    monkeypatch.setattr(cache_reader, "discover_sources", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(four_stage_reduce, "prepare_four_stage_primary", lambda *a, **k: None)
+    from tests.test_theory_direct_figures import direct_config
+    calls = []
+    def require_direct(*args, **options):
+        calls.append(options)
+        raise TheoryError("original variation integration required")
+    monkeypatch.setattr(direct_reduce, "run_direct_analysis", require_direct)
+    monkeypatch.setattr(paper_plotting, "render_paper", _forbidden)
+    with pytest.raises(TheoryError, match="original variation integration required"):
+        paper_reduce.run_paper(tmp_path, diagnostics=False, **direct_config())
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("category", ["main", "appendix"])
 def test_preflight_blocks_unavailable_required_figures(tmp_path, category):
     bundle = compact_fixture(tmp_path / "paper")
-    entry = next(e for e in paper_registry() if e["category"] == category)
+    entry = next(e for e in paper_registry() if e["category"] == category and not e.get("allow_unavailable", False))
     summary = read_json(bundle / "summary.json")
     summary["figures"][entry["stem"]] = {
         "status": "unavailable",
@@ -185,7 +153,7 @@ def test_preflight_allows_named_inapplicability_and_optional_unavailable(tmp_pat
     bundle = compact_fixture(tmp_path / "paper", diagnostics=True)
     entries = paper_registry(diagnostics=True)
     core = next(e for e in entries if e["category"] == "main")
-    optional = next(e for e in entries if e["category"] == "diagnostics")
+    optional = next(e for e in entries if e["category"] == "diagnostics" and e.get("allow_unavailable", True))
     summary = read_json(bundle / "summary.json")
     summary["figures"][core["stem"]] = {
         "status": "not_applicable",
@@ -206,24 +174,24 @@ def test_preflight_requires_registry_columns_even_with_consistent_saved_schema(
     tmp_path,
 ):
     bundle = compact_fixture(tmp_path / "paper")
-    stem = "posterior_feedback_positive_fraction"
+    stem = "posterior_feedback_over_time"
     summary = read_json(bundle / "summary.json")
     spec = summary["plot_data"][stem]
     path = bundle / spec["path"]
-    frame = paper_contracts.read_plot_table(path, spec).drop(columns="upper_fraction")
+    frame = paper_contracts.read_plot_table(path, spec).drop(columns="denominator_weight")
     replacement = paper_contracts.write_plot_table(frame, path)
     summary["plot_data"][stem] = {"path": spec["path"], **replacement}
     summary["numerical_files"][spec["path"]] = replacement["sha256"]
     atomic_write_json(bundle / "summary.json", summary)
     with pytest.raises(
-        TheoryError, match="Missing required paper columns.*upper_fraction"
+        TheoryError, match="Missing required paper columns.*denominator_weight"
     ):
         paper_contracts.load_paper_inputs(bundle)
 
 
 def test_preflight_rejects_noncanonical_table_even_with_valid_contents(tmp_path):
     bundle = compact_fixture(tmp_path / "paper")
-    stem = "posterior_feedback_positive_fraction"
+    stem = "posterior_feedback_over_time"
     summary = read_json(bundle / "summary.json")
     spec = summary["plot_data"][stem]
     copied = "plot_data/copy.csv"

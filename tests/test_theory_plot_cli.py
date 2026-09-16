@@ -1,4 +1,4 @@
-"""Scalar plotting isolation and the root cache-only orchestration contract."""
+"""Scalar plotting isolation and protected upstream orchestration contracts."""
 
 from __future__ import annotations
 
@@ -422,7 +422,7 @@ def test_root_matrix_preserves_upstream_and_reduces_once(tmp_path, mode):
         ("sdv2", "ddim"),
         ("realvis", "ddim"),
     ]
-    assert all(_option(c, "--center") == "reference-initial" for c in theory)
+    assert all("--center" not in c for c in theory)  # inherit saved plot settings; analysis owns defaults
     if mode != "plot":
         assert all(_option(c, "--device") == "auto" for c in theory)
     if mode == "recompute-experiments":
@@ -503,8 +503,8 @@ def test_root_matrix_filters_only_requested_axes(tmp_path, arguments, expected):
         ("--use-mu",),
         ("--center", "zero", "--cached-baseline", "/tmp/old"),
         ("--evaluation-source", "trajectory"),
-        ("--num-loss-seeds=3",),
-        ("--loss-seed", "0"),
+        ("--num-loss-seeds=0",),
+        ("--loss-seed", "-1"),
         ("--num-baseline-seeds", "1000"),
         ("--device", "bad"),
         ("--download", "--direct-workers", "65"),

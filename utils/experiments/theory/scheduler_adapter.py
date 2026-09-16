@@ -401,6 +401,88 @@ class SchedulerAdapter:
             diagnostics["matched_projection_status"] = "unavailable_target_direction"
         return diagnostics, matched, shift
 
+    def direct_matched_update(
+        self, z, z_next, epsilon_u, epsilon_c, guidance, step, *,
+        latent_ndim=3, realized_noise=None, noise_provenance=None,
+    ):
+        """Independent deterministic counterfactual, separate constructed DDPM case.
+
+        An optional realized_noise is the independently saved additive vector,
+        already scaled by the scheduler. Endpoint-fitted noise is never accepted
+        as independent verification. No new random draw is made here.
+        """
+        originals = [torch.as_tensor(x) for x in (z, z_next, epsilon_u, epsilon_c)]
+        source_eps = max(torch.finfo(x.dtype).eps for x in originals)
+        state, observed, eu, ec = [x.to(dtype=torch.float64) for x in originals]
+        if not (state.shape == observed.shape == eu.shape == ec.shape):
+            raise ValueError("Direct matched-update shapes differ")
+        dims = tuple(range(-latent_ndim, 0))
+        dimension = math.prod(state.shape[axis] for axis in dims)
+
+        def norm(value):
+            scale = value.abs().amax(dim=dims, keepdim=True)
+            normalized = value / torch.where(scale > 0, scale, torch.ones_like(scale))
+            return normalized.square().sum(dim=dims).sqrt() * scale.reshape(value.shape[:-latent_ndim])
+
+        coeff = self.coefficients(step)
+        g = float(guidance)
+        mu, mc, _, mg = clean_estimates(
+            state, eu, ec, coeff.alpha, coeff.sigma, g, latent_ndim=latent_ndim
+        )
+        delta = mc - mu
+        shift = g * coeff.kappa * delta
+        drift_u = coeff.A * state + coeff.kappa * mu
+        drift_g = coeff.A * state + coeff.kappa * mg
+        structural = coeff.affine and coeff.kappa > 0 and math.isfinite(g) and g >= 0
+        independent = False
+        if not structural:
+            matched = torch.full_like(observed, torch.nan)
+            verification = "inapplicable_nonaffine_nonpositive_kappa_or_negative_guidance"
+        elif coeff.noise_std == 0:
+            matched = drift_u
+            independent = True
+            verification = "independent_deterministic_affine_counterfactual"
+        elif realized_noise is not None:
+            if noise_provenance not in {"independently_saved_additive_noise", "independently_saved_rng_replay"}:
+                raise ValueError("Independent matched verification requires verified saved/replayed noise")
+            noise = torch.as_tensor(realized_noise, dtype=torch.float64, device=state.device)
+            if noise.shape != state.shape or not bool(torch.isfinite(noise).all()):
+                raise ValueError("Independent matched noise shape/values differ")
+            matched = drift_u + noise
+            independent = True
+            verification = noise_provenance
+        else:
+            matched = observed - shift
+            verification = "constructed_shared_innovation_from_saved_endpoint_not_independent"
+        displacement = observed - matched
+        residual = displacement - shift
+        tolerance = 64 * source_eps * (
+            norm(observed) + abs(coeff.A) * norm(state)
+            + abs(coeff.kappa) * (norm(mu) + abs(g) * norm(delta))
+        )
+        denominator = norm(displacement) + norm(shift)
+        diagnostics = {
+            "direct_lemma4_applicable": structural,
+            "direct_lemma4_independent": independent,
+            "direct_lemma4_verification_source": verification,
+            "direct_lemma4_status": (
+                "independent_source_precision_check" if independent else verification
+            ),
+            "direct_lemma4_predicted_l2": g * coeff.kappa * norm(delta),
+            "direct_lemma4_displacement_l2": norm(displacement),
+            "direct_lemma4_vector_residual_l2": norm(residual),
+            "direct_lemma4_relative_residual": norm(residual) / torch.where(denominator > 0, denominator, torch.nan),
+            "direct_lemma4_source_tolerance_l2": tolerance,
+            "direct_lemma4_numeric_within_sensitivity": torch.isfinite(norm(residual)) & (norm(residual) <= tolerance),
+            "direct_lemma4_drift_difference_l2": norm(drift_g - drift_u),
+            "direct_lemma4_drift_vector_residual_l2": norm((drift_g - drift_u) - shift),
+            "direct_lemma4_source_precision_scope": "dtype_sensitivity_estimate_not_certified_inference_error",
+        }
+        for name, value in list(diagnostics.items()):
+            if name.endswith("_l2"):
+                diagnostics[name[:-3] + "_rmse"] = value / math.sqrt(dimension)
+        return diagnostics, matched, shift
+
     def terminal_diagnostics(
         self, z, z_next, epsilon_u, epsilon_c, guidance, step, target
     ):
