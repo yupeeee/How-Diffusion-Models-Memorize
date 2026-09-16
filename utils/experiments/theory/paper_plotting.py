@@ -32,10 +32,17 @@ from .contracts import TheoryError
 from .evidence_plotting import EVIDENCE_KINDS, draw_evidence
 from .four_stage_plotting import FOUR_STAGE_KINDS, draw_four_stage
 from .paper_contracts import contained_path, load_paper_inputs, recompute_command
-from .paper_registry import GROUPS, GROUP_COLORS, GROUP_LABELS, REGISTRY_VERSION, paper_registry
+from .paper_registry import (
+    GROUPS, GROUP_COLORS, GROUP_LABELS, PLOT_RECIPE_VERSION, REGISTRY_VERSION,
+    RENDER_RETIREMENTS, RETIRED_RENDER_STEMS, paper_registry,
+)
 from .progress import StageProgress
+from .paper_notation import (
+    FEEDBACK_CONDITION_LABEL, FEEDBACK_GAIN_LABEL, INITIAL_BRANCH_LABELS,
+    INITIAL_DISTRIBUTION_LABELS, NOTATION_VERSION, TERMINAL_LABELS,
+)
 
-RENDERING_VERSION = "four-stage-stix-3"
+RENDERING_VERSION = NOTATION_VERSION
 _DISTRIBUTIONS = {
     "initial_unconditional": (r"$\hat{\mathbf{x}}_T(\varnothing)$", GROUP_COLORS[GROUPS[1]]),
     "candidate_atoms": ("Candidate atoms", GROUP_COLORS[GROUPS[0]]),
@@ -336,6 +343,8 @@ def _draw_ecdf(ax, entry, frame, metadata):
             label, color = _DISTRIBUTIONS.get(
                 str(distribution), (str(distribution).replace("_", " "), "#343434")
             )
+            if entry["stem"] in {"initial_unconditional_mean_concentration", "initial_unconditional_mean_concentration_zero"}:
+                label = INITIAL_DISTRIBUTION_LABELS.get(str(distribution), label)
         else:
             label, color = GROUP_LABELS.get(str(group), str(group or "All")), GROUP_COLORS.get(str(group), "#343434")
             if group:
@@ -670,7 +679,17 @@ def _draw_coverage(ax, frame, metadata):
 
 
 def _apply_saved_limits(ax, metadata, frame, entry):
+    if (entry["kind"] in {"four_terminal_grouped_cdf", "four_guidance_fit"}
+            or (entry["kind"] == "four_prompt_chronological"
+                and entry.get("prediction_domain") == "positive_noise_transitions")):
+        # These renderers own complete support and reference/transition domains;
+        # historical limits must not crop data or append a terminal sentinel.
+        return
     for axis in ("x", "y"):
+        if axis == "y" and entry.get("display_range_policy"):
+            continue
+        if axis == "x" and entry.get("plot_recipe_version") == PLOT_RECIPE_VERSION and entry["stem"] == "posterior_feedback_condition_margin":
+            continue
         values = metadata.get(axis + "_limits")
         if values is None:
             continue
@@ -734,16 +753,71 @@ def _apply_saved_limits(ax, metadata, frame, entry):
         getattr(ax, "set_" + axis + "lim")(values)
 
 
-def _active_presentation(ax, entry, metadata, stats):
+def _curated_feedback_legend(ax, metadata, stats, frame):
+    groups = [group for group in GROUPS if group in set(frame.group.astype(str))]
+    for artist in list(ax.get_children()):
+        if isinstance(artist, Legend):
+            artist.remove()
+    handles = [Line2D([], [], color=GROUP_COLORS[group], label=GROUP_LABELS[group]) for group in groups]
+    condition_label = FEEDBACK_CONDITION_LABEL
+    if stats.get("shared_zero_baseline"):
+        positive, unresolved = metadata.get("condition_positive_counts", {}), metadata.get("condition_unresolved_counts", {})
+        if any(group not in positive or group not in unresolved for group in GROUPS):
+            raise TheoryError("Shared zero-condition display requires saved per-group positive and unresolved sample-transition counts")
+        if any(int(positive[group]) != 0 for group in GROUPS):
+            raise TheoryError("Saved positive-condition counts contradict the shared zero curve")
+        counts = {}
+        for group in groups:
+            rows = frame.loc[frame.group.eq(group) & frame.metric.eq("condition")]
+            total = _number(rows, "eligible_count")
+            if not np.isfinite(total).all() or np.any(total < 0) or np.any(total != np.floor(total)):
+                raise TheoryError("Shared zero-condition display requires saved integer eligible sample-transition counts")
+            counts[group] = {"positive": int(positive[group]), "unresolved": int(unresolved[group]), "total": int(total.sum())}
+            if counts[group]["unresolved"] > counts[group]["total"]:
+                raise TheoryError("Unresolved condition counts exceed their saved population")
+            for column in ("negative_count", "zero_count", "unavailable_count"):
+                if column in rows:
+                    counts[group][column] = int(_number(rows, column).sum())
+        high, lower = counts[GROUPS[0]], counts[GROUPS[1]]
+        condition_label = (
+            FEEDBACK_CONDITION_LABEL + "\n" + r"$\Pr(\cdot)=0$ (both groups)"
+            + "\n" + GROUP_LABELS[GROUPS[0]] + ": 0/" + str(high["total"])
+            + "; unresolved " + str(high["unresolved"]) + "\n"
+            + GROUP_LABELS[GROUPS[1]] + ": 0/" + str(lower["total"])
+            + "; unresolved " + str(lower["unresolved"])
+        )
+        stats["shared_zero_group_counts"] = counts
+        stats["shared_zero_count_unit"] = "Saved eligible sample-transitions, summed across native labels; not unique seeds"
+    handles += [Line2D([], [], color=".25", linestyle="-", label=FEEDBACK_GAIN_LABEL),
+                Line2D([], [], color=".25", linestyle="--", label=condition_label),
+                Line2D([], [], color=".6", linewidth=6, alpha=.35, label="Unresolved feedback"),
+                Line2D([], [], color=".45", linestyle=":", label="Condition upper bound"),
+                Line2D([], [], color=".45", linestyle=":", label=r"$\mathrm{SNR}_T$")]
+    ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(.5, 1.01), ncol=2,
+              frameon=False, fontsize=10, handlelength=1.5, columnspacing=.7,
+              handletextpad=.4, borderaxespad=0, labelspacing=.25)
+    stats["legend_placement"] = "tight external top; complete time range remains unobscured"
+
+
+def _active_presentation(ax, entry, metadata, stats, frame):
     """Keep legacy diagnostic artwork unchanged; active cards use captions."""
+    if entry["kind"] == "four_terminal_grouped_cdf":
+        # The grouped renderer owns its factorized legend and has no subtitle
+        # or small annotations; never replace it with the legacy pooled key.
+        ax.set_title("")
+        stats["annotations_saved_in_caption"] = True
+        return
     if entry.get("formula_version") != "four-stage-figures-1":
         return
     for artist in list(ax.texts):
-        artist.remove()
+        if artist.get_gid() != "curation-required-label":
+            artist.remove()
     ax.set_title("")
     if entry["stem"] == "terminal_bound_coverage":
         names = ("actual", "observable", "reference")
-        labels = ("Actual error", "Observable bound", "Reference bound")
+        labels = tuple(TERMINAL_LABELS[name] for name in names)
+        for line, label in zip(ax.lines[:3], labels):
+            line.set_label(label)
         colors, styles = (".2", "#e5ba26", "#563580"), ("-", "--", "-.")
         zero = metadata["zero_mass"]
         infinity = metadata.get("infinite_mass", {name: 0. for name in names})
@@ -755,18 +829,66 @@ def _active_presentation(ax, entry, metadata, stats):
             handles.append(Line2D([], [], color=color, linestyle=style, label=label))
         tolerance = metadata.get("predeclared_tolerance_rmse")
         if tolerance is not None:
-            handles.append(Line2D([], [], color=".5", linestyle=":", label="Supplied tolerance: 0" if float(tolerance) == 0 else "Supplied tolerance"))
+            handles.append(Line2D([], [], color=".5", linestyle=":", label=r"$\tau=0$" if float(tolerance) == 0 else r"$\tau/\sqrt{d}$"))
         scope = {
             "original_clean_terminal_theorem": "Clean-update theorem",
             "finite_terminal_update_extension_deterministic": "Finite-step extension",
             "finite_terminal_update_extension_gaussian_noise_bound": "Finite-step extension\n(Gaussian probability bound)",
         }[metadata["terminal_scope"]]
-        ax.legend(handles=handles, title=scope, loc="lower right", frameon=False,
-                  fontsize=10, title_fontsize=10, handlelength=1.8, labelspacing=.35)
+        ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(.5, 1.01),
+                  bbox_transform=ax.transAxes, borderaxespad=0, frameon=False,
+                  fontsize=10, handlelength=1.8, labelspacing=.35)
+        stats["legend_placement"] = "outside top"
+        stats["terminal_scope_label"] = scope
+        stats["terminal_scope_display"] = "caption_only"
+        stats["legend_quantities"] = dict(zip(names, labels))
         stats["mass_disclosure"] = "Readable per-curve legend entries and exact caption metadata"
         stats["zero_mass_annotation_visible"] = False
         stats["zero_mass_legend_visible"] = show_mass
         stats["infinite_mass_legend_visible"] = any(float(infinity[name]) > 0 for name in names)
+    if entry.get("plot_recipe_version") == PLOT_RECIPE_VERSION:
+        if entry["stem"] == "initial_loss_recovery":
+            legend = ax.get_legend()
+            if legend is not None:
+                names = {"Conditional": INITIAL_BRANCH_LABELS[0],
+                         "Unconditional control": INITIAL_BRANCH_LABELS[1],
+                         "Monte Carlo bootstrap intervals": "Bootstrap CI"}
+                for label in legend.get_texts():
+                    label.set_text(names.get(label.get_text(), label.get_text()))
+            for axis in ax.figure.axes:
+                if axis.get_label() == "<colorbar>":
+                    axis.set_ylabel("SSCD")
+            stats["colorbar_label"] = "SSCD"
+            stats["color_population"] = "Pair mean terminal SSCD; aggregation remains defined in the caption"
+        elif entry["stem"] == "posterior_feedback_over_time":
+            _curated_feedback_legend(ax, metadata, stats, frame)
+        elif entry["stem"] == "posterior_feedback_condition_margin":
+            # Limits already include every plotted pair; include zero and fixed
+            # padding on both sides without inventing any point or sign count.
+            lower, upper = ax.get_xlim()
+            lower, upper = min(float(lower), 0.), max(float(upper), 0.)
+            span = upper - lower
+            padding = .06 * span if span > 0 else .05
+            ax.set_xlim(lower - padding, upper + padding)
+            # Keep both zero guides; their meaning is described in the caption.
+            for line in ax.lines:
+                if line.get_label() in {"Zero gain", "Zero condition margin"}:
+                    line.set_label("_nolegend_")
+            handles, labels = ax.get_legend_handles_labels()
+            legend = ax.get_legend()
+            if legend is not None:
+                legend.remove()
+            if handles:
+                ax.legend(handles=handles, labels=labels, loc="lower center", bbox_to_anchor=(.5, 1.01),
+                          ncol=2, frameon=False, fontsize=10, handlelength=1.5,
+                          columnspacing=.7, handletextpad=.4, borderaxespad=0, labelspacing=.25)
+            stats["zero_padding_policy"] = "6% of the full finite zero-inclusive displayed span on both sides; empty space is not an observation"
+            stats["legend_placement"] = "tight external top" if handles else "none"
+            stats["zero_guide_labels"] = "caption_only"
+    if entry["stem"] in {"terminal_bound_coverage", "terminal_observable_bound", "final_reproduction_bound"}:
+        stats["terminal_labels_abbreviated"] = True
+        stats["terminal_correction_display"] = "caption_only; corrected numerical values retained"
+        stats["terminal_scope"] = metadata.get("terminal_scope")
     # Split legends include an earlier legend retained via add_artist.
     for legend in (artist for artist in ax.get_children() if isinstance(artist, Legend)):
         for label in legend.get_texts():
@@ -776,11 +898,65 @@ def _active_presentation(ax, entry, metadata, stats):
 
 
 def _draw(entry, frame, metadata, config):
+    if entry["stem"] in RETIRED_RENDER_STEMS or entry["kind"] == "four_motion":
+        raise TheoryError("Requested figure render is retired; its saved scientific measurements remain available")
     missing = set(entry["required_columns"]) - set(frame)
     if missing:
         raise TheoryError(
             f"{entry['stem']}: compact table misses {sorted(missing)}. Run {recompute_command(config)}"
         )
+    if entry.get("requires_theory_mean"):
+        science = config.get("scientific_config", config)
+        mode = science.get("mean_source", "cached-targets")
+        expected_source = {
+            "reference-min-snr": "minimum_snr_unconditional_reference_monte_carlo",
+            "reference-initial": "initial_unconditional_reference_monte_carlo",
+            "cached-targets": "declared_finite_bank_mean",
+        }.get(mode)
+        if expected_source is None:
+            raise TheoryError(f"{entry['stem']}: unknown saved theory-mean source")
+        if metadata.get("theory_mean_source") != expected_source or not metadata.get("theory_mean_sha256"):
+            raise TheoryError(f"{entry['stem']}: saved theory mean differs from the requested mean estimator. Run {recompute_command(config)}")
+        receipt = metadata.get("theory_mean", {})
+        if receipt.get("vector_sha256") != metadata["theory_mean_sha256"] or receipt.get("source") != expected_source:
+            raise TheoryError(f"{entry['stem']}: missing or inconsistent mean-estimation receipt. Run {recompute_command(config)}")
+        if mode in {"reference-min-snr", "reference-initial"}:
+            if receipt.get("sample_count") != science.get("num_mean_samples", 10000):
+                raise TheoryError(f"{entry['stem']}: mean sample count differs from the saved configuration")
+            if receipt.get("mean_seed") != science.get("mean_seed", 0):
+                raise TheoryError(f"{entry['stem']}: mean seed differs from the saved configuration")
+            level = receipt.get("level", {})
+            if mode == "reference-initial":
+                if level.get("step_index") != 0 or not receipt.get("estimator_hash"):
+                    raise TheoryError(f"{entry['stem']}: missing first-step mean-estimation identity")
+            else:
+                valid = (receipt.get("estimator_hash") and level.get("source_range") == "analytical"
+                         and level.get("grid_index") == 0 and "step_index" in level
+                         and level["step_index"] is None and "timestep" in level
+                         and level["timestep"] is None)
+                try:
+                    initial_snr = float(receipt["initial_snr"])
+                    decades = float(science.get("reference_snr_decades", 6.))
+                    expected_snr = initial_snr * 10. ** -decades
+                    valid = (valid and math.isfinite(initial_snr) and initial_snr > 0
+                             and 0 < decades <= 12 and math.isfinite(expected_snr) and expected_snr > 0
+                             and float(receipt["reference_snr_decades"]) == decades)
+                    for value in (level["snr"], receipt["estimation_snr"]):
+                        valid = valid and math.isclose(float(value), expected_snr, rel_tol=1e-12, abs_tol=0.)
+                    valid = (valid and math.isclose(float(level["alpha"]), math.sqrt(expected_snr / (1 + expected_snr)), rel_tol=1e-12, abs_tol=0.)
+                             and math.isclose(float(level["sigma"]), 1 / math.sqrt(1 + expected_snr), rel_tol=1e-12, abs_tol=0.))
+                    native_level = receipt["initial_level"]
+                    valid = (valid and native_level.get("step_index") == 0
+                             and math.isclose(float(native_level["snr"]), initial_snr, rel_tol=1e-12, abs_tol=0.))
+                    if metadata.get("actual_initial_snr") is not None:
+                        valid = valid and math.isclose(float(metadata["actual_initial_snr"]), initial_snr, rel_tol=1e-12, abs_tol=0.)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    valid = False
+                if not valid:
+                    raise TheoryError(f"{entry['stem']}: minimum-SNR mean-estimation receipt differs from the analytical grid. Run {recompute_command(config)}")
+    if entry.get("comparison_centre") == "zero":
+        if metadata.get("comparison_centre") != "zero" or metadata.get("declared_law_mean_unchanged") is not True:
+            raise TheoryError(f"{entry['stem']}: missing saved zero-baseline measurement contract. Run {recompute_command(config)}")
     fig = plt.Figure()
     ax = fig.subplots()
     try:
@@ -818,11 +994,14 @@ def _draw(entry, frame, metadata, config):
                 if valid.any():
                     ax.set_ylim(0, max(ax.get_ylim()[1], float(high[valid].max()) * 1.06))
             stats["annotations_saved_in_caption"] = True
-        _active_presentation(ax, entry, metadata, stats)
+        _active_presentation(ax, entry, metadata, stats, frame)
         _apply_saved_limits(ax, metadata, frame, entry)
         ax.set_xlabel(entry["axes"]["x"])
         ax.set_ylabel(entry["axes"]["y"])
         stats["axis_limits"] = {"x": list(ax.get_xlim()), "y": list(ax.get_ylim())}
+        if entry.get("plot_recipe_version") == NOTATION_VERSION:
+            stats["notation_version"] = NOTATION_VERSION
+            stats["axis_labels"] = entry["axes"].copy()
         return fig, json_value(stats)
     except BaseException:
         plt.close(fig)
@@ -851,7 +1030,8 @@ def _caption(entry):
         entry["formula"],
         "",
         "Axis notation: " + entry["axis_notation"],
-        "Normalization: " + str(metadata.get("normalization", entry["normalization"])),
+        "Normalization: " + str(entry["normalization"] if entry.get("kind") == "four_guidance_fit"
+                                  else metadata.get("normalization", entry["normalization"])),
         "Weighting: " + str(metadata.get("weighting", entry["weighting"])),
         "Bands: "
         + str(
@@ -862,6 +1042,13 @@ def _caption(entry):
         ),
         "Groups: " + entry["group_rule"],
     ]
+    if entry.get("presentation_note"):
+        text.append("Presentation: " + entry["presentation_note"])
+    if entry.get("notation_details"):
+        text.append("Notation details: " + entry["notation_details"])
+    support = list(zip(entry.get("supporting_figure_slots", []), entry.get("supporting_figure_ids", [])))
+    if support:
+        text.append("Supporting figures (in order): " + ", ".join(f"[{slot}: {stem}](appendix/{stem}.pdf)" for slot, stem in support) + ".")
     if entry.get("direct_statement"):
         for key in ("result_label", "manuscript_label", "x_definition", "y_definition", "input_source", "reference_law", "averaging_measure", "averaging_unit", "applicability_assumptions", "interpretation", "supporting_equation", "auxiliary_definitions", "manuscript_label_status", "source_label_status", "native_sweep_figure", "numerical_resolution_figure"):
             if key in entry:
@@ -869,11 +1056,21 @@ def _caption(entry):
     for key in (
         "counts",
         "initial_baseline_summary", "initial_baseline_json", "baseline_status", "baseline_summary",
+        "comparison_centre", "declared_law_mean_unchanged", "mean_norm_rmse", "mean_norm_l2",
+        "theory_mean", "theory_mean_source", "theory_mean_sha256", "theory_mean_interpretation",
+        "bank_mean_norm_l2", "bank_mean_norm_rmse", "mean_offset_l2", "mean_offset_rmse",
+        "zero_baseline_summary_table", "metric_definitions", "comparison_scope",
+        "aggregation", "cohort_audit_table", "exclusion_reason_counts", "expected_seed_ids", "expected_seed_count", "terminal_output_prediction",
         "color_population", "baseline_uncertainty", "baseline_interpretation", "dose_grid", "y_transform",
         "cohort_policy", "endpoint_status_counts", "endpoint_contracts", "cfg_endpoint_label",
         "missing_outcome_curve_count", "response_status_table", "excluded_response_table", "prediction_steps",
+        "prediction_domain", "manuscript_domain", "excluded_terminal_prediction_rows",
+        "numerical_scope", "numerical_status_counts", "measurement_audit_table",
+        "reference_definition", "missing_measurement_fields",
         "missing_outcome_row_count", "chronological_schedule", "normalized_progress_definition", "denominator_column",
         "shape_group_counts", "shape_population", "shape_rule", "shape_table",
+        "trajectory_peak_summary", "peak_summary_status", "peak_summary_details",
+        "peak_descriptive_statistics",
         "prompt_peak_distribution", "prompt_shape_table", "mixed_prompt_shape_table", "motion_audit_table",
         "observed_bound_exceedance_count", "observed_comparison_policy", "inherited_audit_status", "bound_kind", "axis_scale", "log_policy", "zero_counts", "infinite_bound_count",
         "fixed_snapshots", "optional_network_scope", "improvement_statistics",
@@ -927,6 +1124,9 @@ def _caption(entry):
         "scope_counts",
         "original_clean_counts",
         "zero_mass",
+        "grouped_zero_mass", "grouped_infinite_mass", "group_population",
+        "group_common_population_table", "grouped_predeclared_coverage", "grouped_paired_ordering_audit",
+        "group_sscd_exclusion_table", "pooled_cdf_audit_table", "pooled_metadata_audit_table",
         "manuscript_extension_required",
         "terminal_noise_scope",
         "terminal_noise_run_alpha",
@@ -1010,7 +1210,7 @@ def render_paper(stage: Path, *, diagnostics=False):
     registry = paper_registry(diagnostics=diagnostics, counterfactual=counterfactual)
     previous_path = contained_path(stage, "figure_manifest.json")
     previous = json.loads(previous_path.read_text()) if previous_path.is_file() else {}
-    owned = previous.get("files", {})
+    owned = {**previous.get("preserved_files", {}), **previous.get("files", {})}
     caption_path = contained_path(stage, "figure_captions.md")
     if caption_path.exists():
         if "figure_captions.md" not in owned:
@@ -1111,7 +1311,7 @@ def render_paper(stage: Path, *, diagnostics=False):
                 "registry_version": REGISTRY_VERSION,
                 "rendering_version": RENDERING_VERSION,
                 "renderer_source_sha256": file_sha256(Path(__file__)),
-                "renderer_sources": {name: file_sha256(Path(__file__).with_name(name)) for name in ("paper_plotting.py", "evidence_plotting.py", "four_stage_plotting.py")},
+                "renderer_sources": {name: file_sha256(Path(__file__).with_name(name)) for name in ("paper_plotting.py", "evidence_plotting.py", "four_stage_plotting.py", "paper_notation.py")},
                 "scientific_hash": config["scientific_hash"],
                 "metric_schema_version": config["metric_schema_version"],
                 "diagnostics_requested": diagnostics,
@@ -1126,6 +1326,9 @@ def render_paper(stage: Path, *, diagnostics=False):
                 },
                 "figures": entries,
                 "files": files,
+                "preserved_files": {name: digest for name, digest in owned.items() if name not in files},
+                "render_retirements": list(RENDER_RETIREMENTS),
+                "plot_recipe_version": PLOT_RECIPE_VERSION,
             }
             atomic_write_json(previous_path, manifest)
         return manifest

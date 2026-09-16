@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import copy
 
-REGISTRY_VERSION = "four-stage-evidence-1"
+from .paper_notation import NOTATION_DETAILS, NOTATION_SCOPE, NOTATION_VERSION, PAPER_AXES
+
+REGISTRY_VERSION = "four-stage-paper-curation-13"
+PREVIOUS_REGISTRY_VERSION = "four-stage-evidence-1"
+COMPATIBLE_PRESENTATION_REGISTRY_VERSIONS = frozenset({
+    REGISTRY_VERSION, "four-stage-paper-curation-12", "four-stage-paper-curation-11", "four-stage-paper-curation-10", "four-stage-paper-curation-9", "four-stage-paper-curation-8", "four-stage-paper-curation-7", "four-stage-paper-curation-6", "four-stage-paper-curation-5", "four-stage-paper-curation-4", "four-stage-paper-curation-3", "four-stage-paper-curation-2", PREVIOUS_REGISTRY_VERSION,
+})
+PLOT_RECIPE_VERSION = NOTATION_VERSION
 FORMULA_VERSION = "revised-fixed-evidence-2"
 # Stable CSV population keys; mathematical typography belongs only to display labels.
 GROUPS = ("SSCD > 0.75", "SSCD <= 0.75")
@@ -440,11 +447,14 @@ LEGACY_DIAGNOSTICS = [
 
 
 DIRECT_REFERENCE = (
-    "One declared finite law D_K supplies mu_K, bar{x}^K, e_u^K, p^K and R_K. "
-    "Cached-target mode uses every compatible complete preselection target and "
-    "equal mass per distinct atom; manifest mode uses its explicit atoms and weights. "
-    "K does not identify the checkpoint training distribution. Legacy model-output "
-    "centers never set mu_K. All quantities in a comparison use the same law."
+    "One declared finite law supplies the posterior, learned-reference error, probabilities, "
+    "radius and exact weighted atom mean. The selected theory centre mu is separate: "
+    "by default it is the saved vector average of 10000 unconditional posterior clean "
+    "references at the smallest SNR of the prespecified analytical extension on independent Gaussian inputs, "
+    "with finite-selected-SNR and Monte Carlo qualifications and no learned-network evaluation. "
+    "Explicit native-initial estimation and exact finite-bank-mean options are identified in the measurement receipt. "
+    "Selecting mu never changes the atom masses or posterior and does not identify "
+    "the finite law or selected reference estimate with the checkpoint's complete training distribution."
 )
 DIRECT_ASSUMPTIONS = [
     "Equation 6 is an assumed single-target conditional idealization, not inferred from SSCD.",
@@ -902,13 +912,13 @@ FOUR_STAGE_MAIN = [
 
 FOUR_STAGE_APPENDIX = [
     _four_stage("lemma2_initial_concentration", "initial_unconditional_mean_concentration", "appendix", "ecdf",
-        "How concentrated are unique initial unconditional estimates and declared-law atoms around the same empirical mean?",
+        "How concentrated are unique initial unconditional estimates and declared-law atoms around the selected theory mean?",
         r"Distance to $\boldsymbol{\mu}_K$ (RMSE)", "CDF",
-        "Exact ECDFs of initial learned unconditional Gaussian estimates and distinct atoms about the same mu_K. Evaluation seeds have equal mass; atoms have the declared masses. No prompt replication or terminal-outcome filtering.", ["distribution", "value", "cdf"]),
+        "Exact ECDFs of initial learned unconditional Gaussian estimates and distinct atoms about the same selected mu. The default mu is the independent 10000-draw unconditional posterior reference estimate at the analytical extension minimum SNR; its receipt distinguishes finite-selected-SNR bias, Monte Carlo uncertainty and the measured finite-bank offset. Evaluation seeds have equal mass; atoms retain declared masses. No prompt replication or terminal-outcome filtering.", ["distribution", "value", "cdf"]),
     _four_stage("lemma2_unconditional_baseline", "unconditional_reference_convergence", "appendix", "four_reference",
         "How do analytical reference concentration and genuine native Gaussian-probe errors compare?",
         r"$\mathrm{SNR}$", "Distance or reference error (RMSE)",
-        "Reference-to-mu_K distance on the preserved lower-SNR analytical grid; all available native Gaussian reference, learned-to-mu_K, and learned-to-reference summaries remain visible. Network curves exist only at their actual native labels. The analytical extension is not a learned convergent tail.",
+        "Reference-to-selected-mu distance on the preserved analytical grid, with all native learned-to-mu and unchanged learned-to-reference errors. The selected mean is separately estimated from unconditional posterior clean references at the analytical extension minimum SNR on independent Gaussian inputs by default. The horizontal guide is the normalized distance between the exact finite-bank mean and selected mu, which need not vanish; the caption and audit retain its meaning and value without a legend entry. Network curves exist only at measured native labels.",
         ["metric", "source_range", "step_index", "segment_id", "snr", "median", "q25", "q75", "minimum", "maximum"]),
     _four_stage("proposition5_posterior_feedback", "posterior_feedback_over_time", "appendix", "feedback_fractions",
         "How do strict observed feedback and the original sufficient condition vary across every applicable transition?",
@@ -948,6 +958,181 @@ FOUR_STAGE_APPENDIX = [
         ["distribution", "value", "cdf"]),
 ]
 
+
+# The historical pooled ECDF remains an audit; the active main view compares
+# fixed SSCD groups using the same three corrected quantities within each group.
+_GROUPED_TERMINAL_COVERAGE = _four_stage(
+    "theorem7_final_reproduction", "terminal_bound_coverage", "main", "four_terminal_grouped_cdf",
+    "How do actual-error and bound tolerance coverage differ between SSCD > 0.75 and SSCD <= 0.75?",
+    r"$\tau/\sqrt{d}$", r"$\Pr(\,\cdot\leq\tau)$",
+    "Within each same-seed terminal-SSCD group (>0.75 or <=0.75), exact weighted ECDFs of E_end/sqrt(d), [B_obs+delta_sched]/sqrt(d), and [B_ref+delta_sched]/sqrt(d) share the same eligible samples and prompt-balanced weights. All groups share one tolerance axis. Zero/infinite mass, original clean applicability, correction scope and row-level ordering audits remain explicit. SSCD selects the outcome group, never a latent tolerance.",
+    ["group", "distribution", "value", "cdf", "denominator_weight", "eligible_count", "prompt_count"],
+    formula_version="terminal-coverage-by-sscd-1", experiment=4, manuscript_results=["Theorem 7"],
+    group_rule="Same-seed terminal SSCD > 0.75 versus SSCD <= 0.75; exact threshold belongs to the lower group. Missing/nonfinite scores are audited separately. Prompt identities may occur in both groups through different seeds.",
+    weighting="Within each group, one mass unit per represented prompt-target pair divided over its eligible member seeds; identical rows and weights for actual, observable and reference curves",
+    averaging_measure="Group-conditional prompt-balanced cumulative fraction at each common latent tolerance",
+    normalization="Saved per-sample latent L2/sqrt(d) quantities and tolerance, each normalized exactly once",
+    band_definition="None; exact saved group ECDFs. Gaussian noise-bound probability scope remains separate.",
+    required_applicability="The original common terminal-correction eligibility plus a finite same-seed terminal SSCD; empty groups are explicit and never fabricated",
+    group_common_population_table="audit_data/terminal_grouped_common_population.csv",
+    group_sscd_exclusion_table="audit_data/terminal_grouped_sscd_exclusions.csv",
+    pooled_cdf_audit_table="audit_data/terminal_pooled_cdf.csv",
+    pooled_metadata_audit_table="audit_data/terminal_pooled_cdf_metadata.csv", allow_unavailable=False,
+)
+
+
+# This additional saved-scalar view does not alter the historical registry or
+# any existing measurement identity, appendix slot, or support reference.
+_PROMPT_BRANCH_GAP = _four_stage(
+    "lemma6_target_specific_synchronization", "branch_gap_per_prompt", "appendix", "four_prompt_chronological",
+    "How does each retained prompt-target pair's mean branch gap evolve across the same complete seed population?",
+    r"$T-t$", r"$\|\boldsymbol{\Delta}_t\|/\sqrt{d}$",
+    "One curve per retained prompt-target pair: the arithmetic mean across its complete fixed evaluation seed cohort of ||Delta_t||/sqrt(d) at each chronological prediction T-t. The norm is formed per seed before averaging; this is not the norm of a mean vector. Curve color is mean terminal SSCD across exactly the same seeds, fixed across the curve. All complete pair curves are shown without outcome grouping, per-curve rescaling, or a temporal-shape claim.",
+    ["run_id", "original_index", "record_id", "target_id", "step_index", "mean_gap_rmse", "mean_terminal_sscd", "seed_count", "seed_ids_json", "latent_dimension", "cohort_complete"],
+    formula_version="branch-gap-per-prompt-1", experiment=3, manuscript_results=["Lemma 6"],
+    value_column="mean_gap_rmse", value_domain="nonnegative", source_scalar_column="direct_lemma6_gap_rmse",
+    input_source=["saved_trajectory_metrics", "saved_initial_terminal_outcomes"],
+    reference_law="The measured branch difference uses the paired learned estimates directly; no reference posterior or new model evaluation is required.",
+    normalization="Mean of saved per-seed L2/sqrt(d) values; no additional dimensional normalization",
+    averaging_measure="Arithmetic mean of individual seed branch-gap norms on the same complete seed cohort at every prediction",
+    averaging_unit="Retained prompt-target pair, preserving run/original-index/record/target identity",
+    group_rule="All complete retained prompt-target pairs; no SSCD outcome split or curve selection",
+    weighting="Equal mass per seed within each prompt-target pair; the same seeds determine mean terminal SSCD",
+    band_definition="None; one mean curve per prompt-target pair",
+    required_applicability="Saved complete fixed seed cohort and all chronological prediction indices, with matched terminal SSCD",
+    cohort_audit_table="audit_data/branch_gap_per_prompt_cohort.csv", colorbar_label="SSCD",
+    sscd=True, update_index=True, include_zero=True, allow_unavailable=False,
+)
+
+
+def _prompt_trajectory_figure(stem, value_column, value_domain, axis, source_column, definition):
+    """Additional saved-scalar views; existing paper slots and measurements stay fixed."""
+    return _four_stage(
+        "lemma6_target_specific_synchronization", stem, "appendix", "four_prompt_chronological",
+        "How does this saved manuscript quantity evolve for each prompt-target pair over its complete fixed seed cohort?",
+        r"$T-t$", axis,
+        definition + " At each saved pre-update prediction, one curve per prompt-target pair averages the individual seed values over the same complete fixed evaluation seed cohort. Its fixed color is mean terminal SSCD across those same seeds. No posterior or network evaluation is performed for this scalar reduction, and no final-output prediction is invented.",
+        ["run_id", "original_index", "record_id", "target_id", "step_index", value_column,
+         "mean_terminal_sscd", "seed_count", "seed_ids_json", "latent_dimension", "cohort_complete"],
+        formula_version="prompt-trajectory-scalars-1", experiment=3, manuscript_results=["Lemma 6"],
+        value_column=value_column, value_domain=value_domain, source_scalar_column=source_column,
+        input_source=["saved_trajectory_metrics", "saved_initial_terminal_outcomes"],
+        reference_law="Saved clean-reference errors, analytical reference branch gaps and target posterior probabilities use the declared finite atom law; the conditional reference retains the stated single-target conditional idealization. The law is not identified with the complete training marginal.",
+        normalization=("Dimensionless probability; exponentiate each saved seed log probability before averaging"
+                       if value_domain == "probability" else
+                       "Mean of saved per-seed L2/sqrt(d) latent norms; no additional dimensional normalization"),
+        averaging_measure="Arithmetic mean of individual seed values on the same complete seed cohort at every prediction",
+        averaging_unit="Retained prompt-target pair, preserving run/original-index/record/target identity",
+        group_rule="All complete retained prompt-target pairs; no SSCD outcome split or curve selection",
+        weighting="Equal mass per seed within each prompt-target pair; the same seeds determine mean terminal SSCD",
+        band_definition="None; one mean curve per prompt-target pair",
+        required_applicability="Saved complete fixed seed cohort and all chronological prediction indices, with matched terminal SSCD and valid values for the displayed quantity",
+        cohort_audit_table=f"audit_data/{stem}_cohort.csv", colorbar_label="SSCD",
+        sscd=True, update_index=True, include_zero=True, allow_unavailable=False,
+    )
+
+
+_PROMPT_TRAJECTORY_FIGURES = [
+    _prompt_trajectory_figure(
+        "conditional_reference_error_per_prompt", "mean_conditional_error_rmse", "nonnegative",
+        r"$e_t(c)/\sqrt{d}$", "direct_conditional_error_rmse",
+        "Mean conditional clean-reference error e_t(c)/sqrt(d), taken from the saved per-seed normalized norms under the fixed single-target conditional reference assumption; the norm is formed before averaging."),
+    _prompt_trajectory_figure(
+        "unconditional_reference_error_per_prompt", "mean_unconditional_reference_error_rmse", "nonnegative",
+        r"$e_t(\varnothing)/\sqrt{d}$", "direct_unconditional_reference_error_rmse",
+        "Mean learned unconditional clean-estimate error relative to its declared-law posterior reference, e_t(empty)/sqrt(d), taken from the saved per-seed normalized norms. This is not unconditional distance to the target; the norm is formed before averaging."),
+    _prompt_trajectory_figure(
+        "target_probability_per_prompt", "mean_target_probability", "probability",
+        r"$p_t$", "direct_target_log_probability",
+        "Mean target posterior probability on the actual saved generated trajectory state, formed as mean(exp(saved direct_target_log_probability)) across seeds. Exponentiation precedes averaging; exp(mean(log probability)) would be a different quantity. It is not a conditional-only counterfactual probability."),
+    _prompt_trajectory_figure(
+        "reference_branch_gap_per_prompt", "mean_reference_gap_rmse", "nonnegative",
+        r"$\|\bar{\mathbf{x}}_t(c)-\bar{\mathbf{x}}_t(\varnothing)\|/\sqrt{d}$", "direct_reference_target_error_rmse",
+        "The analytical reference branch difference is conditional minus unconditional, bar{x}_t(c)-bar{x}_t(empty), at the same actual saved state and noise level. Under the stated single-target conditional law, bar{x}_t(c)=x_star, so its normalized norm equals saved direct_reference_target_error_rmse, whose vector has the opposite sign, bar{x}_t(empty)-x_star. Norm equality permits reuse without vector reconstruction or another normalization. Individual seed norms are averaged; the learned branch gap, differences of error norms, and the radius-tail bound are not substituted."),
+]
+
+
+_PROMPT_REFERENCE_VARIATION = _four_stage(
+    "proposition5_posterior_feedback", "reference_variation_per_prompt", "appendix", "four_prompt_chronological",
+    "How does the saved cross-step reference variation evolve for each complete prompt-target seed cohort?",
+    r"$T-t$", r"$V_t/\sqrt{d}$",
+    "Equation 15 and Proposition 5: one curve per prompt-target pair averages the saved per-seed cross-step reference-variation norm-integral estimates V_t/sqrt(d). Only positive-noise transitions t=2,...,T are represented, at chronological coordinates T-t=0,...,T-2. No value is inserted at the final prediction t=1 or at the output. The same complete fixed seed cohort defines every displayed transition and its fixed mean terminal-SSCD color. Finite nonnegative estimates remain included when the condition-sign assessment is unresolved; numerical statuses and missingness remain explicit. Refined interval midpoints do not replace the saved original estimates. Displaying these estimates does not certify the integral or its sign conditions. This scalar reduction performs no new integration, posterior evaluation or inference.",
+    ["run_id", "original_index", "record_id", "target_id", "step_index", "mean_reference_variation_rmse",
+     "mean_terminal_sscd", "seed_count", "seed_ids_json", "latent_dimension", "cohort_complete"],
+    formula_version="reference-variation-per-prompt-1", experiment=2,
+    manuscript_results=["Proposition 5", "Equation 15"],
+    value_column="mean_reference_variation_rmse", value_domain="nonnegative",
+    source_scalar_column="direct_prop5_variation_rmse", prediction_domain="positive_noise_transitions",
+    input_source=["saved_matched_updates", "saved_initial_terminal_outcomes"],
+    reference_law="The declared finite atom-law posterior and saved cross-step numerical integration contract; not an identified complete training law",
+    normalization="Arithmetic mean of saved per-seed V_t/sqrt(d) estimates; dimensional normalization is already present and is not repeated",
+    averaging_measure="Arithmetic mean of individual saved seed estimates on the same complete fixed cohort at every applicable positive-noise transition",
+    averaging_unit="Retained prompt-target pair, preserving run/original-index/record/target identity",
+    group_rule="All complete eligible prompt-target pairs; no SSCD split or variation-value selection",
+    weighting="Equal seed mass within each prompt-target pair; the same seeds define mean terminal SSCD",
+    band_definition="None; one seed-mean estimate per pair and transition, with numerical status in caption/audit",
+    required_applicability="Complete fixed seed cohort at every applicable positive-noise transition, finite nonnegative original estimates, true direct_prop5_applicable, an accepted integral status and matched terminal SSCD; unresolved condition signs or quadrature budget alone do not exclude estimates; the final t=1 prediction is outside the integral domain",
+    measurement_audit_table="audit_data/feedback_endpoints.csv",
+    accepted_integral_statuses=["estimated_converged", "numerically_unresolved", "analytic_single_atom_reference", "converged"],
+    cohort_audit_table="audit_data/reference_variation_per_prompt_cohort.csv",
+    colorbar_label="SSCD", sscd=True, update_index=True, include_zero=True, allow_unavailable=False,
+)
+
+
+_GUIDANCE_FIT = _four_stage(
+    "corollary3_initial_cfg_amplification", "corollary3_guidance_scale_vs_loss", "appendix", "four_guidance_fit",
+    "How does the fitted initial guidance coefficient vary with genuine conditional forward loss?",
+    r"$\sqrt{L_T(c)/(d\,\mathrm{SNR}_T)}$", r"$\widehat{g}$",
+    "Corollary 3, Equation 54: one signed no-intercept least-squares coefficient per prompt-target pair minimizes the sum over the complete evaluation seed cohort of ||(hat{x}_T(c;g)-mu)-a(x_star-mu)||^2. With the same target direction for every seed, this joint coefficient equals the arithmetic mean of the individual signed seed fits. The saved x remains the genuine forward-target loss mean L_T(c)/(d*SNR_T). The display takes one square root of that saved ratio, after the loss has been averaged over draws; it is not a mean of per-draw roots. Color is mean terminal SSCD across exactly the same complete seed cohort. Fits use actual saved first-prediction states, with Gaussian-bank match status audited separately. The selected reference-based mu is used; neither zero centering nor a coefficient fitted to g*Delta_T is substituted. The horizontal reference is the configured guidance scale g; negative fits remain visible and are not clipped.",
+    ["run_id", "original_index", "record_id", "target_id", "x", "y", "mean_terminal_sscd",
+     "seed_count", "seed_ids_json", "latent_dimension", "snr", "guidance_scale",
+     "fit_residual_rmse", "direction_norm_rmse"],
+    formula_version="corollary3-guidance-fit-1", experiment=1, manuscript_results=["Corollary 3"],
+    requires_theory_mean=True, sscd=True, colorbar_label="SSCD", equal=False, signed=True,
+    include_zero=True, allow_unavailable=False,
+    input_source=["saved_initial_generated_estimates", "saved_forward_target_loss_summary", "saved_initial_terminal_outcomes"],
+    dependencies=["initial_four_stage", "forward_loss_summary", "initial_terminal_outcomes"],
+    reference="Configured guidance scale",
+    reference_law="The same selected theory-mean vector and receipt as the active mean comparisons; empirical reference scope and the single-target conditional assumption remain explicit.",
+    normalization="Saved x is the forward squared-L2 loss mean divided once by d*SNR_T; displayed x is sqrt(saved x), with the root outside the draw mean. y is an unchanged signed dimensionless fitted coefficient; saved residual/direction norms use L2/sqrt(d)",
+    saved_x_definition="L_T(c)/(d*SNR_T)", display_x_definition="sqrt(L_T(c)/(d*SNR_T))",
+    averaging_measure="Joint no-intercept least squares over the full fixed seed cohort; equivalent to the arithmetic mean of signed seed fits with a common nonzero target direction",
+    averaging_unit="One retained prompt-target pair, preserving run/original-index/record/target identity",
+    group_rule="All complete eligible prompt-target pairs; no SSCD outcome split or fitted-value selection",
+    weighting="Equal seed weight in the joint fit and mean terminal SSCD; genuine independent forward draws determine the pair loss",
+    band_definition="None; one joint fit per pair and a horizontal configured-g guide",
+    required_applicability="Complete fixed saved initial seed cohort, positive identifiable target-minus-selected-mean direction, valid vector-fit QA, genuine forward-target loss at matching initial SNR and mean provenance",
+    auxiliary_definitions="The joint fit uses the full guided clean estimate minus selected mu and target minus selected mu; residual and direction-norm diagnostics retain the same fit population.",
+    cohort_audit_table="audit_data/corollary3_guidance_scale_vs_loss_cohort.csv",
+)
+_GUIDANCE_FIT.pop("geometry_levels", None)
+
+
+# Frozen descriptors for historical receipts and migration fixtures only.
+# Neither the default selector nor diagnostics renders these retired companions.
+_ZERO_BASELINE_FIGURES = [
+    _four_stage("lemma2_initial_concentration", "initial_unconditional_mean_concentration_zero", "appendix", "ecdf",
+        "How concentrated are the same initial unconditional estimates and declared-law atoms around the zero vector?",
+        r"$\|\cdot-\mathbf{0}\|/\sqrt{d}$", "CDF",
+        "Exact ECDFs of ||hat{x}_T(Z,empty)-0||/sqrt(d) for the same unique Gaussian seeds and ||u_j-0||/sqrt(d) for the same declared atoms. Seed weights are equal; atom weights retain their declared masses. This is an additive baseline comparison; the exact finite-bank mean and posterior remain unchanged independently of the selected reference-based mu.",
+        ["distribution", "value", "cdf"], formula_version="zero-baseline-1",
+        comparison_centre="zero", declared_law_mean_unchanged=True,
+        direct_statement=False, manuscript_results=[], manuscript_label=None,
+        manuscript_label_status="descriptive_comparison_not_a_new_manuscript_statement",
+        evidence_classification="Descriptive zero-vector baseline on the existing reference law and Gaussian probe bank",
+        zero_baseline_summary_table="audit_data/zero_baseline_summary.csv"),
+    _four_stage("lemma2_unconditional_baseline", "unconditional_reference_convergence_zero", "appendix", "four_reference",
+        "How do the same analytical and learned clean estimates compare with the zero vector across noise levels?",
+        r"$\mathrm{SNR}_t$", r"Norm / $\sqrt{d}$",
+        "Same saved posterior and Gaussian probe bank as the mean-centred comparison: ||bar{x}_t(Z,empty)-0||/sqrt(d), ||hat{x}_t(Z,empty)-0||/sqrt(d), and the unchanged e_t(Z,empty)/sqrt(d). The lower-SNR extension remains analytical only; native learned evaluations are unchanged. As SNR tends to zero, the reference-to-zero distance tends to the norm of the exact finite-bank weighted atom mean divided by sqrt(d), shown by the Reference limit guide; this is not the norm of the separately selected reference-based mu.",
+        ["metric", "source_range", "step_index", "segment_id", "snr", "median", "q25", "q75", "minimum", "maximum"],
+        formula_version="zero-baseline-1", comparison_centre="zero", declared_law_mean_unchanged=True,
+        direct_statement=False, manuscript_results=[], manuscript_label=None,
+        manuscript_label_status="descriptive_comparison_not_a_new_manuscript_statement",
+        evidence_classification="Descriptive zero-vector baseline on the existing reference law and Gaussian probe bank",
+        zero_baseline_summary_table="audit_data/zero_baseline_summary.csv"),
+]
+
 _COUNTERFACTUAL = _four_stage("lemma6_branch_target_errors", "counterfactual_unconditional_response", "appendix", "four_counterfactual",
     "At a fixed matched update, how does the actual empty-prompt learned predictor respond at the two endpoints?",
     "Counterfactual target error (RMSE)", "Actual-next target error (RMSE)",
@@ -956,7 +1141,7 @@ _COUNTERFACTUAL = _four_stage("lemma6_branch_target_errors", "counterfactual_unc
     input_source=["learned_network_counterfactual_probe"], weighting="Unaggregated common-context learned endpoint pairs", allow_unavailable=True)
 
 
-def paper_registry(diagnostics=False, *, counterfactual=False):
+def previous_paper_registry(diagnostics=False, *, counterfactual=False):
     """Exactly four main and eleven mandatory appendix entries by default."""
     entries = copy.deepcopy(FOUR_STAGE_MAIN + FOUR_STAGE_APPENDIX)
     if counterfactual:
@@ -974,3 +1159,126 @@ def paper_registry(diagnostics=False, *, counterfactual=False):
             entry.update(category="diagnostics", outputs={ext: f"diagnostics/{entry['stem']}.{ext}" for ext in ("png", "pdf")})
             entries.append(entry)
     return entries
+
+
+# Presentation-only curation: original source_table/formula_version objects above
+# are retained for compatibility receipts and migration fixtures, never dispatch.
+_RENDER_RETIREMENT_REASONS = {
+    "branch_gap_motion_high_sscd": "Reviewed motion render retired; scalar accounting and identity audits remain mandatory",
+    "branch_gap_motion_lower_sscd": "Reviewed motion render retired; scalar accounting and identity audits remain mandatory",
+    "initial_unconditional_mean_concentration_zero": "Requested zero-vector concentration companion retired; saved scalar measurements and historical receipts retained; selected theory mean unchanged",
+    "unconditional_reference_convergence_zero": "Requested zero-vector convergence companion retired; saved scalar measurements and historical receipts retained; selected theory mean unchanged",
+}
+RETIRED_RENDER_STEMS = frozenset(_RENDER_RETIREMENT_REASONS)
+RENDER_RETIREMENTS = tuple({
+    "figure_id": stem, "reason": _RENDER_RETIREMENT_REASONS[stem],
+    "rendering_retired": True, "measurements_retained": True,
+    "owned_paths": [f"{category}/{stem}.{extension}" for category in ("main", "appendix", "diagnostics") for extension in ("png", "pdf")],
+} for stem in sorted(RETIRED_RENDER_STEMS))
+PAPER_MAIN_ORDER = (
+    "initial_loss_recovery", "branch_gap_posterior_response",
+    "branch_gap_synchronization", "terminal_bound_coverage",
+)
+PAPER_APPENDIX_ORDER = (
+    "initial_unconditional_mean_concentration", "unconditional_reference_convergence",
+    "posterior_feedback_over_time", "posterior_feedback_condition_margin",
+    "branch_target_errors", "synchronization_bound", "branch_gap_peak_step",
+    "terminal_observable_bound", "final_reproduction_bound", "branch_gap_per_prompt",
+    "conditional_reference_error_per_prompt", "unconditional_reference_error_per_prompt",
+    "target_probability_per_prompt", "reference_branch_gap_per_prompt",
+    "corollary3_guidance_scale_vs_loss", "reference_variation_per_prompt",
+)
+_SUPPORT = {
+    "initial_loss_recovery": PAPER_APPENDIX_ORDER[:2],
+    "branch_gap_posterior_response": PAPER_APPENDIX_ORDER[2:4],
+    "branch_gap_synchronization": PAPER_APPENDIX_ORDER[4:7],
+    "terminal_bound_coverage": PAPER_APPENDIX_ORDER[7:9],
+}
+_PRESENTATION_NOTES = {
+    "reference_variation_per_prompt": "A16 displays the arithmetic mean of saved per-seed Equation-15 V_t/sqrt(d) estimates, using one full fixed cohort and mean terminal-SSCD color per pair. Its domain is t=2,...,T, or T-t=0,...,T-2, without a terminal t=1 placeholder. Numerical statuses and cohort exclusions remain auditable; estimates are not relabeled certified integrals.",
+    "corollary3_guidance_scale_vs_loss": "A15 plots the full guided-clean least-squares coefficient from Corollary 3 Equation 54 against sqrt of the saved genuine forward loss divided by d*SNR_T, with the root outside the draw mean. The compact x column and scientific formula version are unchanged. One point uses the complete fixed seed cohort and its mean terminal SSCD. Selected mu is unchanged; the configured-g guide is labeled, negative fits remain, and direction degeneracy or incomplete cohorts are excluded with audit reasons.",
+    "reference_branch_gap_per_prompt": "A14 is the norm of conditional minus unconditional analytical clean reference at the same saved state and noise. The single-target conditional reference equals x_star, making the saved opposite-sign unconditional-reference-to-target norm identical. Average individual normalized norms once over the complete fixed seed cohort; color uses the same seeds' mean terminal SSCD. No learned-gap, error-difference or radius-tail substitution is used.",
+    "conditional_reference_error_per_prompt": "A11 retains saved individual normalized conditional-reference errors before seed averaging. Same fixed full seed cohort and mean terminal-SSCD color at every chronological prediction; the conditional reference retains the single-target assumption.",
+    "unconditional_reference_error_per_prompt": "A12 measures learned unconditional clean estimates against their posterior clean reference, not against the target. Same fixed full seed cohort and mean terminal-SSCD color at every chronological prediction; no second dimensional normalization.",
+    "target_probability_per_prompt": "A13 averages individual target probabilities obtained by exponentiating saved per-seed log probabilities on the actual generated states. The ordinate is not exponentiated mean log probability. It shares the complete-cohort and fixed mean terminal-SSCD color contract, with a fixed [0,1] probability axis.",
+    "initial_loss_recovery": "Conditional and hollow unconditional points share pair identity and x coordinate; connectors do not assert equality. Monte Carlo intervals, initial SNR, and draw/seed counts are recorded. The pair-level color is mean terminal SSCD. The mean-concentration claim has separate supporting evidence in A1 and A2.",
+    "branch_gap_posterior_response": "Fixed first-update retained contribution along the same displacement direction, not a change in learned gap norm or a guidance-scale rollout. Signed natural-log probability values use the saved symmetric-log threshold; medians/IQRs are descriptive. Positive initial feedback does not establish the original sufficient condition or positive feedback at every later transition; see A3 and A4.",
+    "branch_gap_synchronization": "Common-population prompt-balanced medians of actual vector gap D (dashed) and paired maximum target error Q (solid); only Q has the displayed IQR. A5 first resolves branch timing; A6 supplies the complete bound and A7 individual peak timing. Small gap alone can be agreement away from the target. Display limits cover every plotted curve and band, not unplotted raw extrema.",
+    "terminal_bound_coverage": "Each terminal-SSCD group (>0.75 or <=0.75) has three weighted fractions E<=tau, B_obs+delta_sched<=tau, and B_ref+delta_sched<=tau on identical eligible samples and weights within that group. Gold/purple identify groups; solid/dashed/dash-dot identify actual/observable/reference. All six curves share one tolerance scale. Expected ordering F_ref<=F_obs<=F_actual never substitutes for row-level checks; violations remain reported. Independent correction and original-clean versus deterministic/pathwise/probabilistic scope are retained. Latent tolerance is not decoded-copy identity or an SSCD-derived threshold; see paired comparisons A8 and A9.",
+    "unconditional_reference_convergence": "The selected mu is estimated from unconditional posterior references at the analytical extension minimum SNR on a separate Gaussian bank by default. The horizontal guide marks the normalized exact-bank-to-selected-mean offset; its value and meaning remain in the caption and audit, without a legend entry. One fixed evaluation Gaussian probe bank is used across genuine native labels. The dotted analytical-only reference segment below SNR_T contains no network evaluations; solid reference and dashed/dotted learned quantities above initialization retain the complete saved native sweep. Empirical reference identification does not identify the checkpoint's complete training marginal.",
+    "posterior_feedback_over_time": "Resolved strict-positive feedback and original-condition coverage use the same structural population and weights. Unknown signs remain in the denominator. The condition upper boundary is possible unresolved mass, not observed satisfaction or a statistical confidence interval. A shared zero curve is explicitly labeled only when both saved condition curves are identically zero; exact per-group positive and unresolved sample-transition counts remain in caption metadata.",
+    "posterior_feedback_condition_margin": "Both zero guides remain visible. Symmetric-log gain uses its saved threshold; positive/nonnegative/negative and unresolved condition counts retain their saved classification. A fixed 6% span padding beyond zero on the margin axis is display space only, not fabricated positive observations. Original margin and endpoint gain keep their independent contract qualifications.",
+    "branch_target_errors": "Conditional and unconditional target-error medians and their descriptive IQRs use the same paired population at each prediction. Overlapping error norms do not prove vector equality, and group timing is not an every-seed ordering. Full displayed curves/bands share one scale and zero origin.",
+    "synchronization_bound": "Complete reference bound S, actual vector gap D and paired maximum Q are reduced per sample before shared-weight medians. The displayed Q IQR and all curves, including the larger lower-SSCD bound, share one nonnegative scale. Raw tails, components and pointwise audits remain saved.",
+    "branch_gap_per_prompt": "Each curve averages saved per-seed branch-gap norms over one complete fixed seed cohort; its color averages terminal SSCD over exactly that cohort. The normalized saved norms are not divided by sqrt(d) again. Incomplete or mismatched cohorts are disclosed in the saved cohort audit, never silently filled or reduced during plotting.",
+    "branch_gap_peak_step": "Weighted bin mass of each complete trajectory's earliest resolved global maximum, not a density or first local peak. Full prediction range and late mass are retained; exact/near ties, flat/incomplete cases and group overlap remain recorded. A post-initial peak is not proof of unimodality or a categorical outcome dichotomy.",
+    "terminal_observable_bound": "The abscissa is (B_obs+delta_sched)/sqrt(d), with B_obs=e_c+(g-1)||Delta||. Every applicable actual endpoint and loose or violated comparison remains visible, with exact zeros and the independent correction scope preserved.",
+    "final_reproduction_bound": "The abscissa is (B_ref+delta_sched)/sqrt(d), with B_ref=g e_c+(g-1)[e_u^K+R_K(1-p_K)]. This is distinct from the tighter observable bound. All finite loose points, probability qualifications, zero cases and row-level applicability remain visible.",
+}
+
+
+def paper_registry(diagnostics=False, *, counterfactual=False):
+    """The sole active selector: four main and sixteen mandatory appendix plots."""
+    # Optional learned probes are diagnostics only; saved enablement never adds a paper slot.
+    previous = previous_paper_registry(diagnostics, counterfactual=False)
+    by_stem = {entry["stem"]: entry for entry in previous}
+    by_stem[_PROMPT_BRANCH_GAP["stem"]] = _PROMPT_BRANCH_GAP
+    by_stem[_GROUPED_TERMINAL_COVERAGE["stem"]] = _GROUPED_TERMINAL_COVERAGE
+    by_stem[_GUIDANCE_FIT["stem"]] = _GUIDANCE_FIT
+    by_stem[_PROMPT_REFERENCE_VARIATION["stem"]] = _PROMPT_REFERENCE_VARIATION
+    by_stem.update({entry["stem"]: entry for entry in _PROMPT_TRAJECTORY_FIGURES})
+    slots = {stem: f"A{index}" for index, stem in enumerate(PAPER_APPENDIX_ORDER, 1)}
+    entries = []
+    for category, ordered in (("main", PAPER_MAIN_ORDER), ("appendix", PAPER_APPENDIX_ORDER)):
+        for order, stem in enumerate(ordered, 1):
+            entry = copy.deepcopy(by_stem[stem])
+            entry.update(category=category, section=category, order=order,
+                paper_slot=f"M{order}" if category == "main" else slots[stem],
+                outputs={extension: f"{category}/{stem}.{extension}" for extension in ("png", "pdf")})
+            entries.append(entry)
+    active = set(PAPER_MAIN_ORDER + PAPER_APPENDIX_ORDER)
+    for entry in previous:
+        if entry["stem"] not in active and entry["stem"] not in RETIRED_RENDER_STEMS:
+            entry = copy.deepcopy(entry)
+            entry.update(section="supported_optional_diagnostic", order=len(entries) + 1, paper_slot=None)
+            entries.append(entry)
+    for entry in entries:
+        stem = entry["stem"]
+        entry.update(figure_id=stem, stable_stem=stem, plot_data_key=stem,
+            renderer=entry["kind"], formula_id=f"{entry['formula_version']}:{stem}",
+            plot_recipe_version=PLOT_RECIPE_VERSION,
+            required_applicability=entry.get("required_applicability", "Recorded measurement availability and mathematical applicability; no fabricated fallback"),
+            supporting_figure_ids=list(_SUPPORT.get(stem, ())),
+            supporting_figure_slots=[slots[value] for value in _SUPPORT.get(stem, ())],
+            presentation_note=_PRESENTATION_NOTES.get(stem, "Saved optional diagnostic; numerical definitions remain unchanged"))
+        if stem in active:
+            entry["allow_unavailable"] = False
+        if stem == "posterior_feedback_over_time":
+            entry["required_columns"] = [*entry["required_columns"], "eligible_count"]
+        if stem in PAPER_AXES:
+            entry["axes"] = copy.deepcopy(PAPER_AXES[stem])
+            entry["x_definition"], entry["y_definition"] = entry["axes"]["x"], entry["axes"]["y"]
+            entry["axis_notation"] = NOTATION_SCOPE
+            entry["notation_details"] = NOTATION_DETAILS.get(stem, "All populations, weights and numerical classifications retain their saved definitions.")
+            if stem == "initial_loss_recovery":
+                entry["colorbar_label"] = "SSCD"
+        if stem in {"initial_loss_recovery", "initial_unconditional_mean_concentration", "unconditional_reference_convergence"}:
+            entry["requires_theory_mean"] = True
+        if entry["kind"] == "four_reference":
+            entry["display_range_policy"] = "all_displayed_curves_bands_and_saved_finite_bank_reference_limit"
+        elif entry["kind"] == "four_prompt_chronological" and entry.get("value_domain") == "probability":
+            entry["display_range_policy"] = "fixed_unit_interval"
+        elif entry["kind"] in {"four_chronological", "four_prompt_chronological"}:
+            entry["display_range_policy"] = "all_displayed_curves_and_bands_plus_fixed_6_percent_padding"
+        elif entry["kind"] == "four_peak":
+            entry["display_range_policy"] = "all_displayed_weighted_bin_masses_plus_fixed_6_percent_padding"
+    return entries
+
+# Exact runtime migration allowlist. A path match alone never establishes ownership.
+FIGURE_RETIREMENTS = (
+    {"stem": "terminal_bound_coverage", "old_category": "appendix", "new_category": "main", "reason": "Promoted unchanged coverage measurement to the fourth main slot"},
+    {"stem": "final_reproduction_bound", "old_category": "main", "new_category": "appendix", "reason": "Demoted unchanged reference-bound scatter to supporting figure A9"},
+    *({"stem": stem, "old_category": category, "new_category": None,
+       "reason": _RENDER_RETIREMENT_REASONS[stem]}
+      for stem in sorted(RETIRED_RENDER_STEMS) for category in ("appendix", "main", "diagnostics")),
+)

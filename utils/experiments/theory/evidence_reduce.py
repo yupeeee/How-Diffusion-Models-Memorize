@@ -208,9 +208,10 @@ def run_evidence_analysis(project_root, *, config, device="auto", probe_batch_si
     grid = reference_grid(initial_snr, config["reference_snr_decades"])
     run_scope = sources.runs["experiment"]["scientific_config_hash"]
     terminal_update_count = sum(len(record.metadata["seeds"]) for record in records)
-    # One CPU float64 scale prevents device-dependent last bits from changing
-    # a shared scalar reference line across independently resumed grid tasks.
-    law = _read_law(law_path, law_digest, "cpu", candidate_chunk_size, query_chunk_size)
+    # Compute one CUDA float64 scale and pin it in every grid-task receipt.
+    # Workers reuse this saved scalar instead of independently rounding it.
+    primary_device = _resolve_theory_devices(device)[0]
+    law = _read_law(law_path, law_digest, primary_device, candidate_chunk_size, query_chunk_size)
     atom_table = reference_atoms(law)
     del law
     reference_identity = {

@@ -13,6 +13,10 @@ import torch
 from utils.experiments.theory.numerical_intervals import (
     Directed, Interval, enclose_variation, interval_gain, negative_condition_precheck,
 )
+from utils.experiments.theory.gpu_intervals import GpuDirected, GpuInterval
+
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA numerical backend required")
+
 from utils.experiments.theory.numerical_refinement import (
     NumericalPolicy, build_refinement_payload, refine_payload,
     source_robust_gain_interval, stable_gain,
@@ -20,8 +24,8 @@ from utils.experiments.theory.numerical_refinement import (
 
 
 def support(atoms):
-    flat = torch.tensor(atoms, dtype=torch.float64)
-    return SimpleNamespace(flat=flat, weights=torch.full((len(flat),), 1 / len(flat), dtype=torch.float64),
+    flat = torch.tensor(atoms, dtype=torch.float64, device="cuda")
+    return SimpleNamespace(flat=flat, weights=torch.full((len(flat),), 1 / len(flat), dtype=torch.float64, device="cuda"),
                            size=len(flat), dimension=flat.shape[1], candidate_chunk=1)
 
 
@@ -30,11 +34,11 @@ def points(values):
 
 
 def raw(*, endpoint=0.5, conditional_epsilon=-1.0, noise_std=0.0):
-    return {"state": torch.tensor([[0.25]], dtype=torch.float64),
-            "epsilon_u": torch.tensor([[0.0]], dtype=torch.float64),
-            "epsilon_c": torch.tensor([[conditional_epsilon]], dtype=torch.float64),
-            "target": torch.tensor([0.0], dtype=torch.float64),
-            "saved_endpoint": torch.tensor([[endpoint]], dtype=torch.float64),
+    return {"state": torch.tensor([[0.25]], dtype=torch.float64, device="cuda"),
+            "epsilon_u": torch.tensor([[0.0]], dtype=torch.float64, device="cuda"),
+            "epsilon_c": torch.tensor([[conditional_epsilon]], dtype=torch.float64, device="cuda"),
+            "target": torch.tensor([0.0], dtype=torch.float64, device="cuda"),
+            "saved_endpoint": torch.tensor([[endpoint]], dtype=torch.float64, device="cuda"),
             "alpha": .5, "sigma": .75, "A": .25, "kappa": .5,
             "guidance": 2.0, "destination_alpha": .8, "destination_sigma": .6,
             "noise_std": noise_std, "manuscript_domain": True}
@@ -46,9 +50,10 @@ def scalar_rows(**values):
              "direct_prop5_condition_status": "numerically_unresolved", **values}]
 
 
+@requires_cuda
 def test_large_absolute_logits_do_not_erase_small_net_gain():
-    b = torch.tensor([[0.0, 1e16]], dtype=torch.float64)
-    a = torch.tensor([[0.0, 1e-8]], dtype=torch.float64)
+    b = torch.tensor([[0.0, 1e16]], dtype=torch.float64, device="cuda")
+    a = torch.tensor([[0.0, 1e-8]], dtype=torch.float64, device="cuda")
     result = stable_gain(b, a, 0)
     assert result["old_difference"].item() == 0
     assert result["G"].item() == pytest.approx(-1e-8, rel=1e-14)
@@ -56,9 +61,10 @@ def test_large_absolute_logits_do_not_erase_small_net_gain():
     assert result["flagged"].item()
 
 
+@requires_cuda
 def test_saturated_target_retains_zero_H_magnitude_and_nonzero_G_sign():
-    result = stable_gain(torch.tensor([[0., -1000.]], dtype=torch.float64),
-                         torch.tensor([[0., -1.]], dtype=torch.float64), 0)
+    result = stable_gain(torch.tensor([[0., -1000.]], dtype=torch.float64, device="cuda"),
+                         torch.tensor([[0., -1.]], dtype=torch.float64, device="cuda"), 0)
     assert result["G"].item() > 0
     assert result["H"].item() == 0
     assert result["flagged"].item()
@@ -70,9 +76,10 @@ def test_saturated_target_retains_zero_H_magnitude_and_nonzero_G_sign():
     assert abs(float(gain["H"].upper)) < 1e-100
 
 
+@requires_cuda
 def test_H_uses_full_posterior_while_G_uses_only_non_target_normalization():
-    result = stable_gain(torch.tensor([[0., 0.]], dtype=torch.float64),
-                         torch.tensor([[0., math.log(2)]], dtype=torch.float64), 0)
+    result = stable_gain(torch.tensor([[0., 0.]], dtype=torch.float64, device="cuda"),
+                         torch.tensor([[0., math.log(2)]], dtype=torch.float64, device="cuda"), 0)
     assert result["G"].item() == pytest.approx(-math.log(2))
     assert result["H"].item() == pytest.approx(math.log(2 / 3))
     assert result["G"].item() != result["H"].item()
@@ -89,15 +96,16 @@ def test_mixed_signed_small_slopes_refine_cancellation_without_clipping():
 
 
 @pytest.mark.parametrize("atoms", [1, 3])
+@requires_cuda
 def test_exact_zero_and_single_atom_have_explicit_gain_contracts(atoms):
-    result = stable_gain(torch.zeros(2, atoms, dtype=torch.float64),
-                         torch.zeros(2, atoms, dtype=torch.float64), 0)
-    assert torch.equal(result["H"], torch.zeros(2, dtype=torch.float64))
+    result = stable_gain(torch.zeros(2, atoms, dtype=torch.float64, device="cuda"),
+                         torch.zeros(2, atoms, dtype=torch.float64, device="cuda"), 0)
+    assert torch.equal(result["H"], torch.zeros(2, dtype=torch.float64, device="cuda"))
     assert result["zero"].all()
     if atoms == 1:
         assert result["G"].isnan().all()
     else:
-        assert torch.equal(result["G"], torch.zeros(2, dtype=torch.float64))
+        assert torch.equal(result["G"], torch.zeros(2, dtype=torch.float64, device="cuda"))
     enclosed = interval_gain(Directed(), points([0.] * atoms), points([0.] * atoms), 0)
     assert enclosed["H"].sign == "zero"
     if atoms == 1:
@@ -158,6 +166,7 @@ def test_variation_certifies_constant_reference_without_exceeding_even_budget():
     assert result["integrated_H"].lower <= 0 <= result["integrated_H"].upper
 
 
+@requires_cuda
 def test_builder_preserves_saved_and_affine_endpoints_and_cache_tensor_finiteness():
     law = support([[0.], [1.]])
     verified = raw(endpoint=-3.)
@@ -172,20 +181,22 @@ def test_builder_preserves_saved_and_affine_endpoints_and_cache_tensor_finitenes
     assert output["numerical_log_odds_gain"] != output["numerical_affine_log_odds_gain"]
     assert output["implication_eligible"] is False
     assert output["numerical_stopping_reason"] == "negative_condition_batched_screen"
-    assert output["numerical_decimal_products"] == 0
+    assert output["numerical_gpu_products"] == 0
     assert output["condition_sign_status"] == "negative"
 
 
+@requires_cuda
 def test_stochastic_constructed_baseline_is_not_independent_verification():
     payload = build_refinement_payload(support([[0.], [1.]]), raw(noise_std=.1), bank_hash="law", target_atom=0)
     assert "not_independent_replay" in payload["endpoint_construction_method"]
     verified = raw(noise_std=.1)
-    verified["independent_innovation"] = torch.zeros(1, 1, dtype=torch.float64)
+    verified["independent_innovation"] = torch.zeros(1, 1, dtype=torch.float64, device="cuda")
     verified["innovation_provenance"] = "recovered_from_endpoint"
     with pytest.raises(ValueError, match="independent"):
         build_refinement_payload(support([[0.], [1.]]), verified, bank_hash="law", target_atom=0)
 
 
+@requires_cuda
 def test_raw_negative_precheck_ignores_heuristic_source_envelope_and_preserves_missingness():
     law = support([[0.], [1.]])
     verified = raw(endpoint=.3125, conditional_epsilon=0.)
@@ -201,6 +212,7 @@ def test_raw_negative_precheck_ignores_heuristic_source_envelope_and_preserves_m
     assert output["numerical_source_sensitivity_l2"] == 1e9
 
 
+@requires_cuda
 def test_reduced_payload_certificate_is_not_an_original_tensor_certificate():
     law = support([[0.], [1.]])
     payload = build_refinement_payload(law, raw(conditional_epsilon=0.), bank_hash="law", target_atom=0)
@@ -211,17 +223,20 @@ def test_reduced_payload_certificate_is_not_an_original_tensor_certificate():
     assert output["implication_eligible"] is False
 
 
+@requires_cuda
 def test_source_robust_gain_requires_justified_radii_and_keeps_fixed_sign():
-    gain = Interval(Decimal("0.9"), Decimal("1.1"))
+    arithmetic = GpuDirected(device="cuda")
+    gain = arithmetic.interval(.9, 1.1)
     with pytest.raises(ValueError, match="justified"):
         source_robust_gain_interval(gain, beta_radius=2., endpoint_radii=[1., 1.],
-                                   justification={"status": "dtype_epsilon_multiplier"})
+                                   justification={"status": "dtype_epsilon_multiplier"}, arithmetic=arithmetic)
     robust = source_robust_gain_interval(gain, beta_radius=2., endpoint_radii=[.5, .5],
         justification={"status": "justified_bound", "scope": "endpoint_locations_only_fixed_law_and_coefficients",
-                       "derivation": "Fixture independently supplies exact deterministic radius bounds"})
+                       "derivation": "Fixture independently supplies exact deterministic radius bounds"}, arithmetic=arithmetic)
     assert gain.sign == "positive" and robust.sign == "unresolved"
 
 
+@requires_cuda
 def test_structural_exclusion_and_budgets_are_explicit():
     law = support([[0.], [1.]])
     verified = raw()
@@ -230,18 +245,19 @@ def test_structural_exclusion_and_budgets_are_explicit():
     output = refine_payload(law, payload, scalar_rows(), verified_inputs=verified)[0]
     assert output["fixed_cache_gain_sign"] == output["condition_sign_status"] == "not_applicable"
     assert not output["refinement_applicable"]
-    assert output["numerical_decimal_products"] == 0
+    assert output["numerical_gpu_products"] == 0
     verified["manuscript_domain"] = True
     verified["epsilon_c"] = torch.ones_like(verified["epsilon_c"])  # D > ec: screen is inconclusive.
     payload = build_refinement_payload(law, verified, bank_hash="law", target_atom=0)
     output = refine_payload(law, payload, scalar_rows(), verified_inputs=verified,
                             policy=NumericalPolicy(max_decimal_products=1, max_variation_nodes=2))[0]
-    assert output["numerical_decimal_products"] <= 1
+    assert output["numerical_gpu_products"] <= 1
     assert output["numerical_variation_nodes"] <= 2
-    assert output["numerical_stopping_reason"] == "decimal_operation_budget_exhausted_before_raw_conversion"
+    assert output["numerical_stopping_reason"] == "gpu_operation_budget_exhausted_before_raw_enclosure"
     assert math.isnan(output["numerical_variation_l2"])
 
 
+@requires_cuda
 def test_legacy_numerical_failure_does_not_remove_structurally_valid_denominator():
     law = support([[0.], [1.]])
     verified = raw(endpoint=.3125, conditional_epsilon=0.)
@@ -277,12 +293,13 @@ def test_rounded_current_weights_do_not_silently_acquire_a_convex_hull_cap():
             current_in_convex_hull=False)
 
 
-def test_batched_negative_screen_avoids_all_raw_python_and_Decimal_work(monkeypatch):
+@requires_cuda
+def test_batched_negative_screen_avoids_selective_interval_work(monkeypatch):
     from utils.experiments.theory import numerical_refinement as engine
     law, verified = support([[0.], [1.]]), raw()
     payload = build_refinement_payload(law, verified, bank_hash="law", target_atom=0)
     def forbidden(*args, **kwargs):
-        raise AssertionError("A resolved batched row entered CPU high precision")
+        raise AssertionError("A resolved batched row entered selective GPU enclosure")
     monkeypatch.setattr(engine, "_raw_row", forbidden)
     monkeypatch.setattr(engine, "_clean_intervals", forbidden)
     result = refine_payload(law, payload, scalar_rows(), verified_inputs=verified)[0]
@@ -293,15 +310,16 @@ def test_batched_negative_screen_avoids_all_raw_python_and_Decimal_work(monkeypa
     assert math.isnan(result["numerical_margin_upper_l2"])
     assert math.isnan(result["numerical_original_margin_l2"])
     assert math.isnan(result["numerical_variation_l2"])
-    assert result["numerical_decimal_products"] == result["numerical_variation_nodes"] == 0
-    assert not result["numerical_cpu_fallback_selected"]
-    assert not result["numerical_cpu_fallback_executed"]
+    assert result["numerical_gpu_products"] == result["numerical_variation_nodes"] == 0
+    assert not result["numerical_gpu_refinement_selected"]
+    assert not result["numerical_gpu_refinement_executed"]
 
 
 @pytest.mark.parametrize("b,a", [([0., 1e16], [0., 1e-8]), ([0., -1000.], [0., -1.])])
-def test_saturation_and_unstable_subtraction_alone_do_not_trigger_cpu_retry(b, a):
+@requires_cuda
+def test_saturation_and_unstable_subtraction_do_not_trigger_gpu_enclosure(b, a):
     from utils.experiments.theory.numerical_refinement import _gain_retry_needed
-    assessed = stable_gain(torch.tensor([b], dtype=torch.float64), torch.tensor([a], dtype=torch.float64), 0)
+    assessed = stable_gain(torch.tensor([b], dtype=torch.float64, device="cuda"), torch.tensor([a], dtype=torch.float64, device="cuda"), 0)
     values = {name: value.tolist() for name, value in assessed.items()}
     assert values["flagged"][0]
     assert not _gain_retry_needed(values, 0, original_inputs=True, singleton=False)
@@ -312,12 +330,13 @@ def test_saturation_and_unstable_subtraction_alone_do_not_trigger_cpu_retry(b, a
     {"G": [float("nan")]}, {"H": [float("inf")]}, {"G": [0.]},
     {"H": [-1.]}, {"zero": [True]},
 ])
-def test_unresolved_or_inconsistent_stable_gain_still_requires_cpu_retry(changes):
+def test_unresolved_or_inconsistent_stable_gain_requires_gpu_enclosure(changes):
     from utils.experiments.theory.numerical_refinement import _gain_retry_needed
     values = {"G": [1.], "H": [.5], "tolerance": [1e-10], "H_tolerance": [1e-10], "zero": [False]}
     assert _gain_retry_needed(values | changes, 0, original_inputs=True, singleton=False)
 
 
+@requires_cuda
 def test_budget_preflight_keeps_gpu_negative_proof_without_raw_conversion(monkeypatch):
     from utils.experiments.theory import numerical_refinement as engine
     law, verified = support([[0.], [1.]]), raw(endpoint=.3125, conditional_epsilon=0.)
@@ -329,59 +348,78 @@ def test_budget_preflight_keeps_gpu_negative_proof_without_raw_conversion(monkey
                             policy=NumericalPolicy(max_decimal_products=1))[0]
     assert result["condition_sign_status"] == "negative"
     assert result["fixed_cache_gain_sign"] == "unresolved"  # No rounded-zero shortcut.
-    assert result["numerical_cpu_fallback_selected"]
-    assert not result["numerical_cpu_fallback_executed"]
-    assert result["numerical_stopping_reason"] == "decimal_operation_budget_exhausted_before_raw_conversion"
-    assert result["numerical_decimal_products"] == 0
+    assert result["numerical_gpu_refinement_selected"]
+    assert not result["numerical_gpu_refinement_executed"]
+    assert result["numerical_stopping_reason"] == "gpu_operation_budget_exhausted_before_raw_enclosure"
+    assert result["numerical_gpu_products"] == 0
     assert math.isnan(result["numerical_variation_l2"])
 
 
-def test_unresolved_condition_can_still_use_directed_cpu_refinement(monkeypatch):
+@requires_cuda
+def test_unresolved_condition_uses_directed_cuda_refinement(monkeypatch):
     from utils.experiments.theory import numerical_refinement as engine
     law, verified = support([[0.], [1.]]), raw(conditional_epsilon=1.)
     payload = build_refinement_payload(law, verified, bank_hash="law", target_atom=0)
     original, calls = engine._raw_row, []
-    def track(inputs, index):
+    def track(inputs, index, **kwargs):
         calls.append(index)
-        return original(inputs, index)
+        return original(inputs, index, **kwargs)
     monkeypatch.setattr(engine, "_raw_row", track)
     result = refine_payload(law, payload, scalar_rows(), verified_inputs=verified)[0]
     assert result["numerical_condition_screen_status"] == "inconclusive"
     assert calls == [0]
-    assert result["numerical_cpu_fallback_executed"]
-    assert result["numerical_decimal_products"] > 0
+    assert result["numerical_gpu_refinement_executed"]
+    assert result["numerical_gpu_products"] > 0
     assert result["condition_arithmetic_status"] == "certified_original_saved_inputs"
 
 
 @pytest.mark.parametrize("atoms", [[[0.]], [[0.], [1.]], [[0., 0.], [1., 2.], [-1., 3.]]])
+@requires_cuda
 def test_posterior_budget_floor_never_exceeds_actual_unavoidable_projection_charges(atoms):
     from utils.experiments.theory.numerical_refinement import _clean_intervals, _raw_segment, _raw_row, _posterior_work_floor
     dimension = len(atoms[0])
     verified = raw()
     for key in ("state", "epsilon_u", "epsilon_c", "saved_endpoint"):
         verified[key] = verified[key].repeat(1, dimension)
-    verified["target"] = torch.zeros(dimension, dtype=torch.float64)
-    witness = _raw_row(verified, 0)
-    context = Directed(64, 2_000_000)
+    verified["target"] = torch.zeros(dimension, dtype=torch.float64, device="cuda")
+    witness = _raw_row(verified, 0, device="cuda")
+    context = GpuDirected(2_000_000, device="cuda")
     clean = _clean_intervals(context, witness)
     before = context.products
-    _raw_segment(context, witness, [points(atom) for atom in atoms], points([1. / len(atoms)] * len(atoms)), 0, clean)
+    _raw_segment(context, witness, context.interval(atoms), context.interval([1. / len(atoms)] * len(atoms)), 0, clean)
     assert context.products - before >= _posterior_work_floor(len(atoms), dimension, original_inputs=True)
 
 
+@requires_cuda
 def test_proven_D_above_ec_skips_unaffordable_posterior_without_claiming_margin_sign(monkeypatch):
     from utils.experiments.theory import numerical_refinement as engine
     law, verified = support([[0.], [1.]]), raw(conditional_epsilon=1.)
     payload = build_refinement_payload(law, verified, bank_hash="law", target_atom=0)
     def forbidden(*args, **kwargs):
-        raise AssertionError("Impossible posterior budget entered a raw CPU precheck")
+        raise AssertionError("Impossible posterior budget entered raw GPU enclosure")
     monkeypatch.setattr(engine, "_raw_row", forbidden)
     # Enough for clean-vector operations, insufficient for required projection.
     result = refine_payload(law, payload, scalar_rows(), verified_inputs=verified,
-                            policy=NumericalPolicy(max_decimal_products=60))[0]
+                            policy=NumericalPolicy(max_decimal_products=45))[0]
     assert result["numerical_D_ge_ec_certified"]
     assert result["numerical_condition_screen_squared_lower"] > 0
     assert result["condition_sign_status"] == "unresolved"
     assert not result["numerical_condition_nonnegative_certified"]
-    assert result["numerical_decimal_products"] == 0
-    assert result["numerical_cpu_fallback_selected"] and not result["numerical_cpu_fallback_executed"]
+    assert result["numerical_gpu_products"] == 0
+    assert result["numerical_gpu_refinement_selected"] and not result["numerical_gpu_refinement_executed"]
+
+
+def test_production_refinement_rejects_cpu_before_computing():
+    law = SimpleNamespace(flat=torch.tensor([[0.]], device="cpu"), dimension=1, size=1)
+    with pytest.raises(ValueError, match="CUDA.*CPU fallback"):
+        build_refinement_payload(law, {}, bank_hash="law", target_atom=0)
+    with pytest.raises(ValueError, match="CUDA.*CPU fallback"):
+        refine_payload(law, {}, [])
+
+
+def test_policy_reports_fixed_gpu_precision_and_no_cpu_fallback():
+    identity = NumericalPolicy(decimal_precision=128).identity()
+    assert identity["effective_mantissa_bits"] == 53
+    assert identity["retry_precision_multiplier"] == 1
+    assert identity["cpu_fallback"] is False
+    assert "legacy_configuration_only" in identity["decimal_precision_role"]

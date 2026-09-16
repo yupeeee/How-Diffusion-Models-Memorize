@@ -270,7 +270,7 @@ class _Segment:
         error = torch.maximum(
             (kronrod - gauss).abs(), 50 * torch.finfo(torch.float64).eps * magnitude
         )
-        return kronrod.detach().cpu().numpy(), error.detach().cpu().numpy()
+        return kronrod, error
 
 
 def _integrate(segment, config):
@@ -284,30 +284,28 @@ def _integrate(segment, config):
         truncated.append(was_truncated)
     values, errors = segment.intervals(intervals)
     leaves = [[] for _ in range(count)]
-    evaluations, refinements = np.zeros(count, dtype=int), np.zeros(count, dtype=int)
+    evaluations, refinements = [0] * count, [0] * count
     for interval, value, error in zip(intervals, values, errors):
         query, left, right = interval
         leaves[query].append((left, right, value, error))
         evaluations[query] += 15
-    absolute = np.array([config.absolute_tolerance, config.identity_absolute_tolerance])
-    budget_exhausted = np.asarray(truncated, dtype=bool)
+    absolute = torch.tensor([config.absolute_tolerance, config.identity_absolute_tolerance],
+                            dtype=torch.float64, device=segment.intercept.device)
+    budget_exhausted = list(truncated)
     while True:
         pending, replace = [], []
         for query in range(count):
-            total = sum((leaf[2] for leaf in leaves[query]), start=np.zeros(2))
-            uncertainty = sum((leaf[3] for leaf in leaves[query]), start=np.zeros(2))
-            tolerance = absolute + config.relative_tolerance * np.abs(total)
-            if not (np.isfinite(total).all() and np.isfinite(uncertainty).all()):
+            total = torch.stack([leaf[2] for leaf in leaves[query]]).sum(0)
+            uncertainty = torch.stack([leaf[3] for leaf in leaves[query]]).sum(0)
+            tolerance = absolute + config.relative_tolerance * total.abs()
+            if not bool(torch.isfinite(total).all() & torch.isfinite(uncertainty).all()):
                 continue
-            if np.all(uncertainty <= tolerance):
+            if bool((uncertainty <= tolerance).all()):
                 continue
             if evaluations[query] + 30 > config.max_evaluations:
                 budget_exhausted[query] = True
                 continue
-            worst = max(
-                range(len(leaves[query])),
-                key=lambda i: np.max(leaves[query][i][3] / tolerance),
-            )
+            worst = int((torch.stack([leaf[3] for leaf in leaves[query]]) / tolerance).amax(1).argmax())
             left, right = leaves[query][worst][:2]
             middle = (left + right) / 2
             if middle == left or middle == right:
@@ -326,12 +324,8 @@ def _integrate(segment, config):
                 _, left, right = pending[j]
                 children.append((left, right, values[j], errors[j]))
             leaves[query][index : index + 1] = children
-    totals = np.array(
-        [sum((x[2] for x in items), start=np.zeros(2)) for items in leaves]
-    )
-    uncertainty = np.array(
-        [sum((x[3] for x in items), start=np.zeros(2)) for items in leaves]
-    )
+    totals = torch.stack([torch.stack([leaf[2] for leaf in items]).sum(0) for items in leaves])
+    uncertainty = torch.stack([torch.stack([leaf[3] for leaf in items]).sum(0) for items in leaves])
     return totals, uncertainty, evaluations, refinements, budget_exhausted
 
 

@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     centers = parser.add_mutually_exclusive_group()
     centers.add_argument(
         "--center",
-        choices=("reference-initial", "zero", "cached-baseline"),
+        choices=("reference-initial", "cached-baseline"),
         default="reference-initial",
     )
     centers.add_argument(
@@ -64,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
         const="cached-baseline",
         help="legacy existing independent baseline semantics; requires --cached-baseline",
     )
-    centers.add_argument("--no-mu", dest="center", action="store_const", const="zero")
+    centers.add_argument("--no-mu", dest="center", action="store_const", const="zero",
+                         help=argparse.SUPPRESS)
     parser.add_argument("--cached-baseline", type=Path)
     parser.add_argument(
         "--device",
@@ -72,9 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         metavar="DEVICE",
         help=(
-            "auto uses every CUDA device visible to PyTorch (CPU fallback); "
-            "cpu, cuda, or cuda:N selects one device (default: auto); "
-            "MPS cannot preserve the required float64 arithmetic; "
+            "auto uses every visible CUDA device; cuda or cuda:N selects one device. "
+            "Theory computation requires CUDA and never falls back to CPU/MPS; "
             "plotting never initializes devices"
         ),
     )
@@ -99,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plot", action="store_true", help="render saved scalars only")
+    mode.add_argument("--estimate-mean-only", action="store_true",
+                      help="estimate/cache the independent initial unconditional mean only; no theory reduction or figures")
     mode.add_argument(
         "--validate-only",
         action="store_true",
@@ -135,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--candidate-chunk-size", type=positive_integer, default=256)
     parser.add_argument("--query-chunk-size", type=positive_integer, default=16)
+    parser.add_argument("--mean-source", choices=("reference-min-snr", "reference-initial", "cached-targets"), default=None,
+                        help="theory mu: minimum analytical SNR average (default), first-step average, or exact cached-atom mean")
+    parser.add_argument("--num-mean-samples", type=positive_integer, default=None,
+                        help="independent analytical reference estimates for mu (default: 10000; at least 2)")
+    parser.add_argument("--mean-seed", type=nonnegative_integer, default=None,
+                        help="dedicated independent mean-estimation RNG root (default: 0)")
     parser.add_argument("--num-loss-seeds", type=positive_integer, default=None,
                         help="independent forward-target draws (analysis default: 64)")
     parser.add_argument("--loss-seed", type=nonnegative_integer, default=None,
@@ -162,9 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--terminal-noise-run-alpha", type=finite_float, default=None,
                         help="predeclared simultaneous terminal Gaussian noise failure budget per run (default: 0.05)")
     parser.add_argument("--numerical-decimal-precision", type=positive_integer, default=None,
-                        help="base Decimal precision for flagged rows; retry uses twice this precision (default: 64)")
-    parser.add_argument("--numerical-max-decimal-products", type=nonnegative_integer, default=None,
-                        help="fixed per-row Decimal product budget (default: 2000000)")
+                        help="legacy saved-policy field; computation uses CUDA binary64 enclosures and rejects this override")
+    parser.add_argument("--numerical-max-products", "--numerical-max-decimal-products",
+                        dest="numerical_max_decimal_products", type=nonnegative_integer, default=None,
+                        help="per-row CUDA interval-operation budget (default: 2000000; zero disables refinement)")
     parser.add_argument("--numerical-max-variation-nodes", type=positive_integer, default=None,
                         help="fixed per-row variation enclosure node budget (default: 65)")
     parser.add_argument("--numerical-variation-absolute-width", type=finite_float, default=None,
@@ -249,6 +258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     tokens = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(tokens)
     explicit_options = {token.split("=", 1)[0] for token in tokens if token.startswith("--")}
+    if args.center == "zero":
+        parser.error("--no-mu is retired; use the saved reference mean for mu")
     for old in ("evaluation_source", "num_baseline_seeds"):
         if getattr(args, old) is not None:
             parser.error(
@@ -292,13 +303,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         saved_scientific_configuration,
     )
 
+    if args.numerical_decimal_precision is not None and not (args.plot or args.validate_only):
+        parser.error("--numerical-decimal-precision is unavailable for GPU computation: "
+                     "the CUDA backend uses outward binary64 enclosures, not arbitrary Decimal digits. "
+                     "Use --numerical-max-products and --numerical-max-variation-nodes to increase work.")
+
     base = dict(
         model_name=args.model, scheduler_name=args.scheduler,
         guidance_scale=args.g, num_inference_steps=args.T, num_seeds=args.N,
         center=args.center, cached_baseline=args.cached_baseline,
         target_error_tolerance=args.target_error_tolerance,
     )
-    science_keys = ("num_loss_seeds", "loss_seed", "loss_timesteps",
+    science_keys = ("mean_source", "num_mean_samples", "mean_seed", "num_loss_seeds", "loss_seed", "loss_timesteps",
                     "num_unconditional_loss_seeds", "measure_unconditional_loss",
                     "reference_law", "reference_manifest",
                     "reference_snr_decades", "terminal_noise_run_alpha",
@@ -320,6 +336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--cached-baseline": "cached_baseline",
                 "--target-error-tolerance": "target_error_tolerance",
                 **{"--" + key.replace("_", "-"): key for key in science_keys},
+                "--numerical-max-products": "numerical_max_decimal_products",
                 "--unconditional-loss": "measure_unconditional_loss",
                 "--no-unconditional-loss": "measure_unconditional_loss",
             }
@@ -342,7 +359,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             saved_path = bundle / "run_config.json"
             if saved_path.is_file():
                 from utils.experiments.theory.contracts import read_object, FOUR_STAGE_OPTION_KEYS
-                inherited = saved_scientific_configuration(read_object(saved_path))
+                saved_configuration = read_object(saved_path)
+                inherited = saved_scientific_configuration(saved_configuration)
+                # Zero-centred diagnostics are historical only. New analysis uses
+                # the normal reference centre; plot/validate retain saved identity.
+                if inherited.get("center") == "zero":
+                    inherited.pop("center")
+                # New analysis upgrades the previous default first-step estimator.
+                # Explicit source options and saved exact-bank choices remain valid.
+                # Plot/refine modes above preserve their recorded mean source.
+                if "mean_source" not in saved_configuration["scientific_config"]:
+                    for key in ("mean_source", "num_mean_samples", "mean_seed"):
+                        inherited.pop(key, None)
+                elif args.mean_source is None and inherited.get("mean_source") == "reference-initial":
+                    inherited.pop("mean_source", None)
                 science = {**{key: inherited[key] for key in science_keys
                               if key in inherited and key not in FOUR_STAGE_OPTION_KEYS}, **science}
                 if args.reference_law == "cached-targets" and args.reference_manifest is None:
@@ -359,6 +389,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.num_unconditional_loss_seeds is not None and args.measure_unconditional_loss is None:
                 science["measure_unconditional_loss"] = True
             config = numerical_config(**base, **science)
+        if args.estimate_mean_only:
+            if config["mean_source"] not in {"reference-min-snr", "reference-initial"}:
+                raise TheoryError("--estimate-mean-only requires --mean-source reference-min-snr or reference-initial")
+            from utils.experiments.theory.reduce import _resolve_theory_devices
+            devices = _resolve_theory_devices(args.device)
+            from utils.experiments.theory.cache_reader import discover_sources
+            from utils.experiments.theory.reference_law import build_reference_law
+            sources = discover_sources(PROJECT_ROOT, **config)
+            law = build_reference_law(
+                sources, {**config, "candidate_chunk_size": args.candidate_chunk_size,
+                          "query_chunk_size": args.query_chunk_size}, device=devices[0],
+                allow_mean_compute=True, mean_device=args.device, mean_batch_size=args.probe_batch_size,
+            )
+            estimate = law.theory_mean_metadata
+            print(f"[Theory] Reference mean ({config['mean_source']}, SNR={estimate['level']['snr']:.8g}): "
+                  f"{estimate['sample_count']:,} samples; "
+                  f"||mu||/sqrt(d)={estimate['mean_norm_rmse']:.6g}; "
+                  f"Monte Carlo RMS standard error={estimate['mean_mc_standard_error_rmse']:.6g}")
+            mean_file = (PaperPaths.build(PROJECT_ROOT, **config).output_directory.parent.parent
+                         / "theory_measurements" / "reference_mean" / "collections"
+                         / estimate["estimator_hash"] / "mean.pt")
+            print(f"[Theory] Saved reference mean: {mean_file}")
+            return 0
         if args.plot or args.validate_only:
             validate_paper_bundle(
                 bundle,
@@ -405,10 +458,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     except (TheoryError, OSError, ValueError, RuntimeError) as error:
-        print(
-            f"theory_validation.py: {error}\nRebuild saved analysis with {recompute_command(config)}",
-            file=sys.stderr,
-        )
+        command = recompute_command(config)
+        action = "Rebuild saved analysis with "
+        if args.estimate_mean_only:
+            command = command.replace("./run_all.sh", "./theory_validation.sh", 1).replace(
+                " --recompute-experiments", " --estimate-mean-only", 1)
+            action = "Retry mean estimation with "
+        print(f"theory_validation.py: {error}\n{action}{command}", file=sys.stderr)
         return 1
 
 

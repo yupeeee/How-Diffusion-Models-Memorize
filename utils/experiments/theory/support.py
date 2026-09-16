@@ -70,6 +70,7 @@ class FiniteSupport:
         candidates: Iterable[tuple[str, torch.Tensor]],
         *,
         identities=None,
+        device=None,
         **kwargs,
     ):
         """Collapse identical latent atoms; conflicting repeated IDs/identities fail.
@@ -83,7 +84,7 @@ class FiniteSupport:
                     str(key),
                     torch.as_tensor(value)
                     .detach()
-                    .to(device="cpu", dtype=torch.float64),
+                    .to(device=device, dtype=torch.float64),
                 )
                 for key, value in candidates
             ),

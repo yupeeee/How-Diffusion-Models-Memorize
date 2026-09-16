@@ -56,11 +56,11 @@ def _report_from_child_then_wait(queue, release):
 
 def test_theory_progress_is_visible_when_stderr_is_captured(capsys):
     with theory_progress.RecordProgress(
-        total=1, devices=1, context=get_context("spawn")
+        total=1, devices=1, context=get_context("spawn"), label="First-step reference mean"
     ) as progress:
         progress.report("record-0", "reduced", "cpu")
     rendered = capsys.readouterr().err
-    assert "[Theory] Records" in rendered
+    assert "[Theory] First-step reference mean" in rendered
     assert "1/1" in rendered
     assert "reduced=1" in rendered
     assert not progress._thread.is_alive()
@@ -68,7 +68,7 @@ def test_theory_progress_is_visible_when_stderr_is_captured(capsys):
 
 def test_final_status_reconciliation_counts_each_record_once(bars):
     with theory_progress.RecordProgress(
-        total=3, devices=2, context=get_context("spawn")
+        total=3, devices=2, context=get_context("spawn"), label="Posterior and condition interval refinement"
     ) as progress:
         progress.report("record-a", "reduced", "cuda:0")
         progress.report("record-a", "reduced", "cuda:0")
@@ -83,7 +83,7 @@ def test_final_status_reconciliation_counts_each_record_once(bars):
     bar = bars[0]
     assert bar.kwargs == {
         "total": 3,
-        "desc": "[Theory] Records",
+        "desc": "[Theory] Posterior and condition interval refinement",
         "unit": "record",
         "dynamic_ncols": True,
         "leave": True,
@@ -164,23 +164,23 @@ def test_stage_logs_start_finish_and_elapsed_without_creating_a_bar(monkeypatch)
         stage.set_detail("audit_data/feedback.csv: 100 rows")
     assert messages[0] == "[Theory] Saving scalar tables"
     assert messages[-1].startswith("[Theory] Finished: Saving scalar tables (")
-    assert not stage._thread.is_alive()
+    assert not hasattr(stage, "_thread")
 
 
-def test_post_record_stage_heartbeat_reports_active_work_and_stops(monkeypatch):
+def test_post_record_stage_has_no_heartbeat_or_extra_bar(monkeypatch):
     from types import SimpleNamespace
-    messages, heartbeat = [], Event()
-    def write(message, **options):
-        messages.append(message)
-        if "still running" in message:
-            heartbeat.set()
-    monkeypatch.setattr(theory_progress, "tqdm", SimpleNamespace(write=write))
-    with theory_progress.StageProgress("Reducing plot inputs", heartbeat_seconds=.01) as stage:
+    messages = []
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Stage started a competing progress timer")
+    monkeypatch.setattr(theory_progress, "Thread", forbidden)
+    monkeypatch.setattr(theory_progress, "tqdm", SimpleNamespace(write=lambda message, **options: messages.append(message)))
+    with theory_progress.StageProgress("Reducing plot inputs") as stage:
         stage.set_detail("paired bootstrap intervals")
-        assert heartbeat.wait(2), "Post-record work stayed silent"
-    assert any("still running" in message and "paired bootstrap intervals" in message for message in messages)
+        assert messages == ["[Theory] Reducing plot inputs"]
+    assert len(messages) == 2
+    assert not any("still running" in message for message in messages)
     assert messages[-1].startswith("[Theory] Finished: Reducing plot inputs")
-    assert not stage._thread.is_alive()
+    assert not hasattr(stage, "_thread")
 
 
 def test_stage_failure_is_reported_and_propagated(monkeypatch):
@@ -192,7 +192,7 @@ def test_stage_failure_is_reported_and_propagated(monkeypatch):
             raise ValueError("failed serialization")
     assert messages[-1].startswith("[Theory] Failed: Writing metadata (")
     assert not any("Finished" in message for message in messages)
-    assert not stage._thread.is_alive()
+    assert not hasattr(stage, "_thread")
 
 
 def test_worker_does_not_start_stage_logger_or_extra_bar(monkeypatch):

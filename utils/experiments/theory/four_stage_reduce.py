@@ -28,11 +28,11 @@ def measurement_recipe(config=None):
     from .four_stage_measurements import FOUR_STAGE_VERSION, SHAPE_ATOL, SHAPE_RTOL
     config = {} if config is None else config
     return {"version": FOUR_STAGE_VERSION,
-            "response_numerical_policy": {"decimal_precision": int(config.get("numerical_decimal_precision", 64)),
-                "max_decimal_products_per_seed_whole_dose_grid": int(config.get("numerical_max_decimal_products", 2_000_000)),
-                "precision_retries": [1, 2], "scope": "reduced_stored_logits_only",
+            "response_numerical_policy": {"backend": "cuda_outward_binary64", "mantissa_bits": 53,
+                "max_products_per_seed_whole_dose_grid": int(config.get("numerical_max_decimal_products", 2_000_000)),
+                "scope": "reduced_stored_logits_only",
                 "selection": "unresolved_or_nonfinite_stable_gain_or_H_G_sign_disagreement"},
-            "source_code": _sources("four_stage_measurements.py", "four_stage_reduce.py", "numerical_refinement.py", "numerical_intervals.py", "metrics.py", "evidence_measurements.py", "supplemental_cache.py"),
+            "source_code": _sources("four_stage_measurements.py", "four_stage_reduce.py", "numerical_refinement.py", "gpu_intervals.py", "gpu_refinement.py", "metrics.py", "evidence_measurements.py", "supplemental_cache.py"),
             "dose_grid": "sorted(unique(j/40 for j=0..40 union 1/g))",
             "shape_atol_rmse": SHAPE_ATOL, "shape_rtol": SHAPE_RTOL,
             "initial_baseline": "genuine_unique_seed_gaussian_probes_with_repeated_prompt_vector_disagreement_audit"}
@@ -242,8 +242,9 @@ def run_four_stage_analysis(project_root, *, result, config, device="auto", prob
         frames["initial_samples"] = frames["initial_samples"].drop(columns="_merge")
         frames["trajectory_shape_prompts"], frames["trajectory_shape_mixed_prompts"] = prompt_shape_summaries(frames["trajectory_shapes"])
         frames["reference_law"] = tables["reference_atoms"].copy()
-        for name in ("mean_norm_l2", "mean_norm_rmse"):
-            frames["reference_law"][name] = frames["initial_baseline_summary"][name].iloc[0]
+        for name in ("mean_norm_l2", "mean_norm_rmse", "bank_mean_norm_l2", "bank_mean_norm_rmse", "mean_offset_l2", "mean_offset_rmse", "theory_mean_source", "theory_mean_sha256"):
+            if name in frames["initial_baseline_summary"]:
+                frames["reference_law"][name] = frames["initial_baseline_summary"][name].iloc[0]
         radius_columns = [name for name in ("candidate_target_atom_id", "target_id", "direct_target_radius_l2", "reference_law_hash", "latent_dimension") if name in tables["trajectory"]]
         frames["reference_target_radii"] = tables["trajectory"][radius_columns].drop_duplicates().reset_index(drop=True)
         base_receipt = {"manifest": str(Path(result["directory"]) / "manifest.json"),
@@ -277,8 +278,10 @@ def run_four_stage_analysis(project_root, *, result, config, device="auto", prob
                    "reference_law_backing_receipt": {"path": str(law_path), "sha256": law_digest,
                        "law_hash": provenance["reference_law_hash"],
                        "mean_vector_sha256": provenance["reference_law"].get("mean_sha256"),
-                       "mean_vector_definition": "sum_j saved_positive_weight_j * full_saved_atom_vector_j",
-                       "mean_storage": "reuse_immutable_atoms_weights_receipt_no_duplicate_latent_vector",
+                       "mean_vector_definition": "exact finite-bank sum_j saved_positive_weight_j * full_saved_atom_vector_j; distinct from selected theory mu",
+                       "mean_storage": "reuse_immutable_atoms_weights_receipt_no_duplicate_bank_mean_vector",
+                       "theory_mean": provenance["reference_law"].get("theory_mean", {}),
+                       "theory_mean_storage": "separately identified selected centre retained in the reference-law backing payload",
                        "aliases_and_membership": "complete_reference_law_manifest",
                        "radii_table": "reference_target_radii_full_support_maxima"},
                    "record_shards": [task["path"] for task in tasks],
@@ -311,9 +314,11 @@ def prepare_four_stage_primary(project_root, *, config, device="auto", probe_bat
     records = sources.selected
     if not records:
         raise TheoryError("No retained complete records for endpoint-first four-stage preparation")
+    primary_device = _resolve_theory_devices(device)[0]
     schedule = load_schedule(sources)
     law = build_reference_law(sources, {**scientific, "candidate_chunk_size": candidate_chunk_size,
-                                      "query_chunk_size": query_chunk_size})
+                                      "query_chunk_size": query_chunk_size}, device=primary_device,
+                              allow_mean_compute=True, mean_device=device, mean_batch_size=probe_batch_size)
     identity = {"recipe": core_recipe(), "reference_law_hash": law.law_hash,
                 "source_metadata_hash": sources.metadata_hash(), "record_hashes": [_record_key(record) for record in records],
                 "guidance_scale": scientific["guidance_scale"], "target_error_tolerance": scientific.get("target_error_tolerance")}
@@ -330,8 +335,7 @@ def prepare_four_stage_primary(project_root, *, config, device="auto", probe_bat
                 raise TheoryError("Existing fixed-law core backing differs from endpoint-first identity")
             law_digest = file_sha256(law_path)
         else:
-            law_digest = atomic_torch_save({"atoms": law.support.atoms.cpu(), "weights": law.support.weights.cpu(),
-                "metadata": law.metadata, "law_hash": law.law_hash}, law_path)
+            law_digest = atomic_torch_save(law.to_payload(), law_path)
         if schedule_path.is_file():
             # The schedule's complete mapping contains tensors; compare the
             # canonical existing sampler fingerprint rather than Python ==.

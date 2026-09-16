@@ -1,6 +1,6 @@
 # Four-stage quantity and schema dictionary
 
-The active plan is [four_stage_experiments.md](four_stage_experiments.md), bundle schema **5**, metric schema **`four-stage-evidence-1`**. Backing direct/probe/integration measurements keep their existing independent identities. All vector norms are raw L2; display RMSE is L2/sqrt(d) exactly once, and Gaussian exponents always use raw squared L2.
+The active plan is [four_stage_experiments.md](four_stage_experiments.md), with presentation registry **`four-stage-paper-curation-13`**, four main and sixteen mandatory appendix figures. Bundle schema **5** and metric schema **`four-stage-evidence-1`** are unchanged by this curation. Backing direct/probe/integration measurements keep their existing independent identities. All vector norms are raw L2; display RMSE is L2/sqrt(d) exactly once, and Gaussian exponents always use raw squared L2.
 
 | Logical table | Population and quantities |
 |---|---|
@@ -13,13 +13,53 @@ The active plan is [four_stage_experiments.md](four_stage_experiments.md), bundl
 | `trajectory_metrics` | Chronological k, native label, normalized progress, raw and normalized conditional/unconditional target errors, D, paired Q, full reference bound, noise gap and schedule scale |
 | `branch_motion` | Consecutive prediction C=2<Delta,v_c>/d, U=-2<Delta,v_u>/d, `gap_motion_quadratic`=||v_c-v_u||²/d, squared-gap change/residual, target-error changes |
 | `trajectory_shapes` | Raw-curve peak/tie/plateau/completeness descriptors, fixed-phase gaps, rise/decline and upward/downward variation; related prompt and mixed-outcome summaries |
+| `audit_data/trajectory_peak_summary.csv` | Explicit analysis-only reduction of saved weighted peak bins; inverse weighted-CDF median/quartiles conditional on resolved individual peaks. Histogram, initialization mass and unresolved mass keep the full original denominator; compatible older plot bundles may lack this optional summary with a caption disclosure and exact analysis-only command |
 | `terminal_metrics` | Alias plus preserved additive joins to `terminal`: actual saved final error, B_obs/B_ref, independent correction/mode, applicability, slack, ratios, and reference-bound looseness |
-| `counterfactual_unconditional` | Optional learned empty-prompt target-error change at paired matched next inputs, same-context saved-prediction parity; no default inference requirement |
+| `counterfactual_unconditional` | Optional learned empty-prompt target-error change at paired matched next inputs, same-context saved-prediction parity; rendering requires saved counterfactual enablement/data and `--diagnostics`, under `diagnostics/` only |
 | `plot_data` | Immutable compact renderer inputs, shared-population summaries and transform settings; no raw tensor dependency for plotting |
 
 The source keys contain run, record/pair, target identity, seed, chronological step and native source/destination labels where applicable. Outcome groups use paired-target same-seed SSCD > 0.75 versus <= 0.75. Prompt mass is equal within each represented group and divided among eligible member seeds. Initial main points are pair-level without an outcome split; their colors are pair mean SSCD. Motion components use means on identical rows so additivity is retained. Other group curves use descriptive weighted medians/IQRs. Unresolved signs remain in structural denominators.
 
 Missing variation remains missing despite a resolved condition sign. Numerical arithmetic/quadrature, source sensitivity, and empirical-reference identification have separate status fields. Bootstrap intervals are empirical Monte Carlo uncertainty, IQRs are descriptive spread, and probabilistic terminal bounds carry their own saved simultaneous-run scope. None is relabeled a theorem certificate.
+
+The four main stems are `initial_loss_recovery`, `branch_gap_posterior_response`, `branch_gap_synchronization`, and `terminal_bound_coverage`. The sixteen ordered appendix stems are `initial_unconditional_mean_concentration`, `unconditional_reference_convergence`, `posterior_feedback_over_time`, `posterior_feedback_condition_margin`, `branch_target_errors`, `synchronization_bound`, `branch_gap_peak_step`, `terminal_observable_bound`, `final_reproduction_bound`, `branch_gap_per_prompt`, `conditional_reference_error_per_prompt`, `unconditional_reference_error_per_prompt`, `target_probability_per_prompt`, `reference_branch_gap_per_prompt`, `corollary3_guidance_scale_vs_loss`, and `reference_variation_per_prompt`.
+
+The promoted coverage table retains its stable `plot_data/terminal_bound_coverage.csv` identity. Its three quantities are actual saved endpoint error `E_end`, corrected observable bound `C_obs=B_obs+delta_sched`, and corrected reference bound `C_ref=B_ref+delta_sched`. The same observations and weights define all three fractions satisfying `quantity<=tau`; display tolerance is `tau/sqrt(d)` once. The expected ordering `F_ref<=F_obs<=F_actual` supplements saved row-level deterministic/pathwise checks and does not replace them. Probability-bound modes keep their original probability scope. Separate A8/A9 scatter tables retain their distinct formulas and saved values.
+
+`branch_gap_motion_high_sscd` and `branch_gap_motion_lower_sscd` are retired render identities, including from diagnostics. The `branch_motion` scalar terms, common-row additive summaries, identity residuals, tests and historical metadata remain numerical audit outputs. Figure removal does not remove a measurement dependency or trigger inference.
+
+Registry/category/legend migration is presentation-only: after any required source-receipt update, compatible `--plot` uses existing compact inputs without recomputing summaries, touching scientific hashes or reading tensors. `figure_retirement.json` records enumerated ownership-verified moves/retirements and preserved conflicts. Export and publication rollback protect old image pairs and metadata; repeated plotting does not accumulate archives. See [figure_curation.md](figure_curation.md) for the exact active order and allowed paths.
+
+Active display labels follow [figure_notation.md](figure_notation.md): implementation-only `K`, `M`, `H`, `D`, `Q`, and bound aliases stay in scientific columns/captions but are expanded using manuscript expressions on the twenty paper plots. Scalars are already normalized; label changes never divide an RMSE a second time.
+
+The new per-prompt compact tables have the same identity/cohort columns as
+`branch_gap_per_prompt`: `run_id`, `original_index`, `record_id`, `target_id`,
+`step_index`, `mean_terminal_sscd`, `seed_count`, `seed_ids_json`,
+`latent_dimension`, and `cohort_complete`, plus one value column:
+
+| Appendix value column | Saved trajectory source and reduction |
+|---|---|
+| `mean_conditional_error_rmse` | Arithmetic mean of `direct_conditional_error_rmse`; per-seed conditional-reference norm already divided by `sqrt(d)`. |
+| `mean_unconditional_reference_error_rmse` | Arithmetic mean of `direct_unconditional_reference_error_rmse`; learned unconditional minus posterior clean reference, never target distance. |
+| `mean_target_probability` | Arithmetic mean of individual `exp(direct_target_log_probability)` values on actual saved trajectory states, never exponentiated mean log probability. |
+| `mean_reference_gap_rmse` | Arithmetic mean of `direct_reference_target_error_rmse`; the conditional-minus-unconditional analytical reference norm equals this saved opposite-sign distance under the single-target conditional assumption. |
+
+All four use the same complete declared seed cohort at every pre-update step
+within each curve, equal seed weights, and fixed mean terminal-SSCD color over
+that same cohort. Missing/invalid cohorts remain in per-figure exclusion audits.
+Probability is dimensionless; saved normalized errors receive no further scaling.
+The formula recipe is `prompt-trajectory-scalars-1`, and plotting consumes these
+compact values without performing posterior evaluation or seed aggregation.
+
+A14 `reference_branch_gap_per_prompt` shows $\|\bar{\mathbf{x}}_t(c)-\bar{\mathbf{x}}_t(\varnothing)\|/\sqrt{d}$ against $T-t$. The analytical reference difference is conditional minus unconditional at the same actual saved trajectory state and noise level. Under the existing single-target conditional assumption, $\bar{\mathbf{x}}_t(c)=\mathbf{x}^{\star}$, so its norm equals the saved opposite-sign distance $\|\bar{\mathbf{x}}_t(\varnothing)-\mathbf{x}^{\star}\|$. It therefore averages `direct_reference_target_error_rmse` once across the same complete fixed seed cohort, with a fixed color from those seeds' mean terminal SSCD. The learned branch gap, differences of error norms, and the radius-tail upper bound are different quantities and are not used. This adds no posterior or network evaluation; exclusions remain in `audit_data/reference_branch_gap_per_prompt_cohort.csv`.
+
+The zero-companion renders are retired; their scalar fields retain the historical definitions below. New runs reject `--no-mu` and `--center zero`; historical saved configurations remain readable. The selected theory mean still defaults to `reference-min-snr`. Bundles predating zero-comparison retirement require one explicit compact-input refresh using `bash run_all.sh --recompute-experiments` before `--plot`; compatible measurement shards are reused. The later square-root display alone does not alter that source identity. See [migration commands](figure_curation.md#author-commands--not-executed-here).
+
+A15 `corollary3_guidance_scale_vs_loss` plots `sqrt(L_T(c)/(d*SNR_T))` against the signed least-squares guidance coefficient for Corollary 3, Equation 54. The compact `x` remains the genuine forward-target loss mean `L_T(c)/(d*SNR_T)`; only its display takes one square root, after averaging the loss over draws. It is not the mean of per-draw roots. For each prompt–target pair, the fit minimizes `sum_seed ||(xhat_T(c;g)-mu)-a*(x_star-mu)||^2` over one scalar `a`, using the full fixed saved initial seed cohort at the actual first-prediction states. Gaussian-bank match status is recorded separately and is not assumed for this fit. Its shared target direction makes the joint coefficient equal to the arithmetic mean of the signed per-seed coefficients. Color is mean terminal SSCD over exactly those seeds; the labeled horizontal guide shows the actual configured `g`. The fit uses the selected reference mean, retains negative coefficients, and excludes incomplete cohorts or unidentifiable directions with saved reasons. It is a projection of the full guided clean estimate around μ, not a projection of `g*Delta_T`, and it does not estimate or change the configured generation guidance.
+
+A16 `reference_variation_per_prompt` shows $V_t/\sqrt{d}$ against $T-t$, using the saved Equation-15 cross-step reference-variation norm-integral estimates `direct_prop5_variation_rmse` from `matched_updates`. The integrand is defined relative to the current unconditional posterior reference $\bar{\mathbf{x}}_t(\varnothing)$, not the selected global μ. Each prompt–target curve averages the already normalized estimates over the same complete fixed seed cohort at every positive-noise transition, with a fixed color from those seeds’ mean terminal SSCD. Its domain is $t=2,\ldots,T$, or $T-t=0,\ldots,T-2$; no final-prediction or output value is inserted, and a one-step schedule is not applicable. Finite nonnegative original estimates are retained when condition signs or the quadrature budget remain unresolved; refined interval midpoints are not substituted. A missing, invalid or structurally inapplicable required estimate excludes the entire curve with an explicit reason. `audit_data/reference_variation_per_prompt_cohort.csv` records cohort exclusions and numerical-status counts, while `audit_data/feedback_endpoints.csv` retains the source status, error estimates and bounds. These are numerical estimates, not certified exact integrals. The new compact reduction performs no integration, posterior evaluation or model inference.
+
+The `four_guidance_fit` compact row contains full pair identity plus `x`, `y`, `mean_terminal_sscd`, `seed_count`, `seed_ids_json`, `latent_dimension`, `snr`, `guidance_scale`, `fit_residual_rmse`, and `direction_norm_rmse`. Here `x` stores the unchanged loss ratio; the renderer displays its square root. The latter two fields keep normalized residual and target-direction norms; they do not rescale the fitted coefficient. Metadata retains the selected-mean receipt, fixed seed population and cohort exclusions. Missing fit fields require analysis, never plot-time fitting or reuse of a differently defined injection coefficient.
 
 The historical dictionary below is retained to interpret compatible backing columns; it does not select the active figure registry.
 
@@ -268,9 +308,12 @@ Three quantities remain distinct:
 - `mu_K`: weighted mean of the declared candidate atoms, saved independently.
 - `mu=E_D[X]`: manuscript training-distribution mean, unavailable here.
 
-Explicit `zero` and compatible already-saved `cached-baseline` center choices are
-allowed and recorded. No legacy baseline inference is invoked. Center-distance
-fields use the selected center, with `model_center_diagnostic` evidence.
+Historical bundles may record `zero` or `cached-baseline` center choices; those
+receipts retain their original meanings for compatible saved-data readers.
+They are not instructions for newly selecting zero centering. Active mean
+comparisons use the selected reference mean, defaulting to `reference-min-snr`.
+Historical center-distance fields keep their recorded center and
+`model_center_diagnostic` evidence; no legacy baseline inference is invoked.
 
 The baseline plot contains only initial `unconditional_center_rmse`, deduplicated
 by run and evaluation seed after repeated-input consistency checks. With N=20
@@ -643,3 +686,22 @@ meaning; finite negative data and numerical uncertainty remain visible.
 See [numerical_refinement_plan.md](numerical_refinement_plan.md) for exact auxiliary bounds and scopes. `numerical_log_probability_gain` retains H; `numerical_log_odds_gain` is stable G and must never replace H's magnitude. `numerical_affine_*` refers to the reconstructed affine endpoint, while the primary gain refers to the recorded endpoint. `condition_sign_status` may be negative while `condition_value_status` remains unavailable. Directed bounds and legacy embedded quadrature estimates have separate fields. `fixed_cache_gain_sign`, `source_robust_gain_sign`, and `reference_model_identification` describe distinct uncertainty layers. Budget exhaustion is unknown mass, not a zero gain or variation.
 
 The Corollary-3 premise is `(ec+bu)/||x_star-mu_K||`; its full error decomposition uses the saved vector inner product. Lemma-6 Q is the paired maximum before aggregation. The terminal looseness is `(g-1)*(S_raw-D_raw)`, decomposed into the radius-tail slack and the reference-triangle slack. All of these are saved scalar audits; none changes the empirical law or replaces the manuscript statement.
+
+## Retained zero-vector scalar measurements (figures retired)
+
+The declared cached-law mean remains unchanged. `learned_zero_error_l2` and
+`reference_zero_error_l2` are the norms of the same learned and posterior clean
+vectors about zero; their `_rmse` fields divide by `sqrt(d)` once.
+`mean_norm_l2`/`mean_norm_rmse` describe the selected theory mean;
+`bank_mean_norm_l2`/`bank_mean_norm_rmse` describe the exact finite-bank mean, and
+`atom_zero_distance_rmse` is each declared atom's normalized norm. The original
+learned-minus-posterior reference error is independent of this choice of centre.
+
+`audit_data/zero_baseline_summary.csv` pairs both centres at each initial unique
+Gaussian seed. `learned_mean_squared_error_improvement` and
+`reference_mean_squared_error_improvement` are zero-centred squared normalized
+distance minus mean-centred squared normalized distance; positive favours the
+selected theory mean for that observation. These remain descriptive scalar audits
+after the two zero-companion figures are retired.
+Zero is not substituted into posterior weights, radii, theorem conditions, or
+mean-centred injection identities, and is not claimed to be the training mean.

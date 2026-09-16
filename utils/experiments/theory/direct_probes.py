@@ -33,7 +33,6 @@ from utils.common.io import (
 )
 from utils.models.devices import (
     configure_worker_cpu_threads,
-    resolve_devices,
     round_robin_shard,
     worker_count_for_tasks,
 )
@@ -285,12 +284,12 @@ def _prediction_microbatch(samples, *, condition, timestep, components, schedule
     model_input = conceptual.to(dtype=components.inference_dtype)
     with torch.inference_mode():
         prediction = predict_conditional_epsilon(model_input, timestep, condition, components.unet, scheduler, conversion_sample=conceptual)
-    prediction = prediction.detach().to(device="cpu", dtype=torch.float64)
+    prediction = prediction.detach().to(dtype=torch.float64)
     if prediction.shape != samples.shape or not bool(torch.isfinite(prediction).all()):
         raise TheoryError("Native probe prediction has invalid shape or values")
     return prediction, {
-        "input_quantization_l2": (model_input.detach().cpu().double() - samples.double()).flatten(1).norm(dim=1),
-        "conversion_input_quantization_l2": (conceptual.detach().cpu().double() - samples.double()).flatten(1).norm(dim=1),
+        "input_quantization_l2": (model_input.detach().double() - samples.to(device=device, dtype=torch.float64)).flatten(1).norm(dim=1),
+        "conversion_input_quantization_l2": (conceptual.detach().double() - samples.to(device=device, dtype=torch.float64)).flatten(1).norm(dim=1),
         "prediction_conversion_dtype": str(conversion_dtype).removeprefix("torch."),
         "inference_dtype": str(components.inference_dtype).removeprefix("torch."),
     }
@@ -338,7 +337,7 @@ def cached_prediction_batches(samples, cached_epsilon, gaussian, *, batch_size):
         stop = min(len(samples), start + size)
         yield start, stop, cached_epsilon[start:stop].double(), {
             "input_quantization_l2": (samples[start:stop] - gaussian[start:stop].double()).flatten(1).norm(dim=1),
-            "conversion_input_quantization_l2": torch.zeros(stop - start, dtype=torch.float64),
+            "conversion_input_quantization_l2": torch.zeros(stop - start, dtype=torch.float64, device=samples.device),
             "prediction_conversion_dtype": str(cached_epsilon.dtype).removeprefix("torch."),
             "oom_retries": 0,
         }
@@ -361,6 +360,7 @@ def _rows(values, count, metadata):
 
 def _cached_initial(sources, record, gaussian, schedule):
     z, u, c, target = load_record(sources.experiment, record, initial_only=True, verify_hashes=False)
+    z, u, c, target = (value.to(device=gaussian.device) for value in (z, u, c, target))
     expected = gaussian.to(dtype=z.dtype) * float(schedule["init_noise_sigma"])
     exact = z.shape == expected.shape and torch.equal(z, expected)
     compatible = exact and float(schedule["init_noise_sigma"]) == 1.0
@@ -388,7 +388,7 @@ def _persist_worker_inputs(directory, sources, records, law):
         except (CacheIOError, OSError, ValueError):
             pass
     if not valid:
-        digest = atomic_torch_save({"atoms": support.atoms.cpu(), "weights": support.weights.cpu()}, law_path)
+        digest = atomic_torch_save(law.to_payload(), law_path)
         atomic_write_json(law_marker, {
             "identity": law_identity, "sha256": digest, "metadata": law.metadata,
             "candidate_chunk": support.candidate_chunk, "query_chunk": support.query_chunk,
@@ -413,7 +413,7 @@ def _persist_worker_inputs(directory, sources, records, law):
             "source_path": str(source_path), "source_sha256": file_sha256(source_path)}
 
 
-def _read_worker_inputs(specification):
+def _read_worker_inputs(specification, *, device="cpu"):
     from utils.experiments.cache import CompletedGenerationRecord, GenerationPaths
     from .reference_law import ReferenceLaw
     from .support import FiniteSupport
@@ -431,12 +431,12 @@ def _read_worker_inputs(specification):
     identity = saved["identity"]
     if _tensor_digest(tensors["atoms"]) != identity["atoms"] or _tensor_digest(tensors["weights"]) != identity["weights"]:
         raise TheoryError("Learned-probe reference-law fingerprint differs")
-    support = FiniteSupport(tensors["atoms"], identity["atom_ids"], identity["aliases"], weights=tensors["weights"],
+    support = FiniteSupport(tensors["atoms"].to(device), identity["atom_ids"], identity["aliases"], weights=tensors["weights"].to(device),
                             candidate_chunk=saved["candidate_chunk"], query_chunk=saved["query_chunk"])
     # Preserve exact declared masses, without a second floating normalization.
-    support.weights = tensors["weights"].clone()
+    support.weights = tensors["weights"].to(device).clone()
     support.log_weights = support.weights.log()
-    law = ReferenceLaw(support, saved["metadata"], identity["law_hash"])
+    law = ReferenceLaw(support, saved["metadata"], identity["law_hash"], tensors.get("estimated_mean_vector"))
     source = read_json(specification["source_path"])
     records = [CompletedGenerationRecord(r["original_index"], r["source_row_number"], Path(r["marker_path"]), r["metadata"]) for r in source["records"]]
     sources = SimpleNamespace(root=Path(source["root"]), config=source["config"], runs=source["runs"],
@@ -451,10 +451,11 @@ def _read_worker_inputs(specification):
 def _run_probe_worker(*, inputs, tasks, output_directory, device, batch_size, worker_count):
     """Spawn entry: lazy single replica, exact-prompt embedding cache, scalar tasks."""
     configure_worker_cpu_threads(worker_count)
-    sources, law, schedule = _read_worker_inputs(inputs)
     device = torch.device(device)
     if device.type == "cuda":
         torch.cuda.set_device(device)
+    sources, law, schedule = _read_worker_inputs(inputs, device=device)
+    host_atom_weights = law.support.weights.detach().cpu()
     science = sources.runs["experiment"]["scientific_config"]
     if any(task["identity"]["source_code"] != _source_code() for task in tasks[:1]):
         raise TheoryError("Learned-probe numerical source changed after planning")
@@ -465,7 +466,9 @@ def _run_probe_worker(*, inputs, tasks, output_directory, device, batch_size, wo
             break
     records = {str(r.original_index): r for r in sources.selected}
     first = records[sorted(records)[0]]
-    gaussian = make_initial_noise(science["seeds"], science["latent_shape"])
+    # Preserve the generation RNG stream exactly; only seeded input construction
+    # runs on the host. All latent-vector arithmetic follows on the worker GPU.
+    gaussian = make_initial_noise(science["seeds"], science["latent_shape"]).to(device)
     storage_dtype = getattr(torch, science["scientific_tensor_storage"]["dtype"])
     gaussian_bank = gaussian.to(dtype=storage_dtype).double() if float(schedule["init_noise_sigma"]) == 1.0 else gaussian.double()
     components = scheduler = None
@@ -503,7 +506,7 @@ def _run_probe_worker(*, inputs, tasks, output_directory, device, batch_size, wo
                         path = sources.experiment.target_latent_path(record.original_index)
                         if file_sha256(path) != record.metadata["tensor_file_sha256"]["target_latent"]:
                             raise TheoryError("Preserved forward-loss target hash differs")
-                        targets[key] = safe_torch_load(path).double()
+                        targets[key] = safe_torch_load(path).to(device=device, dtype=torch.float64)
                     target = targets[key]
                 metadata = task["pair"] | level | {
                     "task_hash": task["task_hash"], "status": "measured",
@@ -525,13 +528,15 @@ def _run_probe_worker(*, inputs, tasks, output_directory, device, batch_size, wo
                     metadata["initialization_status"] = cache["status"] if cache else "fresh_standard_gaussian_at_saved_native_noise"
                     metadata["gaussian_bank_identity"] = _tensor_digest(gaussian)
                 else:
-                    noise = draw_noise(task["noise_seeds"], science["latent_shape"])
+                    noise = draw_noise(task["noise_seeds"], science["latent_shape"]).to(device)
                     if table == "forward_loss_draws":
                         samples = level["alpha"] * target.unsqueeze(0) + level["sigma"] * noise
                         metadata.update(pinsker_quantities(target, level["alpha"], level["sigma"]))
                     else:
-                        atom_indices = torch.tensor([int(torch.multinomial(law.support.weights.cpu(), 1, generator=torch.Generator().manual_seed(seed))) for seed in task["atom_seeds"]])
-                        samples = level["alpha"] * law.support.atoms.cpu()[atom_indices] + level["sigma"] * noise
+                        # CPU categorical draws retain the declared seeded atom
+                        # stream; sampled atoms and corruption stay on the GPU.
+                        atom_indices = torch.tensor([int(torch.multinomial(host_atom_weights, 1, generator=torch.Generator().manual_seed(seed))) for seed in task["atom_seeds"]], device=device)
+                        samples = level["alpha"] * law.support.atoms[atom_indices] + level["sigma"] * noise
                 prompt = record.metadata["prompt_raw"] if record is not None else ""
                 if cache and cache["compatible"]:
                     cached_epsilon = cache["conditional"] if record is not None else cache["unconditional"]
@@ -554,7 +559,11 @@ def _run_probe_worker(*, inputs, tasks, output_directory, device, batch_size, wo
                         values = conditional_gaussian_metrics(target, z, epsilon, a, s)
                     else:
                         posterior = law.posterior_mean(z, a, s)
-                        values = gaussian_reference_metrics(z, epsilon, posterior, law.mean_vector, a, s, law.max_atom_norm) if table == "gaussian_reference" else marginal_forward_metrics(noise[start:stop], z, epsilon, posterior, a, s)
+                        values = gaussian_reference_metrics(z, epsilon, posterior, law.theory_mean_vector, a, s, law.max_atom_norm, bank_mean=law.mean_vector) if table == "gaussian_reference" else marginal_forward_metrics(noise[start:stop], z, epsilon, posterior, a, s)
+                        if table == "gaussian_reference":
+                            mean_receipt = law.theory_mean_metadata
+                            values["theory_mean_source"] = str(mean_receipt.get("source", "declared_finite_bank_mean"))
+                            values["theory_mean_sha256"] = str(mean_receipt.get("vector_sha256", law.metadata.get("mean_sha256", "")))
                     rows = _rows(values | precision, stop - start, metadata)
                     for i, row in enumerate(rows, start):
                         row["input_sha256"] = _tensor_digest(samples[i])
@@ -590,7 +599,7 @@ def _run_probe_worker(*, inputs, tasks, output_directory, device, batch_size, wo
                     raise TheoryError("Protected Gaussian initialization source changed during probes")
                 data, marker = _task_paths(output_directory, task)
                 atomic_write_frame_parquet(frame, data)
-                atomic_write_json(marker, {"schema_version": SCHEMA_VERSION, "task_hash": task["task_hash"], "identity": task["identity"], "complete": True, "rows": len(frame), "sha256": file_sha256(data), "execution": {"device": str(device), "batch_size_requested": batch_size, "packages": components.package_versions if components else science.get("package_versions", {}), "cached_only": components is None, "replica": replica_metadata}})
+                atomic_write_json(marker, {"schema_version": SCHEMA_VERSION, "task_hash": task["task_hash"], "identity": task["identity"], "complete": True, "rows": len(frame), "sha256": file_sha256(data), "execution": {"device": str(device), "numeric_backend": "worker_device_float64", "random_stream_backend": "preserved_CPU_seeded_input_draws", "batch_size_requested": batch_size, "packages": components.package_versions if components else science.get("package_versions", {}), "cached_only": components is None, "replica": replica_metadata}})
                 initial.clear()
                 targets.clear()
                 completed.append(task["task_hash"])
@@ -611,12 +620,13 @@ def _run_probe_worker(*, inputs, tasks, output_directory, device, batch_size, wo
 def run_direct_probes(project_root, *, records, support, config, output_directory, device="auto", probe_batch_size=8, sources=None):
     """Collect missing learned observations, returning scalar tables and provenance.
 
-    ``support`` is the CPU ReferenceLaw adapter. ``output_directory`` is a stable
+    ``support`` is the ReferenceLaw adapter. ``output_directory`` is a stable
     backing directory below theory_measurements, independent of paper style and
     integration identities. A caller must await this stage before analytical GPU
     workers start. Full protected payload verification belongs to that shared pass.
     """
     from .paper_contracts import publication_lock
+    from .reduce import _resolve_theory_devices
 
     sources = sources or discover_sources(project_root, **config)
     records = sorted(list(records), key=lambda record: str(record.original_index))
@@ -624,8 +634,6 @@ def run_direct_probes(project_root, *, records, support, config, output_director
         raise TheoryError("Direct probes require all and only frozen retained records")
     if len(records) != len({str(r.original_index) for r in records}):
         raise TheoryError("Duplicate retained probe record")
-    if support.support.atoms.device.type != "cpu":
-        raise TheoryError("Pass a CPU ReferenceLaw before spawning learned workers")
     batch_size = _positive_integer(probe_batch_size, "probe_batch_size")
     schedule = load_schedule(sources)
     tasks = plan_probe_tasks(sources, records, support, schedule, config)
@@ -636,7 +644,7 @@ def run_direct_probes(project_root, *, records, support, config, output_director
     with publication_lock(directory):
         pending = [task for task in tasks if not _valid_task(directory, task)]
         inputs = _persist_worker_inputs(directory, sources, records, support) if pending else None
-        devices = tuple(resolve_devices(device)) if pending else ()
+        devices = tuple(_resolve_theory_devices(device)) if pending else ()
         workers = worker_count_for_tasks(devices, len(pending)) if pending else 0
         context = get_context("spawn")
         failures = []

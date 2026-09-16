@@ -104,7 +104,9 @@ def test_gaussian_control_tasks_are_unique_seed_tasks_not_one_inference_per_pair
     assert all("device" not in task["identity"] and "batch_size" not in task["identity"] for task in planned)
 
 
-def test_one_fresh_prediction_per_seed_is_shared_across_every_target(tmp_path, monkeypatch):
+@pytest.mark.parametrize("device", [pytest.param("cuda:0", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA required for GPU Gaussian-control reductions"))])
+def test_one_fresh_prediction_per_seed_is_shared_across_every_target(tmp_path, monkeypatch, device):
     from utils.experiments.theory import evidence_reference
     sources, records, schedule = probe_fixture(tmp_path, monkeypatch)
     tasks = controls.plan_control_tasks(sources, records, schedule)
@@ -127,6 +129,7 @@ def test_one_fresh_prediction_per_seed_is_shared_across_every_target(tmp_path, m
         return object()
     monkeypatch.setattr(controls, "encode_prompt_condition", prompt)
     def predictions(samples, *, batch_size, **kwargs):
+        assert str(samples.device) == device
         for start in range(0, len(samples), batch_size):
             stop = min(start + batch_size, len(samples))
             calls["inputs"].extend(samples[start:stop, 0, 0, 0].tolist())
@@ -136,7 +139,7 @@ def test_one_fresh_prediction_per_seed_is_shared_across_every_target(tmp_path, m
     monkeypatch.setattr(controls, "prediction_batches", predictions)
     output = tmp_path / "controls"
     result = controls._worker(sources=sources, records=records, tasks=tasks, output_directory=output,
-                              device="cpu", batch_size=2, worker_count=1)
+                              device=device, batch_size=2, worker_count=1)
     assert result["failures"] == []
     assert len(result["completed"]) == 4
     assert result["network_observations"] == 4

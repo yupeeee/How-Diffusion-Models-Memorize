@@ -38,6 +38,10 @@ def measured_fixture(root):
 
 
 def mock_supplements(monkeypatch):
+    # Publication fixtures contain saved scalars only; CUDA routing is checked
+    # without allocating device tensors or executing any scientific worker.
+    from utils.experiments.theory import reduce as reducer
+    monkeypatch.setattr(reducer, "_resolve_theory_devices", lambda request: (torch.device("cuda:0"),))
     monkeypatch.setattr(gaussian_controls, "run_gaussian_control_analysis", lambda *a, result, **k: result)
     monkeypatch.setattr(four_stage_reduce, "prepare_four_stage_primary", lambda *a, **k: None)
     monkeypatch.setattr(four_stage_reduce, "run_four_stage_analysis", lambda *a, result, **k: result)
@@ -53,7 +57,7 @@ def test_direct_publication_plot_isolation_and_failure_preserve_active_role(tmp_
     protected_before = (file_sha256(protected), protected.stat().st_mtime_ns)
     measurements = measured_fixture(tmp_path)
     monkeypatch.setattr(numerical_reduce, "run_precision_analysis", lambda *a, **k: measurements)
-    output = paper_reduce.run_paper(tmp_path, device="cpu", **config)
+    output = paper_reduce.run_paper(tmp_path, device="cuda:0", **config)
     assert output == PaperPaths.build(tmp_path, **config).output_directory
     _, summary, audit, frames = load_paper_inputs(output, expected_config=config)
     assert summary["complete"] and not audit["blocking"]
@@ -92,10 +96,10 @@ def test_direct_publication_plot_isolation_and_failure_preserve_active_role(tmp_
         return frames, metadata
     monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", block)
     with pytest.raises(TheoryError, match="correctness audit blocked publication"):
-        paper_reduce.run_paper(tmp_path, device="cpu", **config)
+        paper_reduce.run_paper(tmp_path, device="cuda:0", **config)
     assert _snapshot(output) == active_before
     with pytest.raises(TheoryError, match="scientific configuration differs"):
-        paper_reduce.run_paper(tmp_path, device="cpu", **{**config, "num_loss_seeds": 128})
+        paper_reduce.run_paper(tmp_path, device="cuda:0", **{**config, "num_loss_seeds": 128})
     assert _snapshot(output) == active_before
 
 

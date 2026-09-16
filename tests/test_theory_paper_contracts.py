@@ -63,7 +63,8 @@ def test_csv_exact_round_trip_with_json_sorted_schema_and_integer_extremes(tmp_p
     pd.testing.assert_series_equal(read.signed_integer, frame.signed_integer)
 
 
-def test_scientific_and_recipe_mismatches_require_analysis(tmp_path):
+@pytest.mark.parametrize("recipe_change", ["changed", "removed", "added"])
+def test_scientific_and_recipe_mismatches_require_analysis(tmp_path, recipe_change):
     compact_fixture(tmp_path / "bundle")
     bundle = tmp_path / "bundle"
     with pytest.raises(TheoryError, match="configuration differs"):
@@ -74,14 +75,25 @@ def test_scientific_and_recipe_mismatches_require_analysis(tmp_path):
             ),
         )
     config = json.loads((bundle / "run_config.json").read_text())
-    first_source = next(iter(config["scientific_identity"]["measurement_sources"]))
-    config["scientific_identity"]["measurement_sources"][first_source] = "stale"
+    sources = config["scientific_identity"]["measurement_sources"]
+    first_source = next(iter(sources))
+    if recipe_change == "changed":
+        sources[first_source] = "stale"
+    elif recipe_change == "removed":
+        del sources[first_source]
+    else:
+        first_source = "retired_measurement.py"
+        sources[first_source] = "stale"
     from utils.common.io import canonical_hash
 
     config["scientific_hash"] = canonical_hash(config["scientific_identity"])
     atomic_write_json(bundle / "run_config.json", config)
-    with pytest.raises(TheoryError, match="measurement definitions changed"):
+    with pytest.raises(TheoryError, match="measurement definitions changed") as raised:
         c.load_paper_inputs(bundle)
+    message = str(raised.value)
+    assert f"for bundle {bundle}" in message
+    assert f"differing source files: {first_source}. Run " in message
+    assert c.recompute_command(c.saved_scientific_configuration(config)) in message
 
 
 def test_transaction_rollback_archive_lock_and_symlink_rejection(tmp_path):

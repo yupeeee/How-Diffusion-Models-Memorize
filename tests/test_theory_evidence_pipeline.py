@@ -155,7 +155,7 @@ def test_wrapper_reuses_direct_histories_and_only_schedules_missing_supplements(
                     unconditional_target_error_rmse=[9., 4.],
                     gaussian_control_status="same_saved_gaussian_input_canonical_epsilon")
             stage._save(task["path"], task["identity"], frames, {"complete": True})
-            receipts.append({"task_hash": task["task_hash"], "status": "computed", "device": "cpu"})
+            receipts.append({"task_hash": task["task_hash"], "status": "computed", "device": "cuda:0"})
         return receipts
 
     class InlineExecutor:
@@ -203,13 +203,13 @@ def test_wrapper_reuses_direct_histories_and_only_schedules_missing_supplements(
     monkeypatch.setattr(evidence_reference, "reference_grid", lambda snr, decades: np.asarray([snr / 10 ** decades, snr]))
     monkeypatch.setattr(evidence_reference, "reference_atoms", lambda _law: pd.DataFrame({
         "atom_id": ["t"], "weight": [1.0], "reference_scale_rmse": [.75]}))
-    monkeypatch.setattr(reduce, "_resolve_theory_devices", lambda _device: ("cpu",))
+    monkeypatch.setattr(reduce, "_resolve_theory_devices", lambda _device: ("cuda:0",))
     monkeypatch.setattr(reduce, "_worker_sources", lambda source, _chosen: source)
     monkeypatch.setattr(stage, "ProcessPoolExecutor", InlineExecutor)
     monkeypatch.setattr(stage, "RecordProgress", SilentProgress)
     monkeypatch.setattr(stage, "_worker", scientific_worker_stub)
-    config = {"reference_snr_decades": 6., "terminal_noise_run_alpha": .05, "guidance_scale": 7.5}
-    first = stage.run_evidence_analysis(tmp_path, config=config, device="cpu")
+    config = {"reference_snr_decades": 6., "terminal_noise_run_alpha": .05, "guidance_scale": 7.5, "mean_source": "cached-targets"}
+    first = stage.run_evidence_analysis(tmp_path, config=config, device="cuda:0")
     assert scheduled == ["reference", "reference", "record"]
     assert first["provenance"]["direct_analysis_hash"] == "fixed-integral"
     manifest = read_json(first["directory"] / "manifest.json")
@@ -234,16 +234,16 @@ def test_wrapper_reuses_direct_histories_and_only_schedules_missing_supplements(
 
     scheduled.clear()
     monkeypatch.setattr(stage, "ProcessPoolExecutor", forbidden_executor)
-    resumed = stage.run_evidence_analysis(tmp_path, config=config, device="cpu")
+    resumed = stage.run_evidence_analysis(tmp_path, config=config, device="cuda:0")
     assert not scheduled
     assert resumed["directory"] == first["directory"]
     assert resumed["files"] == first["files"]
     monkeypatch.setattr(stage, "ProcessPoolExecutor", InlineExecutor)
-    changed_grid = stage.run_evidence_analysis(tmp_path, config=config | {"reference_snr_decades": 5.}, device="cpu")
+    changed_grid = stage.run_evidence_analysis(tmp_path, config=config | {"reference_snr_decades": 5.}, device="cuda:0")
     assert scheduled == ["reference", "reference"]
     assert changed_grid["directory"] != first["directory"]
     scheduled.clear()
-    changed_noise = stage.run_evidence_analysis(tmp_path, config=config | {"terminal_noise_run_alpha": .02}, device="cpu")
+    changed_noise = stage.run_evidence_analysis(tmp_path, config=config | {"terminal_noise_run_alpha": .02}, device="cuda:0")
     assert scheduled == ["record"]
     assert changed_noise["directory"] != first["directory"]
     for result in (resumed, changed_grid, changed_noise):

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+import torch
 
 from utils.common.io import atomic_write_json
 from utils.experiments.theory.contracts import TheoryError, numerical_config
@@ -57,6 +58,25 @@ def test_recompute_command_preserves_all_measurement_settings():
     assert "--no-unconditional-loss" in command
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("mean_source", ["reference-initial", "reference-min-snr"])
+def test_recompute_command_uses_gpu_budget_flags_and_preserves_mean_settings(wrapped, mean_source):
+    config = numerical_config(
+        **BASE, mean_source=mean_source, num_mean_samples=12000, mean_seed=29,
+        numerical_decimal_precision=128, numerical_max_decimal_products=7000000,
+        numerical_max_variation_nodes=129, numerical_variation_absolute_width=1e-8,
+    )
+    command = recompute_command({"scientific_config": config} if wrapped else config)
+    assert "--numerical-decimal-precision" not in command
+    assert "--numerical-max-decimal-products" not in command
+    assert "--numerical-max-products 7000000" in command
+    assert "--numerical-max-variation-nodes 129" in command
+    assert "--numerical-variation-absolute-width 1e-08" in command
+    assert f"--mean-source {mean_source}" in command
+    assert "--num-mean-samples 12000" in command
+    assert "--mean-seed 29" in command
+
+
 @pytest.mark.parametrize("mode", ["--plot", "--recompute-experiments", None])
 def test_root_forwards_science_only_to_theory(tmp_path, mode):
     args = ([mode] if mode else []) + ["--model", "sdv1", "--scheduler", "ddim",
@@ -86,7 +106,9 @@ def test_root_plot_omits_unrequested_science_to_enable_inheritance(tmp_path):
 def _worker_fixture(tmp_path, monkeypatch, *, complete=True):
     from utils.experiments.theory import direct_reduce, direct_measurements, scheduler_adapter
     from utils.experiments import cache
-    config = numerical_config(**BASE, num_seeds=2, num_inference_steps=2)
+    # Synthetic routing only: every numerical worker dependency is stubbed.
+    monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
+    config = numerical_config(**BASE, num_seeds=2, num_inference_steps=2, mean_source="cached-targets")
     record = SimpleNamespace(original_index="007", metadata={"record_id": "r", "seeds": [0, 1], "scientific_config_hash": "run", "target_image_sha256": "target"})
     sources = SimpleNamespace(experiment=object(), runs={"experiment": {"scientific_config": {}}})
     seen = []
@@ -116,7 +138,7 @@ def _worker_fixture(tmp_path, monkeypatch, *, complete=True):
     kwargs = dict(sources=sources, records=[record], bundle=tmp_path / "bundle",
                   analysis_hash="science", law_path=path, law_digest="mocked",
                   schedule_path=path, schedule_digest=file_sha256(path), config=config,
-                  device="cpu", worker_count=1, candidate_chunk_size=2, query_chunk_size=2)
+                  device="cuda:0", worker_count=1, candidate_chunk_size=2, query_chunk_size=2)
     return direct_reduce, kwargs, seen
 
 
@@ -195,22 +217,23 @@ def test_saved_payload_scalar_join_and_missing_coverage(tmp_path, monkeypatch):
     assert not stage._valid_record(tmp_path / "missing", record, "missing")
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for real vector measurement/integration")
 @pytest.mark.parametrize("query_chunk,clean", [(1, True), (2, False)])
 def test_real_vector_worker_persists_and_integrates_pending_diagnostics(tmp_path, monkeypatch, query_chunk, clean):
-    """Exercise the real measurement -> disk -> integration boundary on CPU."""
+    """Exercise CUDA measurements, host serialization, and CUDA integration."""
     import torch
     from utils.common.io import atomic_torch_save, file_sha256, read_json, safe_torch_load
     from utils.experiments import cache
     from utils.experiments.theory import direct_reduce as stage, direct_measurements, scheduler_adapter
     from tests.test_theory_direct_math import adapter, law
 
-    reference = law(((2.0, 1.0), (3.0, 0.0)))
+    reference = law(((2.0, 1.0), (3.0, 0.0))).to("cuda:0")
     reference.support.query_chunk = query_chunk
     scheduler = adapter(clean=clean)
     target = reference.support.atoms[0]
-    z = torch.zeros(3, 3, 2, dtype=torch.float64)
-    z[:, 0] = torch.tensor([[0.2, 0.3], [0.5, 0.1], [0.7, -0.2]], dtype=torch.float64)
-    u = torch.zeros(3, 2, 2, dtype=torch.float64)
+    z = torch.zeros(3, 3, 2, dtype=torch.float64, device="cuda:0")
+    z[:, 0] = torch.tensor([[0.2, 0.3], [0.5, 0.1], [0.7, -0.2]], dtype=torch.float64, device="cuda:0")
+    u = torch.zeros(3, 2, 2, dtype=torch.float64, device="cuda:0")
     c = torch.full_like(u, 0.1)
     for step in range(2):
         coeff = scheduler.coefficients(step)
@@ -232,11 +255,11 @@ def test_real_vector_worker_persists_and_integrates_pending_diagnostics(tmp_path
     monkeypatch.setattr(stage, "load_scores", lambda *a: [0.2, 0.9, 0.75])
     schedule_path = tmp_path / "schedule.pt"
     atomic_torch_save({}, schedule_path)
-    config = numerical_config(**BASE, num_seeds=3, num_inference_steps=2, guidance_scale=2.0)
+    config = numerical_config(**BASE, num_seeds=3, num_inference_steps=2, guidance_scale=2.0, mean_source="cached-targets")
     kwargs = dict(sources=sources, records=[record], bundle=tmp_path / "core",
                   analysis_hash="core-science", law_path=schedule_path, law_digest="mocked",
                   schedule_path=schedule_path, schedule_digest=file_sha256(schedule_path), config=config,
-                  device="cpu", worker_count=1, candidate_chunk_size=2, query_chunk_size=query_chunk,
+                  device="cuda:0", worker_count=1, candidate_chunk_size=2, query_chunk_size=query_chunk,
                   integration_directory=tmp_path / "integrated", integration_hash="quadrature")
     receipt = stage._run_analytical_worker(**kwargs)[0]
     assert receipt["status"] == "reduced", receipt.get("traceback", receipt)

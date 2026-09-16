@@ -1,5 +1,10 @@
 """Read-only resolution of completed learned-probe tasks.
 
+Two explicitly pinned transitions are supported: the original batching repair
+and additive zero-baseline scalars for Gaussian reference probes. The latter
+reuses only unaffected conditional/forward observations; Gaussian-reference
+rows must be recomputed because old scalar rows cannot provide zero norms.
+
 The cached-prediction batching fix changes orchestration source hashes without
 changing any successfully published observation. Its predecessor could only
 complete a cached task when the whole bank fit in its first microbatch; larger
@@ -29,6 +34,27 @@ AUDITED_FIXED_SOURCE_SHA256 = (
 COMPATIBILITY_REASON = (
     "cached_prediction_microbatch_closure_fix; "
     "verified_complete_predecessor_tasks_have_unchanged_observations"
+)
+
+
+MATH_SOURCE_KEY = "experiments/theory/direct_probe_math.py"
+ZERO_BASELINE_MATH_PREDECESSOR_SHA256 = (
+    "5caebe520b6c23c1210ba31cdb966ea32c6306b1958eae6f54a586b9303ae40c"
+)
+# Pinned after the additive Gaussian-reference-only math change is audited.
+# An unrelated future math/orchestrator edit must not inherit compatibility.
+AUDITED_ZERO_BASELINE_MATH_SHA256 = (
+    "d1d3faa961ab4928d9bfb3783f2473de538325d09adf171e9cc01641d7d2e437"
+)
+AUDITED_ZERO_BASELINE_PROBE_SHA256 = (
+    "dcc4d47b77caa67c1e4e2532693120994fd0535ff1dd08873347e42a0ea54c0a"
+)
+ZERO_BASELINE_UNCHANGED_TABLES = frozenset({
+    "forward_loss_draws", "gaussian_conditional", "forward_unconditional_loss",
+})
+ZERO_BASELINE_COMPATIBILITY_REASON = (
+    "additive_zero_baseline_gaussian_reference_metrics_only; "
+    "unchanged_conditional_and_forward_observations"
 )
 
 
@@ -88,13 +114,20 @@ def resolve_completed_task(
     sources = identity.get("source_code")
     if not isinstance(sources, dict) or not isinstance(sources.get(PROBE_SOURCE_KEY), str):
         return None
-    if sources[PROBE_SOURCE_KEY] != AUDITED_FIXED_SOURCE_SHA256:
-        return None
-    prior_identity = identity | {
-        "source_code": sources | {PROBE_SOURCE_KEY: CACHED_BATCHING_PREDECESSOR_SHA256}
-    }
-    prior_task = task | {
-        "identity": prior_identity,
-        "task_hash": canonical_hash(prior_identity),
-    }
-    return _verified_completed_task(directory, prior_task, path_for_task)
+    predecessor_sources = []
+    if sources[PROBE_SOURCE_KEY] == AUDITED_FIXED_SOURCE_SHA256:
+        predecessor_sources.append(sources | {PROBE_SOURCE_KEY: CACHED_BATCHING_PREDECESSOR_SHA256})
+    if (sources[PROBE_SOURCE_KEY] == AUDITED_ZERO_BASELINE_PROBE_SHA256
+            and sources.get(MATH_SOURCE_KEY) == AUDITED_ZERO_BASELINE_MATH_SHA256
+            and task["table"] in ZERO_BASELINE_UNCHANGED_TABLES):
+        # Only gaussian_reference_metrics gained columns. Its Gaussian-reference
+        # tasks are intentionally excluded; exact source receipts for every
+        # other function, policy, input, seed, checkpoint and law stay required.
+        predecessor_sources.append(sources | {MATH_SOURCE_KEY: ZERO_BASELINE_MATH_PREDECESSOR_SHA256})
+    for prior_sources in predecessor_sources:
+        prior_identity = identity | {"source_code": prior_sources}
+        prior_task = task | {"identity": prior_identity, "task_hash": canonical_hash(prior_identity)}
+        resolved = _verified_completed_task(directory, prior_task, path_for_task)
+        if resolved is not None:
+            return resolved
+    return None

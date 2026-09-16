@@ -9,6 +9,7 @@ import fcntl
 import os
 import shutil
 import shlex
+import stat
 import tempfile
 import uuid
 
@@ -93,6 +94,11 @@ def contained_path(root, relative):
 
 def recompute_command(config):
     c = saved_scientific_configuration(config) if "scientific_config" in config else config
+    # Historical zero-centred bundles remain readable, but rebuilding upgrades
+    # their retired diagnostic centre without mutating the saved configuration.
+    center = c.get("center", "reference-initial")
+    if center == "zero":
+        center = "reference-initial"
     command = (
         "./run_all.sh --model "
         + c["model_name"]
@@ -100,7 +106,7 @@ def recompute_command(config):
         + c["scheduler_name"]
         + f" --g {c['guidance_scale']:g} --T {c['num_inference_steps']} --N {c['num_seeds']}"
         + " --center "
-        + c.get("center", "reference-initial")
+        + center
         + " --recompute-experiments"
     )
 
@@ -108,9 +114,13 @@ def recompute_command(config):
         command += " --cached-baseline " + shlex.quote(str(c["cached_baseline"]))
     if c.get("target_error_tolerance") is not None:
         command += " --target-error-tolerance " + str(c["target_error_tolerance"])
-    for key in ("num_loss_seeds", "loss_seed", "loss_timesteps", "num_unconditional_loss_seeds", "reference_law", "reference_manifest", "reference_snr_decades", "terminal_noise_run_alpha", "numerical_decimal_precision", "numerical_max_decimal_products", "numerical_max_variation_nodes", "numerical_variation_absolute_width"):
+    # Decimal precision remains in historical receipts, but GPU computation uses
+    # binary64 and rejects that option. Preserve the operation budget under its
+    # current CLI spelling so the suggested command is executable.
+    for key in ("mean_source", "num_mean_samples", "mean_seed", "num_loss_seeds", "loss_seed", "loss_timesteps", "num_unconditional_loss_seeds", "reference_law", "reference_manifest", "reference_snr_decades", "terminal_noise_run_alpha", "numerical_max_decimal_products", "numerical_max_variation_nodes", "numerical_variation_absolute_width"):
         if c.get(key) is not None:
-            command += " --" + key.replace("_", "-") + " " + shlex.quote(str(c[key]))
+            option = "numerical-max-products" if key == "numerical_max_decimal_products" else key.replace("_", "-")
+            command += " --" + option + " " + shlex.quote(str(c[key]))
     if c.get("counterfactual_unconditional"):
         command += " --counterfactual-unconditional --counterfactual-steps " + shlex.quote(",".join(map(str, c.get("counterfactual_steps", [0]))))
     if "measure_unconditional_loss" in c:
@@ -130,7 +140,9 @@ def saved_scientific_configuration(saved):
     optional = saved.get("supplemental_config", {})
     if not isinstance(optional, dict) or set(optional) - set(FOUR_STAGE_OPTION_KEYS):
         raise TheoryError("Unknown paper supplemental configuration")
-    return numerical_config(**(saved["scientific_config"] | optional))
+    science = dict(saved["scientific_config"])
+    science.setdefault("mean_source", "cached-targets")
+    return numerical_config(**(science | optional))
 
 
 def saved_plot_configuration(bundle, *, requested, explicit_keys=(), portable=False):
@@ -162,6 +174,7 @@ def measurement_sources():
     return {
         name: file_sha256(base / name)
         for name in (
+            "reference_mean.py",
             "four_stage_figures.py",
             "four_stage_measurements.py",
             "four_stage_reduce.py",
@@ -302,10 +315,21 @@ def load_paper_inputs(
             or identity["config"] != combined_config
         ):
             raise TheoryError("Paper scientific identity/hash differs")
-        if check_recipe and identity["measurement_sources"] != measurement_sources():
-            raise TheoryError(
-                "Paper measurement definitions changed; analysis migration is required"
-            )
+        if check_recipe:
+            saved_sources = identity["measurement_sources"]
+            current_sources = measurement_sources()
+            if saved_sources != current_sources:
+                if isinstance(saved_sources, dict):
+                    differing_sources = ", ".join(
+                        name for name in sorted(set(saved_sources) | set(current_sources))
+                        if saved_sources.get(name) != current_sources.get(name)
+                    )
+                else:
+                    differing_sources = "invalid saved measurement source map"
+                raise TheoryError(
+                    "Paper measurement definitions changed; analysis migration is required"
+                    f" for bundle {bundle}; differing source files: {differing_sources}"
+                )
         summary = read_object(contained_path(bundle, "summary.json"))
         audit = read_object(contained_path(bundle, "audit.json"))
         if not summary.get("complete") or audit.get("blocking", True):
@@ -369,6 +393,16 @@ def load_paper_inputs(
                 raise TheoryError(
                     f"Missing required paper columns for {stem}: {sorted(missing)}"
                 )
+        peak = summary["figures"].get("branch_gap_peak_step", {})
+        if peak.get("status") in {"available", "complete"} and not peak.get("trajectory_peak_summary"):
+            # Presentation disclosure only: no statistics are computed and no
+            # saved numerical metadata is rewritten during compatible plotting.
+            peak["peak_summary_status"] = "not_saved_in_this_compatible_bundle"
+            peak["peak_summary_details"] = (
+                "Saved weighted bins and shape/status counts are retained. Additional descriptive "
+                "peak quartiles/initialization-mass summary was not saved; plotting does not reduce "
+                "statistics. To save it through the explicit analysis-only scalar reduction, run " + command
+            )
         return config, summary, audit, frames
     except (KeyError, ValueError, OSError, TheoryError) as error:
         raise TheoryError(f"{error}. Run {command}") from error
@@ -462,10 +496,11 @@ def staged_publication(output, *, archive_previous=False):
     )
     try:
         if output.exists():
-            for path in output.rglob("*"):
-                reject_symlinks(path)
+            # Preserve unrelated user links without following them. Individual
+            # scientific inputs and renderer destinations still reject symlinks.
             shutil.copytree(
-                output, stage, dirs_exist_ok=True, copy_function=_copy_to_stage
+                output, stage, dirs_exist_ok=True, copy_function=_copy_to_stage,
+                symlinks=True,
             )
         yield stage
         atomic_write_json(
@@ -521,7 +556,11 @@ def _finish_backup(output, backup, archive_previous):
             "files": {
                 p.relative_to(backup).as_posix(): file_sha256(p)
                 for p in backup.rglob("*")
-                if p.is_file()
+                if not p.is_symlink() and p.is_file()
+            },
+            "preserved_symlinks": {
+                p.relative_to(backup).as_posix(): os.readlink(p)
+                for p in backup.rglob("*") if p.is_symlink()
             },
         },
     )
@@ -529,46 +568,165 @@ def _finish_backup(output, backup, archive_previous):
 
 
 def retire_obsolete_figures(stage, previous):
-    """Retire only recorded, unchanged outputs absent from the new manifest."""
-    current = read_object(stage / "figure_manifest.json")
-    obsolete = {
-        name: digest
-        for name, digest in previous.get("files", {}).items()
-        if name not in current["files"] and Path(name).suffix in {".png", ".pdf"}
-    }
-    if not obsolete:
-        return
-    archive = contained_path(stage, "archive/retired-" + canonical_hash(obsolete)[:16])
-    for name, digest in obsolete.items():
-        source = contained_path(stage, name)
-        if not source.exists():
+    """Apply the explicit presentation migration inside the role transaction.
+
+    Only enumerated, hash-verified regular images may be unlinked in the stage.
+    The original bundle remains the rollback copy until the directory swap
+    commits. Conflicts are reported, never interpreted as deletion permission.
+    """
+    from .paper_registry import FIGURE_RETIREMENTS, REGISTRY_VERSION
+
+    stage = reject_symlinks(stage)
+    manifest_path = contained_path(stage, "figure_manifest.json")
+    current = read_object(manifest_path)
+    if not current.get("complete"):
+        raise TheoryError("Cannot retire figures before replacement publication completes")
+    owned = {**previous.get("preserved_files", {}), **previous.get("files", {})}
+    active = current.get("files", {})
+    ledger_path = contained_path(stage, "figure_retirement.json")
+    prior = read_object(ledger_path) if ledger_path.is_file() else {}
+    if ledger_path.exists() and (
+        prior.get("kind") != "theory_figure_retirement"
+        or prior.get("schema_version") != 1
+        or not isinstance(prior.get("records"), list)
+        or any(not isinstance(row, dict) or not isinstance(row.get("old_path"), str)
+               for row in prior.get("records", []))
+    ):
+        raise TheoryError("Refusing to replace unrecognized figure_retirement.json; existing file preserved")
+    prior_records = {row["old_path"]: row for row in prior.get("records", [])}
+    records, completed = {}, set()
+
+    def regular_image(relative):
+        path = contained_path(stage, relative)
+        if not path.exists():
+            return path, None
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise TheoryError("Not a regular renderer image")
+        return path, file_sha256(path)
+
+    def replacement_ready(specification):
+        if specification["new_category"] is None:
+            return True
+        for suffix in ("png", "pdf"):
+            name = f"{specification['new_category']}/{specification['stem']}.{suffix}"
+            try:
+                _path, digest = regular_image(name)
+            except (OSError, TheoryError):
+                return False
+            if digest is None or active.get(name) != digest:
+                return False
+        return True
+
+    allowed = {}
+    for specification in FIGURE_RETIREMENTS:
+        for suffix in ("png", "pdf"):
+            name = f"{specification['old_category']}/{specification['stem']}.{suffix}"
+            allowed[name] = specification
+            destination = (f"{specification['new_category']}/{specification['stem']}.{suffix}"
+                           if specification["new_category"] else None)
+            row = {"old_path": name, "stable_stem": specification["stem"],
+                   "sha256": owned.get(name), "destination": destination,
+                   "reason": specification["reason"]}
+            try:
+                path, digest = regular_image(name)
+            except (OSError, TheoryError) as error:
+                row.update(status="conflict", decision="preserved_unsafe_path", detail=str(error).replace(str(stage), "<active_bundle>"))
+            else:
+                if digest is None:
+                    # Retain the receipt of a completed deletion across reruns.
+                    if prior_records.get(name, {}).get("status") in {"removed", "already_absent"}:
+                        row = prior_records[name]
+                    else:
+                        row.update(status="already_absent", decision="no_file_to_retire")
+                    completed.add(name)
+                elif name in active:
+                    row.update(status="conflict", decision="preserved_active_output")
+                elif name not in owned:
+                    row.update(status="conflict", decision="preserved_unowned", observed_sha256=digest)
+                elif digest != owned[name]:
+                    row.update(status="conflict", decision="preserved_modified", observed_sha256=digest)
+                elif not replacement_ready(specification):
+                    row.update(status="conflict", decision="preserved_missing_replacement_pair")
+                else:
+                    path.unlink()
+                    completed.add(name)
+                    row.update(status="removed", decision="moved" if destination else "retired")
+            records[name] = row
+
+    # Invalid historical ownership paths grant no authority, even if their
+    # basename resembles an authorized retired figure. Never open those paths.
+    for name, digest in owned.items():
+        if name in allowed or name in active or Path(name).suffix not in {".png", ".pdf"}:
             continue
-        if file_sha256(source) != digest:
-            raise TheoryError(f"Refusing to retire modified owned figure: {name}")
-        target = contained_path(archive, name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(source, target)
-    atomic_write_json(
-        archive / "manifest.json", {"original_paths_and_hashes": obsolete}
-    )
+        try:
+            contained_path(stage, name)
+        except (OSError, TheoryError) as error:
+            records[name] = {"old_path": name, "stable_stem": Path(name).stem,
+                             "sha256": digest, "destination": None, "status": "conflict",
+                             "decision": "preserved_unsafe_path", "reason": "Outside the authorized migration",
+                             "detail": str(error).replace(str(stage), "<active_bundle>")}
+    preserved = {name: digest for name, digest in owned.items()
+                 if name not in active and name not in completed}
+    current["preserved_files"] = preserved
+    atomic_write_json(manifest_path, current)
+    ledger = {"kind": "theory_figure_retirement", "schema_version": 1, "registry_version": REGISTRY_VERSION,
+              "scope": "Explicit renderer image migration in this active bundle only",
+              "records": [records[name] for name in sorted(records)],
+              "preserved_other_owned_paths": sorted(name for name in preserved if name not in records),
+              "other_files_policy": "All non-enumerated files and scientific artifacts are preserved"}
+    # Deterministic content: a second plot does not create another receipt/archive.
+    if ledger != prior:
+        atomic_write_json(ledger_path, ledger)
+    conflicts = [row for row in records.values() if row["status"] == "conflict"]
+    for row in conflicts:
+        print(f"[Theory] Figure migration conflict: {row['old_path']} ({row['decision']}); preserved", flush=True)
+    return ledger
+
+
+def _validate_presentation_registry(bundle):
+    """A known presentation registry may migrate; unrelated user JSON may not."""
+    from .paper_registry import COMPATIBLE_PRESENTATION_REGISTRY_VERSIONS
+
+    path = contained_path(bundle, "registry.json")
+    if not path.exists():
+        return
+    previous = read_object(path)
+    if (previous.get("version") not in COMPATIBLE_PRESENTATION_REGISTRY_VERSIONS
+            or not isinstance(previous.get("figures"), list)
+            or any(not isinstance(entry, dict) or not isinstance(entry.get("stem"), str)
+                   for entry in previous.get("figures", []))):
+        raise TheoryError("Refusing to replace unrecognized registry.json; existing file preserved")
 
 
 def render_saved_paper(bundle, *, expected_config=None, diagnostics=False):
     from .paper_plotting import render_paper
+    from .progress import StageProgress
 
     bundle = reject_symlinks(bundle)
     with publication_lock(bundle):
         load_paper_inputs(
             bundle, expected_config=expected_config, diagnostics=diagnostics
         )
+        _validate_presentation_registry(bundle)
         previous = (
             read_object(bundle / "figure_manifest.json")
             if (bundle / "figure_manifest.json").exists()
             else {}
         )
-        with staged_publication(bundle) as stage:
-            result = render_paper(stage, diagnostics=diagnostics)
-            retire_obsolete_figures(stage, previous)
+        with StageProgress("Publishing saved paper bundle"), staged_publication(bundle) as stage:
+            render_paper(stage, diagnostics=diagnostics)
+            with StageProgress("Applying verified figure placement and retirement"):
+                retire_obsolete_figures(stage, previous)
+            # registry.json is presentation metadata; immutable scientific
+            # run_config/summary and plot_data remain byte-for-byte unchanged.
+            from .paper_registry import REGISTRY_VERSION, paper_registry
+            saved = read_object(contained_path(stage, "run_config.json"))
+            counterfactual = saved_scientific_configuration(saved).get("counterfactual_unconditional", False)
+            atomic_write_json(contained_path(stage, "registry.json"), {
+                "version": REGISTRY_VERSION,
+                "figures": paper_registry(diagnostics=True, counterfactual=counterfactual),
+            })
+            result = read_object(contained_path(stage, "figure_manifest.json"))
     return result
 
 

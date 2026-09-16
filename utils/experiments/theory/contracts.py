@@ -50,6 +50,9 @@ def read_object(path: Path) -> dict:
 DIRECT_FORMULA_VERSION = "direct-seven-statements-1"
 EVIDENCE_FORMULA_VERSION = "fixed-seven-statement-evidence-1"
 DIRECT_SCIENCE_DEFAULTS = {
+    "mean_source": "reference-min-snr",
+    "num_mean_samples": 10000,
+    "mean_seed": 0,
     "num_loss_seeds": 64,
     "loss_seed": 0,
     "loss_timesteps": "initial",
@@ -92,6 +95,9 @@ def numerical_config(
     center="reference-initial",
     cached_baseline=None,
     target_error_tolerance=None,
+    mean_source="reference-min-snr",
+    num_mean_samples=10000,
+    mean_seed=0,
     num_loss_seeds=64,
     loss_seed=0,
     loss_timesteps="initial",
@@ -123,6 +129,8 @@ def numerical_config(
     if isinstance(numerical_variation_absolute_width, bool) or not math.isfinite(float(numerical_variation_absolute_width)) or float(numerical_variation_absolute_width) <= 0:
         raise TheoryError("numerical_variation_absolute_width must be finite and positive")
     numerical["numerical_variation_absolute_width"] = float(numerical_variation_absolute_width)
+    if mean_source not in {"reference-min-snr", "reference-initial", "cached-targets"}:
+        raise TheoryError("mean_source must be reference-min-snr, reference-initial, or cached-targets")
     if loss_timesteps not in {"initial", "saved"}:
         raise TheoryError("loss_timesteps must be initial or saved")
     if reference_law not in {"cached-targets", "manifest"}:
@@ -151,6 +159,9 @@ def numerical_config(
         num_inference_steps=int(num_inference_steps),
         num_seeds=int(num_seeds),
         center=center,
+        mean_source=mean_source,
+        num_mean_samples=_integer_option(num_mean_samples, "num_mean_samples", minimum=2),
+        mean_seed=_integer_option(mean_seed, "mean_seed", minimum=0),
         num_loss_seeds=_integer_option(num_loss_seeds, "num_loss_seeds", minimum=1),
         loss_seed=_integer_option(loss_seed, "loss_seed", minimum=0),
         loss_timesteps=loss_timesteps,
@@ -178,6 +189,8 @@ def numerical_config(
         if any(step >= result["num_inference_steps"] - 1 for step in steps):
             raise TheoryError("Counterfactual snapshots require a defined next prediction: 0 <= k < K_steps-1")
         result.update(counterfactual_unconditional=True, counterfactual_steps=steps)
+    if result["mean_seed"] > MAX_SEED:
+        raise TheoryError(f"mean_seed must not exceed {MAX_SEED}")
     if result["loss_seed"] > MAX_SEED:
         raise TheoryError(f"loss_seed must not exceed {MAX_SEED}")
     # Use the existing helper for validation and all float-dependent paths.

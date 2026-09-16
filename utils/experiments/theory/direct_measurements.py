@@ -46,7 +46,7 @@ def _put_norm(result, stem, value, dimension):
 
 
 def corollary3_metrics(mu, mc, target, mean, guidance):
-    """Both full-vector limits, with separate g and g-1 coefficients."""
+    """Full-vector comparisons about one centre, with g and g-1 coefficients."""
     mu, mc, target, mean = [torch.as_tensor(x).to(dtype=torch.float64) for x in (mu, mc, target, mean)]
     ndim, d, g = target.ndim, target.numel(), float(guidance)
     rc, bu = mc - target, mu - mean
@@ -96,7 +96,7 @@ def current_reference_metrics(state, mu, mc, target, law, target_id, alpha, sigm
                   "direct_radius_tail_status": "unavailable_current_reference",
                   "direct_reference_target_positive_mass": target_id is not None}
         for name in ("conditional_error", "unconditional_reference_error", "unconditional_target_error",
-                     "reference_target_error", "reference_mean_offset", "radius_tail", "branch_gap", "lemma6_rhs", "lemma6_gap"):
+                     "reference_target_error", "reference_mean_offset", "reference_to_bank_mean_error", "radius_tail", "branch_gap", "lemma6_rhs", "lemma6_gap"):
             value = _norm(mc - target, ndim) if name == "conditional_error" else _norm(mu - target, ndim) if name == "unconditional_target_error" else _norm(mc - mu, ndim) if name in {"branch_gap", "lemma6_gap"} else nan
             _put_norm(result, "direct_" + name, value, d)
         return result, torch.full((len(flat), support.size), torch.nan, dtype=torch.float64, device=flat.device), torch.full_like(mu, torch.nan)
@@ -140,7 +140,8 @@ def current_reference_metrics(state, mu, mc, target, law, target_id, alpha, sigm
         ("conditional_error", ec), ("unconditional_reference_error", eu),
         ("unconditional_target_error", _norm(mu - target, ndim)),
         ("reference_target_error", ref_target),
-        ("reference_mean_offset", _norm(mean - law.mean_vector, ndim)),
+        ("reference_mean_offset", _norm(mean - law.theory_mean_vector, ndim)),
+        ("reference_to_bank_mean_error", _norm(mean - law.mean_vector, ndim)),
         ("radius_tail", radius_tail), ("branch_gap", gap),
         ("lemma6_rhs", rhs), ("lemma6_gap", gap),
     ):
@@ -387,7 +388,7 @@ def measure_direct_record(log, record, law, config, *, adapter, terminal_sscd=No
     target = target.to(device=device, dtype=torch.float64)
     target_id = law.target_id_for(target, required=False)
     g = float(config["guidance_scale"])
-    mean = law.mean_vector
+    mean = law.theory_mean_vector
     prompt_digest = hashlib.sha256(str(meta.get("prompt_raw", "")).encode("utf-8")).hexdigest()
     ambiguous_prompts = {
         item["prompt_utf8_sha256"]

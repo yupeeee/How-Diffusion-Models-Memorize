@@ -1,3 +1,5 @@
+> The CPU Decimal execution policy below is historical. Current computation uses the CUDA-only interval backend and budget controls documented in [gpu_theory_computation.md](gpu_theory_computation.md); it does not execute the Decimal fallback or provide arbitrary decimal-digit precision. The fixed-input, source-sensitivity and reference-law distinctions remain in force.
+
 > The active figure organization is now [four_stage_experiments.md](four_stage_experiments.md). Seven-primary filenames and roles below describe the preceding design; compatible mathematical measurements and numerical contracts remain reusable. Matching LaTeX is unavailable; historical label strings are author-supplied, not verified source labels.
 
 # Precision and presentation refinement of the fixed evidence suite

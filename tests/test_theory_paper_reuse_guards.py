@@ -118,7 +118,8 @@ def test_source_selection_only_requires_current_integration_for_diagnostics(
 
 def test_direct_integral_recipe_is_required_without_diagnostics(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from utils.experiments.theory import cache_reader, direct_reduce, four_stage_reduce
+    from utils.experiments.theory import cache_reader, direct_reduce, four_stage_reduce, reduce as shared_reduce
+    monkeypatch.setattr(shared_reduce, "_resolve_theory_devices", lambda _device: ("cuda:0",))
     # The precision wrapper validates source metadata before consulting the
     # existing resumable direct stage; this fixture isolates that routing.
     monkeypatch.setattr(cache_reader, "discover_sources", lambda *a, **k: SimpleNamespace())

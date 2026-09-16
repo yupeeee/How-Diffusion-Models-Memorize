@@ -157,7 +157,7 @@ def input_recipe():
 def policy_recipe(config):
     from .numerical_refinement import NumericalPolicy
     policy = NumericalPolicy(**{name.removeprefix("numerical_"): config[name] for name in NUMERICAL_KEYS})
-    return {"policy": policy.identity(), "source_code": _sources("numerical_reduce.py", "numerical_refinement.py", "numerical_intervals.py", "numerical_screening.py")}
+    return {"policy": policy.identity(), "source_code": _sources("numerical_reduce.py", "numerical_refinement.py", "gpu_refinement.py", "gpu_intervals.py", "numerical_screening.py")}
 
 
 def _input_complete(path, identity):

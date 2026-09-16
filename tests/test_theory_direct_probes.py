@@ -150,10 +150,34 @@ def test_gaussian_reference_uses_declared_nonzero_mean_and_keeps_log_bound_overf
     values = gaussian_reference_metrics(z, torch.zeros_like(z), posterior, mean, 0.6, 0.8, 1000)
     expected = (z / 0.6 - mean).flatten(1).norm(dim=1)
     torch.testing.assert_close(values["learned_mean_error_l2"], expected)
+    # d=4: the zero baseline differs from the declared nonzero mean and is
+    # normalized once, while the original mean-centered decomposition remains.
+    for name, raw in (("learned_zero_error", 2 / 0.6),
+                      ("reference_zero_error", 6.0), ("mean_norm", 4.0)):
+        torch.testing.assert_close(values[name + "_l2"], torch.full((2,), raw, dtype=torch.float64))
+        torch.testing.assert_close(values[name + "_rmse"], torch.full((2,), raw / 2, dtype=torch.float64))
+    assert not torch.equal(values["learned_zero_error_l2"], values["learned_mean_error_l2"])
+    assert not torch.equal(values["reference_zero_error_l2"], values["reference_mean_error_l2"])
+    serialized = probes._rows(values, 2, {"input_source": "gaussian_probe"})
+    assert all(row["mean_norm_rmse"] == 2.0 for row in serialized)
     assert values["baseline_slack_l2"].ge(-1e-12).all()
     assert values["baseline_vector_residual_l2"].lt(1e-12).all()
     assert values["reference_bound_overflow"].all()
     assert torch.isfinite(values["reference_bound_log_l2"]).all()
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is not available"))])
+def test_gaussian_zero_and_mean_baselines_agree_only_for_zero_mean_on_device(device):
+    z = torch.tensor([[1.0, -2.0], [-3.0, 4.0]], device=device, dtype=torch.float64)
+    posterior = z * 0.25
+    values = gaussian_reference_metrics(z, torch.zeros_like(z), posterior, z[0] * 0, 0.6, 0.8, 2.0)
+    for name in ("learned", "reference"):
+        torch.testing.assert_close(values[name + "_zero_error_l2"], values[name + "_mean_error_l2"])
+        torch.testing.assert_close(values[name + "_zero_error_rmse"], values[name + "_mean_error_rmse"])
+        assert values[name + "_zero_error_rmse"].device == z.device
+    assert values["mean_norm_l2"].eq(0).all()
+    assert values["mean_norm_rmse"].device == z.device
 
 
 def test_streams_are_domain_separated_order_and_batch_invariant():
@@ -244,7 +268,7 @@ def probe_sources(tmp_path):
 
 def test_task_plan_shares_unconditional_bank_and_preserves_independent_recipes(probe_sources):
     sources, records, law, schedule = probe_sources
-    config = {"num_loss_seeds": 3, "num_unconditional_loss_seeds": 4}
+    config = {"num_loss_seeds": 3, "num_unconditional_loss_seeds": 4, "mean_source": "cached-targets"}
     tasks = probes.plan_probe_tasks(sources, records, law, schedule, config)
     counts = pd.Series([t["table"] for t in tasks]).value_counts().to_dict()
     assert counts == {"gaussian_reference": 3, "forward_loss_draws": 2, "gaussian_conditional": 2}
@@ -274,13 +298,15 @@ def test_law_and_source_worker_inputs_are_files_not_tensor_ipc(probe_sources, tm
     assert len(schedule["timesteps"]) == 3
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for learned-probe numerical worker")
 @pytest.mark.parametrize("batch_size", [1, 8])
 def test_worker_uses_fixed_gaussian_inputs_all_native_levels_and_resumes(probe_sources, tmp_path, monkeypatch, batch_size):
     sources, records, law, schedule = probe_sources
-    config = {"num_loss_seeds": 3, "num_unconditional_loss_seeds": 4, "loss_timesteps": "saved"}
+    law = law.to("cuda:0")
+    config = {"num_loss_seeds": 3, "num_unconditional_loss_seeds": 4, "loss_timesteps": "saved", "mean_source": "cached-targets"}
     tasks = probes.plan_probe_tasks(sources, records, law, schedule, config)
-    monkeypatch.setattr(probes, "_read_worker_inputs", lambda inputs: (sources, law, schedule))
-    gaussian = probes.make_initial_noise([0, 1], [1, 2, 2])
+    monkeypatch.setattr(probes, "_read_worker_inputs", lambda inputs, **kwargs: (sources, law, schedule))
+    gaussian = probes.make_initial_noise([0, 1], [1, 2, 2]).to("cuda:0")
     cached_reads = []
 
     def initial(sources, record, bank, schedule):
@@ -290,7 +316,7 @@ def test_worker_uses_fixed_gaussian_inputs_all_native_levels_and_resumes(probe_s
 
     monkeypatch.setattr(probes, "_cached_initial", initial)
     replica_calls, encoded, evaluated = [], [], []
-    components = SimpleNamespace(device=torch.device("cpu"), inference_dtype=torch.float32, tokenizer=None, text_encoder=None, unet=None,
+    components = SimpleNamespace(device=torch.device("cuda:0"), inference_dtype=torch.float32, tokenizer=None, text_encoder=None, unet=None,
                                  device_metadata={"parameter_dtypes": {"unet": ["float32"]}}, package_versions={"torch": "synthetic"})
 
     def replica(*args):
@@ -303,13 +329,13 @@ def test_worker_uses_fixed_gaussian_inputs_all_native_levels_and_resumes(probe_s
 
     def evaluate(samples, *, condition, timestep, **kwargs):
         evaluated.append((condition, timestep, samples.clone()))
-        return torch.zeros_like(samples), {"input_quantization_l2": torch.zeros(len(samples)), "prediction_conversion_dtype": "float64"}
+        return torch.zeros_like(samples), {"input_quantization_l2": torch.zeros(len(samples), device=samples.device), "prediction_conversion_dtype": "float64"}
 
     monkeypatch.setattr(probes, "_load_replica", replica)
     monkeypatch.setattr(probes, "encode_prompt_condition", encode)
     monkeypatch.setattr(probes, "_prediction_microbatch", evaluate)
     destination = tmp_path / "cache"
-    result = probes._run_probe_worker(inputs={}, tasks=tasks, output_directory=destination, device="cpu", batch_size=batch_size, worker_count=1)
+    result = probes._run_probe_worker(inputs={}, tasks=tasks, output_directory=destination, device="cuda:0", batch_size=batch_size, worker_count=1)
     assert not result["failures"]
     assert len(replica_calls) == 1
     assert sorted(encoded) == ["", " shared prompt\n"]
@@ -330,7 +356,7 @@ def test_worker_uses_fixed_gaussian_inputs_all_native_levels_and_resumes(probe_s
     frame = pd.read_parquet(probes._task_paths(destination, initial_conditional)[0])
     assert frame.terminal_sscd_matched_initialization.all()
     before = len(evaluated)
-    repeated = probes._run_probe_worker(inputs={}, tasks=list(reversed(tasks)), output_directory=destination, device="cpu", batch_size=1, worker_count=1)
+    repeated = probes._run_probe_worker(inputs={}, tasks=list(reversed(tasks)), output_directory=destination, device="cuda:0", batch_size=1, worker_count=1)
     assert not repeated["failures"] and len(evaluated) == before
     assert len(replica_calls) == 1
     # A damaged scalar task is recomputed without discarding completed siblings.
@@ -338,7 +364,7 @@ def test_worker_uses_fixed_gaussian_inputs_all_native_levels_and_resumes(probe_s
     path, marker = probes._task_paths(destination, broken)
     preserved = {str(probes._task_paths(destination, t)[0]): file_sha256(probes._task_paths(destination, t)[0]) for t in tasks if t != broken}
     path.write_bytes(b"interrupted derived shard")
-    repaired = probes._run_probe_worker(inputs={}, tasks=tasks, output_directory=destination, device="cpu", batch_size=8, worker_count=1)
+    repaired = probes._run_probe_worker(inputs={}, tasks=tasks, output_directory=destination, device="cuda:0", batch_size=8, worker_count=1)
     assert not repaired["failures"]
     assert probes._valid_task(destination, broken)
     assert read_json(marker)["rows"] == 3
@@ -412,3 +438,64 @@ def test_cached_prediction_batches_reject_incomplete_bank_before_reduction():
     with pytest.raises(probes.TheoryError, match="identical batch/latent shapes"):
         list(probes.cached_prediction_batches(torch.zeros(20, 1, 2, 2), torch.zeros(8, 1, 2, 2),
                                              torch.zeros(20, 1, 2, 2), batch_size=8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GPU probe reductions")
+def test_probe_predictions_and_metric_tensors_remain_on_cuda():
+    class Denoiser(torch.nn.Module):
+        def forward(self, sample, timestep, **kwargs):
+            return (torch.zeros_like(sample),)
+
+    class Scheduler:
+        config = {"prediction_type": "epsilon"}
+        alphas_cumprod = torch.tensor([0.36], dtype=torch.float64)
+
+        def scale_model_input(self, sample, timestep):
+            return sample
+
+    samples = torch.arange(8, dtype=torch.float64).reshape(2, 1, 2, 2) / 10
+    components = SimpleNamespace(device=torch.device("cuda:0"), inference_dtype=torch.float32, unet=Denoiser().cuda())
+    prediction, precision = probes._prediction_microbatch(
+        samples, condition=torch.ones(1, 2, 3, device="cuda:0"), timestep=0,
+        components=components, scheduler=Scheduler(),
+    )
+    assert prediction.device.type == "cuda"
+    assert all(value.device.type == "cuda" for value in precision.values() if isinstance(value, torch.Tensor))
+    cuda_samples = samples.cuda()
+    values = probes.conditional_gaussian_metrics(torch.zeros_like(samples[0]), cuda_samples, prediction, .6, .8)
+    assert all(value.device.type == "cuda" for value in values.values() if isinstance(value, torch.Tensor))
+    expected = probes.conditional_gaussian_metrics(torch.zeros_like(samples[0]), samples, prediction.cpu(), .6, .8)
+    for name, value in values.items():
+        if isinstance(value, torch.Tensor):
+            torch.testing.assert_close(value.cpu(), expected[name])
+    batches = list(probes.cached_prediction_batches(cuda_samples, prediction, cuda_samples, batch_size=1))
+    for _, _, epsilon, cached_precision in batches:
+        assert epsilon.device.type == "cuda"
+        assert all(value.device.type == "cuda" for value in cached_precision.values() if isinstance(value, torch.Tensor))
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is not available"))])
+def test_reference_mean_comparison_adds_exact_bank_offset_to_the_analytical_bound(device):
+    z = torch.tensor([[1., -2.], [-3., 4.]], dtype=torch.float64, device=device)
+    prediction = torch.zeros_like(z)
+    posterior = torch.zeros_like(z)  # A declared singleton law at the origin.
+    bank_mean = torch.zeros(2, dtype=torch.float64, device=device)
+    selected_mean = torch.tensor([3., 4.], dtype=torch.float64, device=device)
+    values = gaussian_reference_metrics(z, prediction, posterior, selected_mean,
+                                        .6, .8, 0., bank_mean=bank_mean)
+    bank_values = gaussian_reference_metrics(z, prediction, posterior, bank_mean, .6, .8, 0.)
+    assert values["bank_reference_bound_l2"].eq(0).all()
+    assert torch.isneginf(values["bank_reference_bound_log_l2"]).all()
+    torch.testing.assert_close(values["reference_bound_l2"], torch.full((2,), 5., device=device, dtype=torch.float64))
+    torch.testing.assert_close(values["reference_bound_log_l2"], values["reference_bound_l2"].log())
+    torch.testing.assert_close(values["reference_mean_error_l2"], values["mean_offset_l2"])
+    assert values["reference_to_bank_mean_error_l2"].eq(0).all()
+    assert values["bank_mean_norm_l2"].eq(0).all()
+    assert values["mean_norm_l2"].eq(5).all()
+    for field in ("unconditional_reference_error_l2", "learned_zero_error_l2", "reference_zero_error_l2"):
+        torch.testing.assert_close(values[field], bank_values[field], rtol=0, atol=0)
+    assert values["baseline_slack_l2"].ge(-1e-12).all()
+    assert values["baseline_squared_identity_residual"].abs().lt(1e-12).all()
+    assert values["reference_bound_mean_offset_included"] is True
+    assert values["mean_offset_rmse"].device == z.device

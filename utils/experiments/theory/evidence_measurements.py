@@ -71,7 +71,7 @@ def injection_geometry(mu, mc, target, mean, guidance):
         "evidence_injection_direction_tolerance_l2": float(direction_tolerance),
         "evidence_injection_degeneracy_rule": "||v||==0 or ||v||<=64*eps_float64*(||target||+||mean||)",
         "evidence_injection_guidance_cancellation": "exact_algebra_at_fixed_guidance_not_a_sweep",
-        "evidence_injection_reference": "mu_K_exact_declared_atom_mean",
+        "evidence_injection_reference": "selected_theory_mean_with_separate_finite_bank_reference",
     }
     _units(result, "evidence_injection_absolute_error", absolute, dimension)
     _units(result, "evidence_injection_conditional_target_error", _norm(mc - target, ndim), dimension)
@@ -426,7 +426,10 @@ def measure_evidence_record(preloaded, record, law, config, adapter,
         z[:, 0].to(device), epsilon_u[:, 0].to(device), epsilon_c[:, 0].to(device),
         initial_coeff.alpha, initial_coeff.sigma, g, latent_ndim=target.ndim,
     )
-    geometry = injection_geometry(initial_mu, initial_mc, target, law.mean_vector, g)
+    geometry = injection_geometry(initial_mu, initial_mc, target, law.theory_mean_vector, g)
+    mean_receipt = law.theory_mean_metadata
+    geometry["evidence_injection_mean_source"] = str(mean_receipt.get("source", "declared_finite_bank_mean"))
+    geometry["evidence_injection_mean_sha256"] = str(mean_receipt.get("vector_sha256", law.metadata.get("mean_sha256", "")))
     initial = _scalar_frame(geometry, first)
     trajectory_source = core_tables["trajectory"]
     trajectory = trajectory_source.loc[:, list(IDENTITY_KEYS)].copy()

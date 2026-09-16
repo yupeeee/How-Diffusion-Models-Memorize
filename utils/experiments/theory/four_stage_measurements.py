@@ -15,13 +15,13 @@ import torch
 
 from .contracts import TheoryError
 from .evidence_reduce import KEYS
-from .evidence_measurements import _ordered_rows, _scalar_frame
+from .evidence_measurements import _norm, _ordered_rows, _scalar_frame
 from .metrics import clean_estimates
 from .numerical_refinement import NumericalPolicy, _gain_retry_needed, stable_gain
-from .numerical_intervals import ArithmeticBudgetExceeded, Directed, Interval, interval_gain
-from decimal import Decimal, DecimalException
+from .gpu_intervals import ArithmeticBudgetExceeded, GpuDirected
+from .gpu_refinement import interval_gain, require_cuda
 
-FOUR_STAGE_VERSION = "four-stage-measurements-1"
+FOUR_STAGE_VERSION = "four-stage-measurements-cuda-3"
 SHAPE_ATOL = 1e-12
 SHAPE_RTOL = 1e-10
 SHAPE_FIXED_FRACTIONS = (.25, .5, .75)
@@ -35,6 +35,90 @@ def dose_grid(guidance):
     # Unsupported guidance domains still receive the standard inapplicable
     # curve receipt. Never place an out-of-range conditional marker on [0,1].
     return sorted({j / 40 for j in range(41)} | conditional)
+
+
+def corollary3_guidance_fit(mu, mc, target, mean, guidance):
+    """Signed no-intercept fit of the full guided clean estimate about selected mu.
+
+    Fit y=xhat_g-mu to a*v, where v=x_star-mu and xhat_g=xhat_u+g*(xhat_c-xhat_u).
+    The unit-vector form is the one-column least-squares closed form, without
+    squaring a tiny direction norm. This is not a fit of the CFG injection alone.
+    """
+    device = require_cuda(torch.as_tensor(mu).device)
+    mu, mc, target, mean = [torch.as_tensor(value, device=device, dtype=torch.float64)
+                            for value in (mu, mc, target, mean)]
+    if (target.ndim < 1 or mu.ndim != target.ndim + 1 or mu.shape != mc.shape
+            or tuple(mu.shape[1:]) != tuple(target.shape) or target.shape != mean.shape or len(mu) == 0):
+        raise TheoryError("Corollary 3 guidance-fit latent shapes differ")
+    ndim, dimension, count = target.ndim, target.numel(), len(mu)
+    g = float(guidance)
+    v = target - mean
+    vnorm = _norm(v, ndim)
+    eps = torch.finfo(torch.float64).eps
+    direction_tolerance = 64 * eps * (_norm(target, ndim) + _norm(mean, ndim))
+    nan = torch.full((count,), torch.nan, dtype=torch.float64, device=device)
+    scalar_fields = ("cor3_guidance_fit", "cor3_guidance_fit_residual_rmse",
+                     "cor3_guidance_fit_orthogonality_l2", "cor3_guidance_fit_orthogonality_tolerance_l2",
+                     "cor3_guidance_fit_pythagorean_residual_scaled", "cor3_guidance_fit_pythagorean_tolerance_scaled")
+    result = {name: nan.clone() for name in scalar_fields}
+    result.update(cor3_guidance_fit_direction_l2=vnorm,
+                  cor3_guidance_fit_direction_tolerance_l2=direction_tolerance,
+                  cor3_guidance_fit_applicable=torch.zeros(count, dtype=torch.bool, device=device),
+                  cor3_guidance_fit_definition="argmin_a ||(xhat_u+g*(xhat_c-xhat_u)-selected_mu)-a*(target-selected_mu)||^2; signed_unconstrained_no_intercept",
+                  cor3_guidance_fit_qa_scope="dimension_scaled_float64_projection_assessment_not_certified_enclosure",
+                  cor3_guidance_fit_degeneracy_rule="||v||==0 or ||v||<=64*eps_float64*(||target||+||selected_mu||)")
+    finite_reference = bool(torch.isfinite(target).all() & torch.isfinite(mean).all())
+    finite_direction = bool(torch.isfinite(vnorm) & torch.isfinite(direction_tolerance))
+    if (not finite_reference or not finite_direction or not math.isfinite(g)
+            or bool(vnorm == 0) or bool(vnorm <= direction_tolerance)):
+        reason = ("nonfinite_target_or_mean" if not finite_reference else
+                  "nonfinite_guidance" if not math.isfinite(g) else
+                  "exact_zero_target_direction" if bool(vnorm == 0) else
+                  "arithmetic_unresolved_target_direction")
+        result["cor3_guidance_fit_status"] = [reason] * count
+        result["cor3_guidance_fit_qa"] = ["numerically_unresolved" if reason == "arithmetic_unresolved_target_direction" else "not_applicable"] * count
+        return result
+
+    flat_mu, flat_mc = mu.flatten(1), mc.flatten(1)
+    finite_inputs = torch.isfinite(flat_mu).all(1) & torch.isfinite(flat_mc).all(1)
+    guided = flat_mu + g * (flat_mc - flat_mu)
+    response = guided - mean.reshape(1, -1)
+    unit = v.flatten() / vnorm
+    projection = (response * unit).sum(1)
+    fitted = projection / vnorm
+    residual = response - fitted[:, None] * v.flatten()
+    response_norm, residual_norm = _norm(response, 1), _norm(residual, 1)
+    orthogonality = (residual * unit).sum(1)
+    # These finite-precision checks assess the measured projection; they do not
+    # certify a real-arithmetic solution or introduce an epsilon fit denominator.
+    qa_roundoff = 256 * eps * max(1, dimension)
+    orthogonal_tolerance = (qa_roundoff * response_norm + qa_roundoff * residual_norm
+                            + qa_roundoff * projection.abs())
+    qa_scale = torch.maximum(response_norm, torch.maximum(residual_norm, projection.abs()))
+    qa_scale = torch.where(qa_scale > 0, qa_scale, torch.ones_like(qa_scale))
+    response_squared = (response / qa_scale[:, None]).square().sum(1)
+    residual_squared = (residual / qa_scale[:, None]).square().sum(1)
+    projected_squared = (projection / qa_scale).square()
+    pythagorean_residual = response_squared - residual_squared - projected_squared
+    pythagorean_tolerance = qa_roundoff * (1 + response_squared + residual_squared + projected_squared)
+    finite_result = (finite_inputs & torch.isfinite(response).all(1) & torch.isfinite(fitted)
+                     & torch.isfinite(residual).all(1) & torch.isfinite(residual_norm)
+                     & torch.isfinite(orthogonality) & torch.isfinite(orthogonal_tolerance)
+                     & torch.isfinite(pythagorean_residual) & torch.isfinite(pythagorean_tolerance))
+    qa_pass = (finite_result & (orthogonality.abs() <= orthogonal_tolerance)
+               & (pythagorean_residual.abs() <= pythagorean_tolerance))
+    values = (fitted, residual_norm / math.sqrt(dimension), orthogonality, orthogonal_tolerance,
+              pythagorean_residual, pythagorean_tolerance)
+    result.update({name: torch.where(finite_result, value, nan) for name, value in zip(scalar_fields, values, strict=True)})
+    result["cor3_guidance_fit_applicable"] = finite_result
+    result["cor3_guidance_fit_status"] = [
+        "measured" if good else "numerically_unresolved_projection" if finite else
+        "nonfinite_projection_arithmetic" if inputs else "nonfinite_clean_branch"
+        for inputs, finite, good in zip(finite_inputs.tolist(), finite_result.tolist(), qa_pass.tolist(), strict=True)]
+    result["cor3_guidance_fit_qa"] = [
+        "consistent_float64_estimate" if good else "numerically_unresolved" if inputs else "not_applicable"
+        for inputs, good in zip(finite_inputs.tolist(), qa_pass.tolist(), strict=True)]
+    return result
 
 
 def branch_motion(mu, mc, next_mu, next_mc, target):
@@ -111,6 +195,7 @@ def trajectory_shape(values, steps, *, atol=SHAPE_ATOL, rtol=SHAPE_RTOL):
 
 def response_rows(payload, identities, guidance, *, device, policy=None):
     """Evaluate the fixed affine segment using compact candidate logits only."""
+    device = require_cuda(device)
     b = payload["intercept"].to(device=device, dtype=torch.float64)
     slopes = payload["slopes"].to(device=device, dtype=torch.float64)
     target = int(payload["target_atom"])
@@ -135,39 +220,33 @@ def response_rows(payload, identities, guidance, *, device, policy=None):
             fallback_status, reduced_sign = "not_selected_stable_assessment", "unresolved"
             if retry:
                 fallback_status = "budget_unavailable_keep_finite_assessment"
-                # Conservative upper bound on charged fixed-length interval
-                # primitives, including both input conversions. Preflight runs
-                # before candidate tensors become Python/Decimal vectors.
-                work_reservation = 128 * b.shape[1] + 256
-                for multiplier in (1, 2):
-                    remaining = policy.max_decimal_products - spent[index]
-                    if remaining < work_reservation:
-                        break
-                    arithmetic = Directed(policy.decimal_precision * multiplier, max_products=remaining)
+                # Only unresolved rows enter bounded CUDA interval arithmetic.
+                # Candidate logits never move to host for numerical work.
+                remaining = policy.max_decimal_products - spent[index]
+                if remaining > 0:
+                    arithmetic = GpuDirected(max_products=remaining, device=device)
                     try:
-                        arithmetic.charge(2 * b.shape[1])
-                        intercept = [Interval.point(value) for value in b[index].detach().cpu().tolist()]
-                        direction = [Interval.point(value) for value in scaled_slopes[index].detach().cpu().tolist()]
-                        enclosed = interval_gain(arithmetic, intercept, direction, target)
+                        enclosed = interval_gain(arithmetic, arithmetic.interval(b[index]),
+                                                 arithmetic.interval(scaled_slopes[index]), target)
                         reduced_sign = enclosed["gain_sign"]
                         for quantity in ("H", "G"):
                             interval = enclosed[quantity]
+                            if interval is None:
+                                continue
                             interval_fields["response_" + quantity + "_interval_lower"], interval_fields["response_" + quantity + "_interval_upper"] = interval.floats()
                             estimate = H if quantity == "H" else G
-                            if not math.isfinite(estimate) or not interval.lower <= Decimal.from_float(estimate) <= interval.upper:
-                                arithmetic.charge(2)
-                                midpoint = float(arithmetic.near.divide(arithmetic.near.add(interval.lower, interval.upper), Decimal(2)))
-                                if quantity == "H":
-                                    H = midpoint
-                                else:
-                                    G = midpoint
-                        fallback_status = "reduced_logit_interval_resolved" if reduced_sign != "unresolved" else "reduced_logit_interval_unresolved"
-                    except (ArithmeticBudgetExceeded, DecimalException, ArithmeticError, OverflowError, ValueError):
-                        fallback_status = "reduced_logit_interval_budget_or_arithmetic_unresolved"
+                            if not math.isfinite(estimate) or not bool((interval.lower <= estimate) & (estimate <= interval.upper)):
+                                midpoint = interval.lower / 2. + interval.upper / 2.
+                                if bool(torch.isfinite(midpoint)):
+                                    if quantity == "H":
+                                        H = float(midpoint)
+                                    else:
+                                        G = float(midpoint)
+                        fallback_status = "cuda_reduced_logit_interval_resolved" if reduced_sign != "unresolved" else "cuda_reduced_logit_interval_unresolved_fixed_binary64"
+                    except (ArithmeticBudgetExceeded, ArithmeticError, OverflowError, ValueError):
+                        fallback_status = "cuda_reduced_logit_interval_budget_or_arithmetic_unresolved"
                     finally:
                         spent[index] += arithmetic.products
-                    if reduced_sign != "unresolved":
-                        break
             finite = math.isfinite(H)
             tolerance = float(identity.get("affine_endpoint_tolerance_l2", math.nan))
             resolved = math.isfinite(tolerance) and math.isfinite(discrepancy[index]) and discrepancy[index] <= tolerance
@@ -185,9 +264,13 @@ def response_rows(payload, identities, guidance, *, device, policy=None):
                 "response_fallback_selected": retry, "response_fallback_status": fallback_status,
                 "response_reduced_logit_gain_sign": reduced_sign, **interval_fields,
                 "response_arithmetic_scope": "exact_stored_scaled_logit_inputs_only_not_original_vector_construction",
-                "response_dose_decimal_products": spent[index] - before,
-                "response_curve_decimal_products": spent[index],
-                "response_curve_decimal_budget": policy.max_decimal_products,
+                "response_dose_decimal_products": 0, "response_curve_decimal_products": 0,
+                "response_curve_decimal_budget": 0,
+                "response_dose_gpu_products": spent[index] - before,
+                "response_curve_gpu_products": spent[index],
+                "response_curve_gpu_budget": policy.max_decimal_products,
+                "response_arithmetic_backend": "cuda_outward_binary64",
+                "response_effective_mantissa_bits": 53, "response_cpu_fallback": False,
                 "structural_applicable": True, "endpoint_contract": "fixed_reconstructed_affine_segment",
                 "endpoint_status": endpoint_status, "endpoint_construction_method": method,
                 "saved_endpoint_discrepancy_l2": discrepancy[index],
@@ -216,19 +299,30 @@ def measure_record(log, record, law, adapter, config, core_tables, *, gaussian_b
         raise TheoryError("Four-stage measurements require T predictions and T+1 saved states")
     if meta.get("stored_prediction_type", "epsilon") != "epsilon":
         raise TheoryError("Four-stage measurements require already-canonical saved epsilon")
-    device = law.support.flat.device
+    device = require_cuda(law.support.flat.device)
     target = target.to(device=device, dtype=torch.float64)
     target_id = law.target_id_for(target, required=False)
     target_atom = None if target_id is None else law.support.aliases[target_id]
     dimension, root_d = target.numel(), math.sqrt(target.numel())
     geometry = getattr(law, "_four_stage_geometry", None)
     if geometry is None:
-        mean = law.mean_vector.to(device=device, dtype=torch.float64)
-        distances = (law.support.flat - mean.reshape(1, -1)).norm(dim=1)
+        mean = law.theory_mean_vector.to(device=device, dtype=torch.float64)
+        bank_mean = law.mean_vector.to(device=device, dtype=torch.float64)
+        distances = (law.support.flat - bank_mean.reshape(1, -1)).norm(dim=1)
         spread = float((law.support.weights * distances.square()).sum().sqrt()) / root_d
-        geometry = mean, spread
+        comparison_distances = (law.support.flat - mean.reshape(1, -1)).norm(dim=1)
+        comparison_scale = float((law.support.weights * comparison_distances.square()).sum().sqrt()) / root_d
+        geometry = mean, bank_mean, spread, comparison_scale
         law._four_stage_geometry = geometry
-    mean, spread = geometry
+    mean, bank_mean, spread, comparison_scale = geometry
+    mean_receipt = law.theory_mean_metadata
+    mean_fields = {
+        "mean_norm_l2": float(mean.norm()), "mean_norm_rmse": float(mean.norm()) / root_d,
+        "bank_mean_norm_l2": float(bank_mean.norm()), "bank_mean_norm_rmse": float(bank_mean.norm()) / root_d,
+        "mean_offset_l2": float((bank_mean - mean).norm()), "mean_offset_rmse": float((bank_mean - mean).norm()) / root_d,
+        "theory_mean_source": str(mean_receipt.get("source", "declared_finite_bank_mean")),
+        "theory_mean_sha256": str(mean_receipt.get("vector_sha256", law.metadata.get("mean_sha256", ""))),
+    }
     trajectory, motions, initial, responses = [], [], [], []
     initial_base = _ordered_rows(core_tables["initial"], seeds, 0)
     matched_initial = _ordered_rows(core_tables["matched_updates"], seeds, 0)
@@ -272,21 +366,22 @@ def measure_record(log, record, law, adapter, config, core_tables, *, gaussian_b
             if step == 0:
                 mean_error = (mu - mean).flatten(1).norm(dim=1)
                 hashes = [hashlib.sha256(value.detach().cpu().contiguous().numpy().tobytes()).hexdigest() for value in mu]
-                matched_bank = (z[start:stop, 0].double().cpu() == gaussian_bank[start:stop].double().cpu()).flatten(1).all(1)
+                matched_bank = (z[start:stop, 0].to(device=device, dtype=torch.float64) == gaussian_bank[start:stop].to(device=device, dtype=torch.float64)).flatten(1).all(1)
                 if not gaussian_initialization_compatible:
                     matched_bank.fill_(False)
                 first = _scalar_frame({"initial_unconditional_mean_error_l2": mean_error,
                     "initial_unconditional_mean_error_rmse": mean_error / root_d,
                     "initial_unconditional_vector_sha256": hashes,
                     "initial_gaussian_bank_match": matched_bank,
-                    "mean_norm_l2": float(mean.norm()), "mean_norm_rmse": float(mean.norm()) / root_d,
-                    "reference_spread_rmse": spread}, initial_base.iloc[start:stop])
+                    **mean_fields, **corollary3_guidance_fit(mu, mc, target, mean, g),
+                    "reference_spread_rmse": spread,
+                    "comparison_scale_rmse": comparison_scale}, initial_base.iloc[start:stop])
                 initial.append(first)
                 response_id = matched_initial.iloc[start:stop][[name for name in all_keys if name in matched_initial]].reset_index(drop=True)
                 response_id["sscd"] = response_id.terminal_sscd
                 response_id["native_timestep"] = coeff.timestep
                 source_epsilon = max(torch.finfo(value.dtype).eps for value in (z, u, c))
-                observed_norm = z[start:stop, 1].double().flatten(1).norm(dim=1).to(device)
+                observed_norm = z[start:stop, 1].to(device=device, dtype=torch.float64).flatten(1).norm(dim=1)
                 source_scale = (abs(coeff.A) * state.double().flatten(1).norm(dim=1)
                                 + abs(coeff.kappa) * (mu.flatten(1).norm(dim=1)
                                     + abs(g) * (mc.flatten(1).norm(dim=1) + mu.flatten(1).norm(dim=1))))
@@ -356,6 +451,12 @@ def baseline_summary(gaussian_reference, initial_samples, reference_atoms):
            "disagreement_count": int(audit.unconditional_disagreement.sum()) if len(audit) else 0,
            "baseline_input_source": "unique_genuine_gaussian_reference_probes_not_prompt_average",
            "bootstrap_replicates": 1000, "bootstrap_seed": 0, "bootstrap_scope": "Monte_Carlo_unique_Gaussian_seed_estimator_not_independent_prompt_inference"}
+    for field in ("bank_mean_norm_l2", "bank_mean_norm_rmse", "mean_offset_l2", "mean_offset_rmse",
+                  "theory_mean_source", "theory_mean_sha256", "comparison_scale_rmse"):
+        if field in initial_samples:
+            row[field] = initial_samples[field].iloc[0]
+    row["spread_definition"] = "weighted_atom_RMS_about_exact_finite_bank_mean"
+    row["comparison_definition"] = "held_out_Gaussian_estimates_about_selected_theory_mean"
     for name, field in (("initial_unconditional_reference_error", "unconditional_reference_error_rmse"),
                         ("initial_reference_to_mean_error", "reference_mean_error_rmse")):
         samples = pd.to_numeric(source[field], errors="coerce").to_numpy(dtype=float) if field in source else np.full(len(source), np.nan)

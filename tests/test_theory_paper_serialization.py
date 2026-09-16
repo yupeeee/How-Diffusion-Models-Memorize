@@ -55,7 +55,7 @@ def test_render_serializes_captions_before_export_and_reports_each_file(tmp_path
     monkeypatch.setattr(plotting, "publish_figures", publish)
     manifest = plotting.render_paper(root)
     saved = read_json(root / "figure_manifest.json")
-    assert len(exports) == 30 and len(closed) == 15
+    assert len(exports) == 40 and len(closed) == 20
     for entry in manifest["figures"]:
         assert entry["display_audit"] == {"condition_zero_overlap": True, "count": 2,
                                            "nested": [[False, True]]}

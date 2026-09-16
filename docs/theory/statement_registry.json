@@ -1,7 +1,7 @@
 {
   "schema_version": 6,
   "formula_version": "four-stage-evidence-1",
-  "registry_version": "four-stage-evidence-1",
+  "registry_version": "four-stage-paper-curation-13",
   "manuscript_source": {
     "path": "revised.pdf",
     "sha256": "fd447e263b921e94203558e6b03e2a9aabaa03ab8deb5cec7545427aed4f112f",
@@ -15,7 +15,17 @@
     "alternative": "Validated explicit finite-law manifest with atoms, weights and preprocessing",
     "mean": "mu_K=sum_j pi_j*u_j; never a model-output center",
     "scope": "An empirical instantiation, not identification of the checkpoint training marginal",
-    "single_target_condition": "Equation 6 is an assumed experimental idealization; conflicting exact prompt/target records are retained and audited"
+    "single_target_condition": "Equation 6 is an assumed experimental idealization; conflicting exact prompt/target records are retained and audited",
+    "theory_comparison_mean": {
+      "default": "reference-min-snr",
+      "definition": "Full-vector mean of 10000 unconditional posterior clean references at the minimum SNR of the prespecified analytical extension on independent Gaussian inputs; no network evaluation",
+      "source": "minimum_snr_unconditional_reference_monte_carlo",
+      "scope": "Finite-selected-SNR Monte Carlo estimate, recorded separately from the exact finite-bank mean; sampling uncertainty and measured bank-to-selected offset remain explicit",
+      "alternatives": [
+        "reference-initial",
+        "cached-targets"
+      ]
+    }
   },
   "conventions": {
     "normalization": "Raw L2/sqrt(d); squared L2/d. Forward loss averages coordinate sums over draws once.",
@@ -45,7 +55,11 @@
     ],
     "numerical_cache": "separate numerical_refinement inputs, policies, and additive collections; old observation/classification receipts retained",
     "active_main_count": 4,
-    "active_appendix_count": 11
+    "active_appendix_count": 16,
+    "default_figure_count": 20,
+    "fully_eligible_default_image_file_count": 40,
+    "presentation_migration": "A16 requires one explicit --recompute-experiments update to save its compact reduction from matched_updates and refresh analysis-source receipts, reusing compatible probes and original variation integrals. --plot then uses saved compact scalars only. The A15 square-root display still preserves its raw saved loss ratio and corollary3-guidance-fit-1. Hash guards and ownership-checked publication remain active; no plot-time scalar backfill or scientific computation.",
+    "theory_mean_source_scope": "The selected mean defaults to reference-min-snr. New runs reject --no-mu and --center zero; zero is not a permitted mean_source. Historical saved configurations and scalar meanings remain readable."
   },
   "statements": [
     {
@@ -70,7 +84,10 @@
       ],
       "interpretation": "One empirical finite-sample RMS per pair; convergence in probability does not imply moment convergence",
       "statistical_unit": "Retained pair/seed identities; common prompt-balanced weights for compared populations; pair-only bootstrap where specified",
-      "supporting_figures": [],
+      "supporting_figures": [
+        "initial_unconditional_mean_concentration",
+        "unconditional_reference_convergence"
+      ],
       "assumptions": [
         "Genuine forward-target loss",
         "Verified Gaussian initialization",
@@ -326,9 +343,7 @@
       "supporting_figures": [
         "branch_target_errors",
         "synchronization_bound",
-        "branch_gap_peak_step",
-        "branch_gap_motion_high_sscd",
-        "branch_gap_motion_lower_sscd"
+        "branch_gap_peak_step"
       ],
       "assumptions": [
         "Single-target idealization",
@@ -365,7 +380,13 @@
       },
       "measurement_role": "main_experiment",
       "author_supplied_source_equation_labels": [],
-      "source_label_status": "author_supplied_not_verified_against_matching_LaTeX"
+      "source_label_status": "author_supplied_not_verified_against_matching_LaTeX",
+      "numerical_audits_retained": [
+        "branch_motion",
+        "gap_motion_additive_identity",
+        "noise_gap_scaling",
+        "trajectory_shapes"
+      ]
     },
     {
       "result_number": 7,
@@ -384,11 +405,11 @@
         "16",
         "81-84"
       ],
-      "interpretation": "Direct reference-bound scatter; actual output retained. Original clean prerequisite is separate from independently predicted deterministic/pathwise or probabilistic finite-step extension.",
+      "interpretation": "Group-conditional actual/observable/reference terminal tolerance coverage for same-seed SSCD > 0.75 versus <= 0.75; identical populations and prompt-balanced weights within each group, common tolerance axis across groups. Endpoint/bound formulas and numerical QA remain unchanged.",
       "statistical_unit": "Retained pair/seed identities; common prompt-balanced weights for compared populations; pair-only bootstrap where specified",
       "supporting_figures": [
         "terminal_observable_bound",
-        "terminal_bound_coverage"
+        "final_reproduction_bound"
       ],
       "assumptions": [
         "Single-target idealization",
@@ -420,10 +441,23 @@
         "reference_line": "Independently predeclared latent tolerance only"
       },
       "main_figure": {
-        "id": "final_reproduction_bound",
-        "x": "(B_ref+delta_sched)/sqrt(d)",
-        "y": "actual saved endpoint error/sqrt(d)",
-        "reference_line": "y=x qualified by saved correction/probability mode"
+        "id": "terminal_bound_coverage",
+        "x": "tau/sqrt(d)",
+        "y": "Pr(· ≤ tau): weighted fraction conditional on each terminal-SSCD group",
+        "reference_line": "Independently predeclared latent tolerance only",
+        "renderer": "four_terminal_grouped_cdf",
+        "formula_version": "terminal-coverage-by-sscd-1",
+        "groups": [
+          "SSCD > 0.75",
+          "SSCD <= 0.75"
+        ],
+        "group_definition": "Each generated seed uses its own terminal SSCD; not prompt-mean SSCD. Exactly 0.75 belongs to the lower group; missing/nonfinite outcomes have explicit exclusions.",
+        "weighting": "Within each group, equal represented prompt-target pair mass divided over eligible member seeds; identical weights for all three quantities; separately normalized group CDFs",
+        "group_common_population_table": "audit_data/terminal_grouped_common_population.csv",
+        "group_sscd_exclusion_table": "audit_data/terminal_grouped_sscd_exclusions.csv",
+        "pooled_cdf_audit_table": "audit_data/terminal_pooled_cdf.csv",
+        "pooled_metadata_audit_table": "audit_data/terminal_pooled_cdf_metadata.csv",
+        "legend": "Gold/purple group colors; solid/dashed/dash-dot actual/observable/reference; outside top, manuscript expressions; corrections and zero/infinite masses in captions"
       },
       "measurement_role": "main_experiment",
       "author_supplied_source_equation_labels": [
@@ -431,17 +465,35 @@
         "eq:reverse_process",
         "eq:terminal_target_decomposition"
       ],
-      "source_label_status": "author_supplied_not_verified_against_matching_LaTeX"
+      "source_label_status": "author_supplied_not_verified_against_matching_LaTeX",
+      "coverage_checks": {
+        "row_level": "E_end <= C_obs <= C_ref on deterministic/pathwise-valid observations",
+        "expected_curve_order": "F_ref <= F_obs <= F_actual within each group using common weights; no expected ordering asserted between SSCD groups",
+        "failures": "Preserved and reported; never repaired by reordering or clamping curves"
+      }
     }
   ],
   "default_figure_ids": [
-    "theorem1_loss_recovery",
-    "lemma2_unconditional_baseline",
-    "corollary3_initial_cfg_amplification",
-    "lemma4_matched_displacement",
-    "proposition5_posterior_feedback",
-    "lemma6_target_specific_synchronization",
-    "theorem7_final_reproduction"
+    "initial_loss_recovery",
+    "branch_gap_posterior_response",
+    "branch_gap_synchronization",
+    "terminal_bound_coverage",
+    "initial_unconditional_mean_concentration",
+    "unconditional_reference_convergence",
+    "posterior_feedback_over_time",
+    "posterior_feedback_condition_margin",
+    "branch_target_errors",
+    "synchronization_bound",
+    "branch_gap_peak_step",
+    "terminal_observable_bound",
+    "final_reproduction_bound",
+    "branch_gap_per_prompt",
+    "conditional_reference_error_per_prompt",
+    "unconditional_reference_error_per_prompt",
+    "target_probability_per_prompt",
+    "reference_branch_gap_per_prompt",
+    "corollary3_guidance_scale_vs_loss",
+    "reference_variation_per_prompt"
   ],
   "measurement_formula_version": "fixed-seven-statement-evidence-1",
   "numerical_policy_version": "fixed-cache-numerics-2",
@@ -449,22 +501,39 @@
     {
       "order": 1,
       "stem": "initial_loss_recovery",
-      "title": "Initial conditional recovery and unconditional baseline"
+      "title": "Initial conditional recovery and unconditional baseline",
+      "supporting_figure_ids": [
+        "initial_unconditional_mean_concentration",
+        "unconditional_reference_convergence"
+      ]
     },
     {
       "order": 2,
       "stem": "branch_gap_posterior_response",
-      "title": "Retained branch-gap contribution and matched evidence"
+      "title": "Retained branch-gap contribution and matched evidence",
+      "supporting_figure_ids": [
+        "posterior_feedback_over_time",
+        "posterior_feedback_condition_margin"
+      ]
     },
     {
       "order": 3,
       "stem": "branch_gap_synchronization",
-      "title": "Gap dynamics and target-specific synchronization"
+      "title": "Gap dynamics and target-specific synchronization",
+      "supporting_figure_ids": [
+        "branch_target_errors",
+        "synchronization_bound",
+        "branch_gap_peak_step"
+      ]
     },
     {
       "order": 4,
-      "stem": "final_reproduction_bound",
-      "title": "Actual final proximity versus reference reproduction bound"
+      "stem": "terminal_bound_coverage",
+      "title": "Final proximity and bound coverage over latent tolerances",
+      "supporting_figure_ids": [
+        "terminal_observable_bound",
+        "final_reproduction_bound"
+      ]
     }
   ],
   "appendix_stems": [
@@ -475,10 +544,15 @@
     "branch_target_errors",
     "synchronization_bound",
     "branch_gap_peak_step",
-    "branch_gap_motion_high_sscd",
-    "branch_gap_motion_lower_sscd",
     "terminal_observable_bound",
-    "terminal_bound_coverage"
+    "final_reproduction_bound",
+    "branch_gap_per_prompt",
+    "conditional_reference_error_per_prompt",
+    "unconditional_reference_error_per_prompt",
+    "target_probability_per_prompt",
+    "reference_branch_gap_per_prompt",
+    "corollary3_guidance_scale_vs_loss",
+    "reference_variation_per_prompt"
   ],
   "optional_measurements": {
     "counterfactual_unconditional": {
@@ -488,7 +562,408 @@
       ],
       "input_law": "optional_learned_counterfactual_probe",
       "no_rollout": true,
-      "no_decoding": true
+      "no_decoding": true,
+      "render_category": "diagnostics",
+      "render_requires": [
+        "--diagnostics",
+        "saved_counterfactual_enabled",
+        "saved_counterfactual_data_available"
+      ],
+      "adds_appendix_figure": false
+    }
+  },
+  "preceding_default_figure_ids": [
+    "theorem1_loss_recovery",
+    "lemma2_unconditional_baseline",
+    "corollary3_initial_cfg_amplification",
+    "lemma4_matched_displacement",
+    "proposition5_posterior_feedback",
+    "lemma6_target_specific_synchronization",
+    "theorem7_final_reproduction"
+  ],
+  "main_stems": [
+    "initial_loss_recovery",
+    "branch_gap_posterior_response",
+    "branch_gap_synchronization",
+    "terminal_bound_coverage"
+  ],
+  "retired_render_families": [
+    {
+      "stem": "branch_gap_motion_high_sscd",
+      "render_in_diagnostics": false,
+      "numerical_measurements_retained": true,
+      "reason": "Reviewed motion rendering is redundant; preserve exact additive accounting, per-sample scalars, tests and provenance"
+    },
+    {
+      "stem": "branch_gap_motion_lower_sscd",
+      "render_in_diagnostics": false,
+      "numerical_measurements_retained": true,
+      "reason": "Reviewed motion rendering is redundant; preserve exact additive accounting, per-sample scalars, tests and provenance"
+    },
+    {
+      "stem": "initial_unconditional_mean_concentration_zero",
+      "render_in_diagnostics": false,
+      "numerical_measurements_retained": true,
+      "reason": "Requested zero-vector comparison render retired; preserve scalar measurements, historical receipts and the selected theory mean"
+    },
+    {
+      "stem": "unconditional_reference_convergence_zero",
+      "render_in_diagnostics": false,
+      "numerical_measurements_retained": true,
+      "reason": "Requested zero-vector comparison render retired; preserve scalar measurements, historical receipts and the selected theory mean"
+    }
+  ],
+  "output_migrations": [
+    {
+      "stem": "terminal_bound_coverage",
+      "from": "appendix",
+      "to": "main"
+    },
+    {
+      "stem": "final_reproduction_bound",
+      "from": "main",
+      "to": "appendix"
+    }
+  ],
+  "migration_policy": {
+    "ledger": "figure_retirement.json",
+    "ownership": "Enumerated regular renderer-owned files with previous-manifest matching hashes only",
+    "conflicts": "Preserve and report unowned, modified, symlink, out-of-root or unrelated files",
+    "transaction": "Stage all replacement pairs, publish, retire verified old locations; roll back image pairs and metadata together on failure",
+    "idempotence": "No duplicate active pairs, resurrected motion renders or accumulating retirement archives",
+    "scientific_artifacts": "Unchanged; plot-data CSVs and hashes preserved"
+  },
+  "plot_recipe_version": "four-stage-manuscript-notation-11",
+  "display_notation": {
+    "source": "utils/experiments/theory/paper_notation.py",
+    "documentation": "docs/theory/figure_notation.md",
+    "manuscript": "revised.pdf Appendix A, Equations 2, 7-9, 12-15, 66-69",
+    "scope": "Bold vectors and manuscript expressions on twenty active paper plots; no implementation K/M/H/Q/bound aliases in the artwork. Existing measurement formulas and reference-law qualifications remain unchanged; A11-A14 add saved-scalar summaries. The active convergence guide remains with caption/audit meaning and no Reference limit legend entry. A15 displays sqrt(L_T(c)/(d*SNR_T)) against the signed fitted coefficient widehat{g}; the saved x remains the loss ratio and the root follows the loss draw mean. A16 uses the saved Equation-15 V_t/sqrt(d) estimate only on positive-noise transitions; numerical statuses remain explicit."
+  },
+  "appendix_figure_contracts": {
+    "branch_gap_per_prompt": {
+      "slot": "A10",
+      "category": "appendix",
+      "order": 10,
+      "source_table": "plot_data/branch_gap_per_prompt.csv",
+      "renderer": "four_prompt_chronological",
+      "formula_version": "branch-gap-per-prompt-1",
+      "x": "T-t",
+      "y": "\\|\\boldsymbol{\\Delta}_t\\|/\\sqrt{d}",
+      "aggregation": "Arithmetic mean of saved per-seed branch-gap norms for each retained prompt-target pair; norm before averaging, normalized by sqrt(d) exactly once",
+      "color": "Mean terminal SSCD across exactly the same complete seed cohort; fixed viridis normalization [0,1]",
+      "cohort": "All declared evaluation seeds at all pre-update predictions; unchanged chronological order, no outcome grouping or curve selection; no final-output prediction",
+      "pair_identity": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id"
+      ],
+      "cohort_audit_table": "audit_data/branch_gap_per_prompt_cohort.csv",
+      "outputs": [
+        "appendix/branch_gap_per_prompt.png",
+        "appendix/branch_gap_per_prompt.pdf"
+      ],
+      "missing_saved_input": "Require explicit analysis-only --recompute-experiments using compatible source caches; never aggregate seeds during --plot",
+      "existing_support_references": "Original main support mappings and the relative order of retained figures remain unchanged; appendix slots close the two retired zero-companion gaps",
+      "value_column": "mean_gap_rmse",
+      "value_domain": "nonnegative",
+      "source_scalar_column": "direct_lemma6_gap_rmse"
+    },
+    "conditional_reference_error_per_prompt": {
+      "slot": "A11",
+      "category": "appendix",
+      "order": 11,
+      "source_table": "plot_data/conditional_reference_error_per_prompt.csv",
+      "renderer": "four_prompt_chronological",
+      "formula_version": "prompt-trajectory-scalars-1",
+      "x": "T-t",
+      "y": "e_t(c)/\\sqrt{d}",
+      "aggregation": "Arithmetic mean of per-seed saved conditional clean-reference norms divided by sqrt(d) exactly once, under the stated single-target conditional assumption",
+      "color": "Mean terminal SSCD across exactly the same complete seed cohort; fixed viridis normalization [0,1]",
+      "cohort": "All declared evaluation seeds at all pre-update predictions; unchanged chronological order, no outcome grouping or curve selection; no final-output prediction",
+      "pair_identity": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id"
+      ],
+      "cohort_audit_table": "audit_data/conditional_reference_error_per_prompt_cohort.csv",
+      "outputs": [
+        "appendix/conditional_reference_error_per_prompt.png",
+        "appendix/conditional_reference_error_per_prompt.pdf"
+      ],
+      "missing_saved_input": "Require explicit analysis-only --recompute-experiments using compatible source caches; never aggregate seeds during --plot",
+      "existing_support_references": "Original main support mappings and the relative order of retained figures remain unchanged; appendix slots close the two retired zero-companion gaps",
+      "value_column": "mean_conditional_error_rmse",
+      "value_domain": "nonnegative",
+      "source_scalar_column": "direct_conditional_error_rmse",
+      "measurement_scope": "Saved trajectory scalars only; no new posterior or network evaluation",
+      "required_columns": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id",
+        "step_index",
+        "mean_conditional_error_rmse",
+        "mean_terminal_sscd",
+        "seed_count",
+        "seed_ids_json",
+        "latent_dimension",
+        "cohort_complete"
+      ]
+    },
+    "unconditional_reference_error_per_prompt": {
+      "slot": "A12",
+      "category": "appendix",
+      "order": 12,
+      "source_table": "plot_data/unconditional_reference_error_per_prompt.csv",
+      "renderer": "four_prompt_chronological",
+      "formula_version": "prompt-trajectory-scalars-1",
+      "x": "T-t",
+      "y": "e_t(\\varnothing)/\\sqrt{d}",
+      "aggregation": "Arithmetic mean of per-seed saved learned-unconditional minus posterior clean-reference norms divided by sqrt(d) exactly once; never unconditional target distance",
+      "color": "Mean terminal SSCD across exactly the same complete seed cohort; fixed viridis normalization [0,1]",
+      "cohort": "All declared evaluation seeds at all pre-update predictions; unchanged chronological order, no outcome grouping or curve selection; no final-output prediction",
+      "pair_identity": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id"
+      ],
+      "cohort_audit_table": "audit_data/unconditional_reference_error_per_prompt_cohort.csv",
+      "outputs": [
+        "appendix/unconditional_reference_error_per_prompt.png",
+        "appendix/unconditional_reference_error_per_prompt.pdf"
+      ],
+      "missing_saved_input": "Require explicit analysis-only --recompute-experiments using compatible source caches; never aggregate seeds during --plot",
+      "existing_support_references": "Original main support mappings and the relative order of retained figures remain unchanged; appendix slots close the two retired zero-companion gaps",
+      "value_column": "mean_unconditional_reference_error_rmse",
+      "value_domain": "nonnegative",
+      "source_scalar_column": "direct_unconditional_reference_error_rmse",
+      "measurement_scope": "Saved trajectory scalars only; no new posterior or network evaluation",
+      "required_columns": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id",
+        "step_index",
+        "mean_unconditional_reference_error_rmse",
+        "mean_terminal_sscd",
+        "seed_count",
+        "seed_ids_json",
+        "latent_dimension",
+        "cohort_complete"
+      ]
+    },
+    "target_probability_per_prompt": {
+      "slot": "A13",
+      "category": "appendix",
+      "order": 13,
+      "source_table": "plot_data/target_probability_per_prompt.csv",
+      "renderer": "four_prompt_chronological",
+      "formula_version": "prompt-trajectory-scalars-1",
+      "x": "T-t",
+      "y": "p_t",
+      "aggregation": "Arithmetic mean of exp(saved per-seed direct_target_log_probability) on actual generated trajectory states; exponentiation precedes averaging, never exp(mean(log_probability))",
+      "color": "Mean terminal SSCD across exactly the same complete seed cohort; fixed viridis normalization [0,1]",
+      "cohort": "All declared evaluation seeds at all pre-update predictions; unchanged chronological order, no outcome grouping or curve selection; no final-output prediction",
+      "pair_identity": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id"
+      ],
+      "cohort_audit_table": "audit_data/target_probability_per_prompt_cohort.csv",
+      "outputs": [
+        "appendix/target_probability_per_prompt.png",
+        "appendix/target_probability_per_prompt.pdf"
+      ],
+      "missing_saved_input": "Require explicit analysis-only --recompute-experiments using compatible source caches; never aggregate seeds during --plot",
+      "existing_support_references": "Original main support mappings and the relative order of retained figures remain unchanged; appendix slots close the two retired zero-companion gaps",
+      "value_column": "mean_target_probability",
+      "value_domain": "probability",
+      "source_scalar_column": "direct_target_log_probability",
+      "measurement_scope": "Saved trajectory scalars only; no new posterior or network evaluation",
+      "required_columns": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id",
+        "step_index",
+        "mean_target_probability",
+        "mean_terminal_sscd",
+        "seed_count",
+        "seed_ids_json",
+        "latent_dimension",
+        "cohort_complete"
+      ]
+    },
+    "reference_branch_gap_per_prompt": {
+      "slot": "A14",
+      "category": "appendix",
+      "order": 14,
+      "source_table": "plot_data/reference_branch_gap_per_prompt.csv",
+      "renderer": "four_prompt_chronological",
+      "formula_version": "prompt-trajectory-scalars-1",
+      "x": "T-t",
+      "y": "\\|\\bar{\\mathbf{x}}_t(c)-\\bar{\\mathbf{x}}_t(\\varnothing)\\|/\\sqrt{d}",
+      "aggregation": "Arithmetic mean of saved per-seed direct_reference_target_error_rmse across the same complete fixed seed cohort; dimensional normalization is already present and is applied exactly once",
+      "color": "Mean terminal SSCD across exactly the same complete seed cohort; fixed viridis normalization [0,1]",
+      "cohort": "All declared evaluation seeds at all pre-update predictions; unchanged chronological order, no outcome grouping or curve selection; no final-output prediction",
+      "pair_identity": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id"
+      ],
+      "cohort_audit_table": "audit_data/reference_branch_gap_per_prompt_cohort.csv",
+      "outputs": [
+        "appendix/reference_branch_gap_per_prompt.png",
+        "appendix/reference_branch_gap_per_prompt.pdf"
+      ],
+      "missing_saved_input": "Require explicit analysis-only --recompute-experiments using compatible source caches; never aggregate seeds during --plot",
+      "existing_support_references": "Original main support mappings and the relative order of retained figures remain unchanged; appendix slots close the two retired zero-companion gaps",
+      "value_column": "mean_reference_gap_rmse",
+      "value_domain": "nonnegative",
+      "source_scalar_column": "direct_reference_target_error_rmse",
+      "measurement_scope": "Saved trajectory scalars only; no new posterior or network evaluation",
+      "required_columns": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id",
+        "step_index",
+        "mean_reference_gap_rmse",
+        "mean_terminal_sscd",
+        "seed_count",
+        "seed_ids_json",
+        "latent_dimension",
+        "cohort_complete"
+      ],
+      "reference_gap_definition": "Conditional minus unconditional analytical clean reference at the same actual saved trajectory state and noise; under the stated single-target conditional law the conditional reference equals x_star, so the norm equals the saved opposite-sign unconditional-reference-minus-target norm",
+      "forbidden_substitutions": [
+        "learned branch-gap norm",
+        "difference of error norms",
+        "radius-tail upper bound"
+      ]
+    },
+    "corollary3_guidance_scale_vs_loss": {
+      "slot": "A15",
+      "category": "appendix",
+      "order": 15,
+      "source_table": "plot_data/corollary3_guidance_scale_vs_loss.csv",
+      "renderer": "four_guidance_fit",
+      "formula_version": "corollary3-guidance-fit-1",
+      "x": "\\sqrt{L_T(c)/(d\\,\\mathrm{SNR}_T)}",
+      "y": "\\widehat{g}",
+      "requires_theory_mean": true,
+      "fit_definition": "argmin_a sum_seed ||(hat{x}_T(c;g)-mu)-a(x_star-mu)||^2",
+      "aggregation": "joint_no_intercept_least_squares_shared_target_direction",
+      "population": "One prompt-target pair over its full fixed saved initial seed cohort at actual first-prediction states; common target direction and matching selected-mean provenance",
+      "color": "Mean terminal SSCD across exactly the fit seed cohort; fixed [0,1] normalization",
+      "reference_guide": "Actual configured guidance scale g, labeled with its numeric value",
+      "normalization": "Saved x is the forward squared-L2 loss mean divided once by d*SNR_T; displayed x is sqrt(saved x) with the root outside the draw mean. Signed coefficient unchanged and unclipped; residual/direction norms already L2/sqrt(d).",
+      "cohort_audit_table": "audit_data/corollary3_guidance_scale_vs_loss_cohort.csv",
+      "required_columns": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id",
+        "x",
+        "y",
+        "mean_terminal_sscd",
+        "seed_count",
+        "seed_ids_json",
+        "latent_dimension",
+        "snr",
+        "guidance_scale",
+        "fit_residual_rmse",
+        "direction_norm_rmse"
+      ],
+      "outputs": [
+        "appendix/corollary3_guidance_scale_vs_loss.png",
+        "appendix/corollary3_guidance_scale_vs_loss.pdf"
+      ],
+      "missing_saved_input": "Requires explicit analysis-only --recompute-experiments to derive cached-vector fits and save compact inputs; no plot-time inference, fitting or loss joins",
+      "manuscript_connection": "Corollary 3, Equation 54; full guided-clean vector relation, not the g*Delta injection coefficient",
+      "initialization_scope": "Actual saved first-prediction states; Gaussian-bank match status is recorded separately, not required or assumed for the descriptive fit",
+      "saved_x_definition": "L_T(c)/(d*SNR_T)",
+      "display_x_definition": "sqrt(L_T(c)/(d*SNR_T))",
+      "presentation_compatibility": "No reduction or scientific formula change; existing compatible saved fit tables support --plot. Figure audit records square_root_applied_to_loss=True."
+    },
+    "reference_variation_per_prompt": {
+      "slot": "A16",
+      "category": "appendix",
+      "order": 16,
+      "source_table": "plot_data/reference_variation_per_prompt.csv",
+      "renderer": "four_prompt_chronological",
+      "formula_version": "reference-variation-per-prompt-1",
+      "x": "T-t",
+      "y": "V_t/\\sqrt{d}",
+      "value_column": "mean_reference_variation_rmse",
+      "value_domain": "nonnegative",
+      "source_scalar_column": "direct_prop5_variation_rmse",
+      "input_source": [
+        "saved_matched_updates",
+        "saved_initial_terminal_outcomes"
+      ],
+      "prediction_domain": "positive_noise_transitions",
+      "manuscript_domain": "t=2,...,T; chronological indices 0,...,T-2 only; T=1 is not_applicable",
+      "population": "One arithmetic mean per prompt-target pair and transition over the same complete fixed seed cohort; invalid or missing required rows exclude the whole curve with audit reason",
+      "color": "Mean terminal SSCD over exactly the same complete cohort; fixed [0,1] normalization",
+      "normalization": "Arithmetic mean of saved V_t/sqrt(d) estimates; no second dimensional normalization",
+      "reference_definition": "The Equation-15 cross-step norm integral uses the current unconditional posterior reference bar{x}_t(empty), not the selected global comparison mean mu",
+      "numerical_scope": "Original saved numerical estimates; finite nonnegative estimates retained despite unresolved condition signs or quadrature budget, with true direct_prop5_applicable and accepted source status. Not certified exact integrals. No substitution of refined interval midpoints.",
+      "accepted_integral_statuses": [
+        "estimated_converged",
+        "numerically_unresolved",
+        "analytic_single_atom_reference",
+        "converged"
+      ],
+      "cohort_audit_table": "audit_data/reference_variation_per_prompt_cohort.csv",
+      "measurement_audit_table": "audit_data/feedback_endpoints.csv",
+      "required_columns": [
+        "run_id",
+        "original_index",
+        "record_id",
+        "target_id",
+        "step_index",
+        "mean_reference_variation_rmse",
+        "mean_terminal_sscd",
+        "seed_count",
+        "seed_ids_json",
+        "latent_dimension",
+        "cohort_complete"
+      ],
+      "outputs": [
+        "appendix/reference_variation_per_prompt.png",
+        "appendix/reference_variation_per_prompt.pdf"
+      ],
+      "missing_saved_input": "Requires --recompute-experiments once to save the compact reduction with matching source receipts; compatible probes and variation integrals reused. No new integration, posterior or network evaluation for this reduction.",
+      "manuscript_connection": "Equation 15 and Proposition 5"
+    }
+  },
+  "retired_figure_contracts": {
+    "initial_unconditional_mean_concentration_zero": {
+      "formula_version": "zero-baseline-1",
+      "comparison_centre": "zero",
+      "declared_law_mean_unchanged": true,
+      "scope": "Descriptive companion using the original atoms, weights, Gaussian seeds, model predictions and posterior evaluations; zero is not substituted for the reference-law mean.",
+      "summary_table": "audit_data/zero_baseline_summary.csv",
+      "missing_data_policy": "Missing zero norms require analysis; centred norms cannot reconstruct them during plotting.",
+      "rendering_retired": true,
+      "measurements_retained": true
+    },
+    "unconditional_reference_convergence_zero": {
+      "formula_version": "zero-baseline-1",
+      "comparison_centre": "zero",
+      "declared_law_mean_unchanged": true,
+      "scope": "Descriptive companion using the original atoms, weights, Gaussian seeds, model predictions and posterior evaluations; zero is not substituted for the reference-law mean.",
+      "summary_table": "audit_data/zero_baseline_summary.csv",
+      "missing_data_policy": "Missing zero norms require analysis; centred norms cannot reconstruct them during plotting.",
+      "rendering_retired": true,
+      "measurements_retained": true
     }
   }
 }

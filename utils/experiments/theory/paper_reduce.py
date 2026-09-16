@@ -6,8 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
-from utils.common.io import atomic_write_json, canonical_hash, file_sha256
+from utils.common.io import atomic_write_json, canonical_hash, canonical_json, file_sha256
 from .contracts import FOUR_STAGE_OPTION_KEYS, TheoryError, numerical_config, read_object
 from .paper_contracts import (
     BUNDLE_SCHEMA_VERSION,
@@ -24,7 +25,7 @@ from .paper_contracts import (
     saved_scientific_configuration,
     write_plot_table,
 )
-from .paper_registry import REGISTRY_VERSION, paper_registry
+from .paper_registry import REGISTRY_VERSION, RETIRED_RENDER_STEMS, paper_registry
 from .progress import StageProgress
 
 
@@ -138,6 +139,56 @@ def _save_table(stage, relative, frame, numerical_files):
     return {"path": relative, **specification}
 
 
+def _save_peak_descriptive_summary(frames, figures, auxiliary):
+    """Analysis-only descriptive reduction of the already saved weighted bins.
+
+    The histogram keeps unresolved/flat mass in its original denominator. Its
+    quantiles explicitly describe only resolved peaks, without reclassifying a
+    trajectory or evaluating a model. Plot mode never calls this reduction.
+    """
+    stem = "branch_gap_peak_step"
+    frame, metadata = frames.get(stem), figures[stem]
+    if frame is None or frame.empty or metadata["status"] not in {"available", "complete"}:
+        return
+    records = []
+    for group, rows in frame.groupby("group", sort=True):
+        rows = rows.sort_values("step_index")
+        steps = pd.to_numeric(rows.step_index, errors="raise").to_numpy(dtype=float)
+        mass = pd.to_numeric(rows.fraction, errors="raise").to_numpy(dtype=float)
+        if (not np.isfinite(steps).all() or not np.isfinite(mass).all()
+                or (mass < 0).any() or (mass > 1).any()
+                or rows.step_index.duplicated().any()):
+            raise TheoryError("Invalid saved peak bins for descriptive summary")
+        total = float(mass.sum())
+        cumulative = np.cumsum(mass)
+        def quantile(level):
+            if total <= 0:
+                return None
+            index = min(int(np.searchsorted(cumulative, level * total, side="left")), len(steps) - 1)
+            return float(steps[index])
+        counts = metadata.get("shape_group_counts", {}).get(group, {})
+        records.append({
+            "group": group, "samples": counts.get("samples"),
+            "resolved_peak_count": counts.get("resolved_peak_count"),
+            "resolved_weight_fraction": total,
+            "unassigned_weight_fraction": counts.get("unassigned_weight_fraction"),
+            "mass_at_initialization": float(mass[steps == 0].sum()),
+            "q25_resolved_peak_step": quantile(.25),
+            "median_resolved_peak_step": quantile(.5),
+            "q75_resolved_peak_step": quantile(.75),
+            "multiple_exact_peak_count": counts.get("multiple_exact_peak_count"),
+            "multiple_near_peak_count": counts.get("multiple_near_peak_count"),
+            "status_counts_json": canonical_json(counts.get("status_counts", {})),
+            "summary_recipe": "saved-weighted-peak-bins-1",
+            "quantile_population": "Resolved individual peaks only; inverse weighted CDF at 0.25, 0.5, 0.75. Histogram and initialization mass retain the full original denominator.",
+        })
+    auxiliary["trajectory_peak_summary"] = pd.DataFrame(records)
+    metadata.update(trajectory_peak_summary="audit_data/trajectory_peak_summary.csv",
+                    peak_summary_status="saved_descriptive_reduction",
+                    peak_summary_details="Explicit analysis-only reduction of saved weighted bins. Quantiles condition on resolved peaks; the histogram, unknown mass and initialization mass keep the full original denominator.",
+                    peak_descriptive_statistics=records)
+
+
 def run_paper(
     project_root, *, source_analysis=None, source_logs=None, diagnostics=False,
     recompute=False, refine_numerics=False, device="auto", candidate_chunk_size=256, query_chunk_size=16,
@@ -161,8 +212,16 @@ def run_paper(
             "Run direct analysis against the declared protected generation caches without "
             "--source-analysis/--source-logs; historical candidate bundles remain preserved."
         )
-    root = Path(project_root).absolute()
     config = numerical_config(**configuration)
+    if config["center"] == "zero":
+        raise TheoryError(
+            "Zero centering is retired. Recompute with --center reference-initial; "
+            "paper computations use the saved reference mean for mu. "
+            "Historical bundles remain readable with --plot or --validate-only."
+        )
+    from .reduce import _resolve_theory_devices
+    _resolve_theory_devices(device)  # Fail before publication or any model/probe work.
+    root = Path(project_root).absolute()
     output = PaperPaths.build(root, **config).output_directory
     with publication_lock(output):
         previous_config = (read_object(output / "run_config.json")
@@ -177,10 +236,10 @@ def run_paper(
         if not refine_numerics:
             with StageProgress("Preparing fast endpoints and trajectory measurements"):
                 prepare_four_stage_primary(
-                    root, config=base_config, device=device,
+                    root, config=base_config, device=device, probe_batch_size=probe_batch_size,
                     candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
                 )
-        with StageProgress("Numerical refinement and collecting saved measurement tables"):
+        with StageProgress(f"CUDA interval refinement (float64; {base_config['numerical_max_decimal_products']:,} operations/row) and collecting saved tables"):
             result = run_precision_analysis(
                 root, config=base_config, refine_only=refine_numerics, device=device, probe_batch_size=probe_batch_size,
                 candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
@@ -194,10 +253,13 @@ def run_paper(
                 allow_compute=not refine_numerics,
             )
         with StageProgress("Collecting four-stage tables and baseline/trajectory summaries"):
+            # Response-policy changes require new analytical shards. This worker
+            # reads preserved core observations and never invokes learned probes;
+            # missing core observations still fail with a recomputation command.
             result = run_four_stage_analysis(
                 root, result=result, config=config, device=device, probe_batch_size=probe_batch_size,
                 candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
-                allow_compute=not refine_numerics,
+                allow_compute=True,
             )
         if config.get("counterfactual_unconditional", False):
             with StageProgress("Checking and collecting optional learned counterfactuals"):
@@ -212,6 +274,8 @@ def run_paper(
         registry_options = {"counterfactual": config.get("counterfactual_unconditional", False)}
         auxiliary = _auxiliary(frames, metadata)
         figures = metadata["figures"]
+        with StageProgress("Summarizing saved individual peak bins"):
+            _save_peak_descriptive_summary(frames, figures, auxiliary)
         # Compact science depends on measured scalar contents and formula recipes,
         # never on worker placement, wall time, batch size or figure styling.
         identity = _clean({
@@ -246,6 +310,15 @@ def run_paper(
                 raise TheoryError(f"Required evidence inputs unavailable; statuses retained: {failed}. "
                                   f"Run {recompute_command(config)}")
             raise TheoryError(f"Paper correctness audit blocked publication; retained identities and reasons: {failed}")
+        theory_mean = provenance.get("reference_law", {}).get("theory_mean", {})
+        if theory_mean.get("source") in {"initial_unconditional_reference_monte_carlo",
+                                        "minimum_snr_unconditional_reference_monte_carlo"}:
+            tqdm.write(
+                f"[Theory] Using reference mean at SNR={theory_mean['level']['snr']:.8g} "
+                f"from {theory_mean['sample_count']:,} independent Gaussian draws; "
+                f"||mu||/sqrt(d)={theory_mean['mean_norm_rmse']:.6g}; "
+                f"Monte Carlo RMS standard error={theory_mean['mean_mc_standard_error_rmse']:.6g}"
+            )
         previous = (read_object(output / "figure_manifest.json")
                     if (output / "figure_manifest.json").exists() else {})
         run_config = _clean({
@@ -262,31 +335,59 @@ def run_paper(
         })
         archive_previous = previous_config is not None and previous_config.get("scientific_hash") != scientific_hash
         with StageProgress("Publishing paper bundle"), staged_publication(output, archive_previous=archive_previous) as stage:
-            with StageProgress("Saving scalar tables and publication metadata") as progress:
+            registry = paper_registry(diagnostics=True, **registry_options)
+            plot_names = [entry["stem"] for entry in registry] + sorted(RETIRED_RENDER_STEMS)
+            baseline = tables.get("initial_baseline_summary", auxiliary.get("initial_baseline_summary"))
+            # Count the same optional tables as the save loops, plus three fixed
+            # CSVs and five JSON files. A file completes after its write/hash.
+            total_files = (sum(name in frames and len(frames[name].columns) > 0 for name in plot_names)
+                           + len(auxiliary) + 8 + (2 if baseline is not None else 0)
+                           + (1 if theory_mean else 0))
+            with tqdm(total=total_files, desc="[Theory] Saving scalar tables and publication metadata",
+                      unit="file", dynamic_ncols=True, leave=True) as progress:
                 numerical_files, plot_data = {}, {}
-                for entry in paper_registry(diagnostics=True, **registry_options):
+                for entry in registry:
                     name = entry["stem"]
                     if name not in figures:
                         raise TheoryError(f"Missing paper measurement contract: {name}")
                     if name in frames and len(frames[name].columns):
-                        progress.set_detail(f"plot_data/{name}.csv: {len(frames[name]):,} rows")
+                        progress.set_postfix_str(f"plot_data/{name}.csv: {len(frames[name]):,} rows")
                         plot_data[name] = _save_table(stage, f"plot_data/{name}.csv", frames[name], numerical_files)
+                        progress.update(1)
+                # Retire only motion exports. Keep their compact measurements
+                # and ownership hashes alongside the unchanged identity audits.
+                for name in sorted(RETIRED_RENDER_STEMS):
+                    if name in frames and len(frames[name].columns):
+                        progress.set_postfix_str(f"plot_data/{name}.csv: {len(frames[name]):,} rows")
+                        plot_data[name] = _save_table(stage, f"plot_data/{name}.csv", frames[name], numerical_files)
+                        progress.update(1)
                 for name, frame in auxiliary.items():
-                    progress.set_detail(f"audit_data/{name}.csv: {len(frame):,} rows")
+                    progress.set_postfix_str(f"audit_data/{name}.csv: {len(frame):,} rows")
                     _save_table(stage, "audit_data/" + name + ".csv", frame, numerical_files)
-                baseline = tables.get("initial_baseline_summary", auxiliary.get("initial_baseline_summary"))
+                    progress.update(1)
                 if baseline is not None:
-                    progress.set_detail("initial_baseline_summary.csv")
+                    progress.set_postfix_str("initial_baseline_summary.csv")
                     _save_table(stage, "initial_baseline_summary.csv", baseline, numerical_files)
+                    progress.update(1)
+                    progress.set_postfix_str("initial_baseline_summary.json")
                     atomic_write_json(stage / "initial_baseline_summary.json", _clean({
                         "schema_version": 1, "rows": baseline.to_dict("records"),
-                        "scope": "unique_Gaussian_seed_mean_baseline_about_declared_empirical_law",
+                        "scope": "unique_Gaussian_evaluation_seeds_about_selected_theory_mean; exact_bank_mean_reported_separately",
                     }))
                     numerical_files["initial_baseline_summary.json"] = file_sha256(stage / "initial_baseline_summary.json")
+                    progress.update(1)
+                if theory_mean:
+                    progress.set_postfix_str("theory_mean.json")
+                    atomic_write_json(stage / "theory_mean.json", _clean(theory_mean))
+                    numerical_files["theory_mean.json"] = file_sha256(stage / "theory_mean.json")
+                    progress.update(1)
                 for name in ("initial", "terminal"):
-                    progress.set_detail(f"{name}.csv: {len(tables[name]):,} rows")
+                    progress.set_postfix_str(f"{name}.csv: {len(tables[name]):,} rows")
                     _save_table(stage, name + ".csv", tables[name], numerical_files)
+                    progress.update(1)
+                progress.set_postfix_str("failed.csv")
                 _save_table(stage, "failed.csv", pd.DataFrame(columns=["record_id", "reason"]), numerical_files)
+                progress.update(1)
                 scalar_aliases = {}
                 for logical_name, source_name in (("initial_pairs", "initial_loss_recovery"),):
                     if source_name in plot_data:
@@ -302,18 +403,22 @@ def run_paper(
                     "reading_policy": "Analysis-only scalar tables; plot mode reads compact plot_data CSVs only.",
                 }
                 for name, value in (("run_config.json", run_config), ("audit.json", audit), ("logical_tables.json", logical)):
-                    progress.set_detail(name)
+                    progress.set_postfix_str(name)
                     atomic_write_json(stage / name, _clean(value))
                     numerical_files[name] = file_sha256(stage / name)
-                atomic_write_json(stage / "registry.json", {"version": REGISTRY_VERSION, "figures": paper_registry(diagnostics=True, **registry_options)})
+                    progress.update(1)
+                progress.set_postfix_str("registry.json")
+                atomic_write_json(stage / "registry.json", {"version": REGISTRY_VERSION, "figures": registry})
+                progress.update(1)
                 summary = _clean({
                     "schema_version": 2, "complete": True, "scientific_hash": scientific_hash,
                     "figures": figures, "plot_data": plot_data, "numerical_files": numerical_files,
                     "counts": {"initial_rows": len(tables["initial"]), "terminal_rows": len(tables["terminal"]),
                                "trajectory_rows": len(tables["trajectory"])},
                 })
-                progress.set_detail("summary.json")
+                progress.set_postfix_str("summary.json")
                 atomic_write_json(stage / "summary.json", summary)
+                progress.update(1)
             with StageProgress("Validating saved scalar publication"):
                 load_paper_inputs(stage, expected_config=config, diagnostics=diagnostics)
             render_paper(stage, diagnostics=diagnostics)

@@ -21,7 +21,7 @@ def test_fresh_paper_entry_uses_one_shared_direct_stage(tmp_path, monkeypatch):
         # exports. The retirement contract still needs the new ownership file.
         atomic_write_json(stage / "figure_manifest.json", {"files": {}, "figures": [], "complete": True})
     monkeypatch.setattr(paper_plotting, "render_paper", publish_manifest)
-    output = paper_reduce.run_paper(tmp_path, device="cpu", probe_batch_size=4, **direct_config())
+    output = paper_reduce.run_paper(tmp_path, device="cuda:0", probe_batch_size=4, **direct_config())
     assert len(calls) == 1 and calls[0]["probe_batch_size"] == 4
     saved, summary, _, frames = load_paper_inputs(output, expected_config=direct_config())
     assert saved["source_analysis"]["mode"] == "preserved_numerical_and_evidence_measurements"

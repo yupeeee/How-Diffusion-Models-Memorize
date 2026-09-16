@@ -1,25 +1,26 @@
 """Versioned fixed-cache arithmetic refinements, separate from legacy scalars.
 
 No model, raw-cache loader, file writer, or scheduler mutation enters this
-module. GPU float64 assessments are distinct from selective CPU Decimal
-certificates. A certificate over rounded sufficient inputs is explicitly NOT a
+module. GPU float64 assessments are distinct from CUDA outward binary64
+enclosures. No production numerical fallback runs on CPU. A certificate over rounded sufficient inputs is explicitly NOT a
 certificate of their construction from the original saved vectors.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from decimal import Decimal, DecimalException
 import math
 
 import torch
 
 from .numerical_screening import screen_negative_condition
-from .numerical_intervals import (
-    ArithmeticBudgetExceeded, Directed, Interval, enclose_variation,
-    interval_gain, negative_condition_precheck, posterior_mean,
+from .gpu_intervals import ArithmeticBudgetExceeded, GpuDirected
+from .gpu_refinement import (
+    clean_intervals as _clean_intervals, enclose_variation, interval_gain,
+    negative_condition_precheck, posterior_mean, raw_row as _raw_row,
+    raw_segment as _raw_segment, require_cuda, source_robust_gain_interval,
 )
 
-NUMERICAL_VERSION = "fixed-cache-numerics-2"
+NUMERICAL_VERSION = "fixed-cache-numerics-cuda-3"
 PAYLOAD_VERSION = 2
 
 
@@ -40,11 +41,15 @@ class NumericalPolicy:
 
     def identity(self):
         return {"version": NUMERICAL_VERSION, **asdict(self),
-                "retry_precision_multiplier": 2,
-                "screening": "batched_outward_float64_squared_negative_condition_before_Decimal",
+                "backend": "cuda_outward_binary64", "cpu_fallback": False,
+                "effective_dtype": "float64", "effective_mantissa_bits": 53,
+                "decimal_precision_role": "legacy_configuration_only_no_Decimal_execution",
+                "max_decimal_products_role": "compatibility_alias_for_GPU_interval_operation_budget",
+                "retry_precision_multiplier": 1,
+                "screening": "batched_outward_float64_squared_negative_condition_before_GPU_enclosure",
                 "gain_retry_selection": "nonfinite_or_unresolved_stable_gain_or_H_G_disagreement_or_raw_rounded_zero; saturation_and_absolute_subtraction_are_diagnostics",
-                "certified_arithmetic": "Decimal directed basic operations; correctly-rounded transcendentals expanded by one Decimal ulp",
-                "budget_scope": "charged Decimal primitives and bulk interval-input conversions across both attempts per row; tensor transport and reused shared atoms are separate"}
+                "certified_arithmetic": "CUDA outward binary64 primitives and bounded series transcendental enclosures; fixed precision",
+                "budget_scope": "charged CUDA interval scalar primitives per row; device transport and shared input storage separate"}
 
 
 def _flat(value, device):
@@ -79,7 +84,7 @@ def build_refinement_payload(support, verified_inputs, *, bank_hash, target_atom
     x = verified_inputs
     if x.get("stored_prediction_type", "epsilon") != "epsilon":
         raise ValueError("Refinement requires already-canonical saved epsilon")
-    device = support.flat.device
+    device = require_cuda(support.flat.device)
     state, epsilon_u, epsilon_c, observed = [_flat(x[key], device) for key in (
         "state", "epsilon_u", "epsilon_c", "saved_endpoint")]
     target = torch.as_tensor(x["target"], dtype=torch.float64, device=device).reshape(-1)
@@ -210,86 +215,6 @@ def stable_gain(intercept, slopes, target_atom):
             "log_odds0": -c0, "log_odds1": -c1, "flagged": flagged, "zero": zero}
 
 
-def _points(values, arithmetic=None):
-    if arithmetic is not None:
-        arithmetic.charge(len(values))
-    return [Interval.point(value) for value in values]
-
-
-def _raw_row(verified, index):
-    if verified is None:
-        return None
-    result = dict(verified)
-    for key in ("state", "epsilon_u", "epsilon_c", "saved_endpoint", "independent_innovation"):
-        if result.get(key) is not None:
-            result[key] = torch.as_tensor(result[key]).reshape(len(result[key]), -1)[index].detach().cpu().tolist()
-    if result.get("source_endpoint_radii") is not None:
-        result["source_endpoint_radii"] = torch.as_tensor(result["source_endpoint_radii"]).reshape(-1, 2)[index].detach().cpu().tolist()
-    result["target"] = torch.as_tensor(result["target"]).detach().cpu().reshape(-1).tolist()
-    return result
-
-
-def _clean_intervals(c, raw):
-    state, u, v = (_points(raw[key], c) for key in ("state", "epsilon_u", "epsilon_c"))
-    target_points = _points(raw["target"], c)
-    alpha, sigma = Interval.point(raw["alpha"]), Interval.point(raw["sigma"])
-    mu = [c.div(c.sub(z, c.mul(sigma, e)), alpha) for z, e in zip(state, u)]
-    mc = [c.div(c.sub(z, c.mul(sigma, e)), alpha) for z, e in zip(state, v)]
-    # Direct epsilon difference reduces dependency inflation in tiny gaps.
-    delta = [c.div(c.mul(sigma, c.sub(eu, ec)), alpha) for eu, ec in zip(u, v)]
-    D = c.norm(delta)
-    ec = c.norm([c.sub(value, target) for value, target in zip(mc, target_points)])
-    return state, mu, mc, delta, D, ec
-
-
-def _raw_logits(c, atoms, masses, target_atom, query, alpha, sigma):
-    alpha, sigma = Interval.point(alpha), Interval.point(sigma)
-    sigma2 = c.square(sigma)
-    beta = c.div(alpha, sigma2)
-    gamma = c.div(c.square(alpha), c.mul(Interval.point(2), sigma2))
-    target = atoms[target_atom]
-    offset = [c.sub(q, c.mul(alpha, u)) for q, u in zip(query, target)]
-    logits = []
-    for index, atom in enumerate(atoms):
-        if index == target_atom:
-            logits.append(Interval.point(0))
-            continue
-        geometry = [c.sub(u, v) for u, v in zip(atom, target)]
-        likelihood = c.sub(c.mul(beta, c.dot(offset, geometry)), c.mul(gamma, c.dot(geometry, geometry)))
-        logits.append(c.add(likelihood, c.log(c.div(masses[index], masses[target_atom]))))
-    return logits
-
-
-def _raw_segment(c, raw, atoms, masses, target_atom, clean):
-    state, mu, _mc, delta, D, ec = clean
-    A, kappa, g = (Interval.point(raw[key]) for key in ("A", "kappa", "guidance"))
-    observed = _points(raw["saved_endpoint"], c)
-    h = [c.mul(c.mul(g, kappa), value) for value in delta]
-    independent = raw.get("independent_innovation")
-    if independent is not None or raw["noise_std"] == 0:
-        noise = _points(independent, c) if independent is not None else [Interval.point(0)] * len(state)
-        baseline = [c.add(c.add(c.mul(A, x), c.mul(kappa, u)), innovation)
-                    for x, u, innovation in zip(state, mu, noise)]
-    else:
-        baseline = [c.sub(y, step) for y, step in zip(observed, h)]
-    saved_h = [c.sub(y, z) for y, z in zip(observed, baseline)]
-    b = _raw_logits(c, atoms, masses, target_atom, baseline, raw["destination_alpha"], raw["destination_sigma"])
-    beta = c.div(Interval.point(raw["destination_alpha"]), c.square(Interval.point(raw["destination_sigma"])))
-    geometry = [[c.sub(u, v) for u, v in zip(atom, atoms[target_atom])] for atom in atoms]
-    slopes = [c.mul(beta, c.dot(h, atom)) for atom in geometry]
-    saved_slopes = [c.mul(beta, c.dot(saved_h, atom)) for atom in geometry]
-    current_logits = _raw_logits(c, atoms, masses, target_atom, state, raw["alpha"], raw["sigma"])
-    current_mean = posterior_mean(c, atoms, c.softmax(current_logits))
-    eu = c.norm([c.sub(u, v) for u, v in zip(mu, current_mean)])
-    residual = c.norm([c.sub(y, c.add(z, step)) for y, z, step in zip(observed, baseline, h)])
-    radius = Interval.point(max(c.norm(atom).upper for atom in geometry))
-    spatial_factor = c.mul(beta, radius)
-    gain_transfer = c.mul(spatial_factor, residual)
-    return {"b": b, "slopes": slopes, "saved_slopes": saved_slopes,
-            "current_mean": current_mean, "D": D, "ec": ec, "eu": eu,
-            "transfer": gain_transfer, "beta": beta, "spatial_factor": spatial_factor, "prefactor": c.mul(c.mul(beta, g), kappa)}
-
-
 def _store_interval(result, name, value):
     if value is None:
         result[name + "_lower"], result[name + "_upper"] = math.nan, math.nan
@@ -348,12 +273,10 @@ def _gain_retry_needed(values, index, *, original_inputs, singleton):
 def _posterior_work_floor(size, dimension, *, original_inputs):
     """Lower bound on this policy's unavoidable charged projection work.
 
-    Two raw logit evaluations each use a d-subtraction geometry and two
-    5*d-operation dot products for every non-target atom. Both slope arrays
-    also require 5*d dot operations for every atom. Other work is omitted.
-    Reduced payloads still need at least the posterior-mean products.
+    This is a conservative lower bound used only for work selection; actual
+    CUDA interval primitives charge their own vectorized operation counts.
     """
-    return (22 * (size - 1) + 10 * size) * dimension if original_inputs else 4 * size * dimension
+    return 4 * size * dimension
 
 
 def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=None):
@@ -364,6 +287,7 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
     Heuristic source sensitivity NEVER broadens fixed-input error intervals.
     """
     policy = NumericalPolicy() if policy is None else policy
+    require_cuda(support.flat.device)
     if payload.get("schema_version") not in {1, PAYLOAD_VERSION}:
         raise ValueError("Unsupported numerical sufficient-input schema")
     target = int(payload["target_atom"])
@@ -379,7 +303,7 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
     rows = _base_records(base_rows, count)
     actual, affine = stable_gain(b, actual_a, target), stable_gain(b, a, target)
     # Screen the raw fixed-input condition on the current worker device before
-    # any raw vectors become Python objects or enter high-precision arithmetic.
+    # selective GPU enclosure work. Raw vectors stay on the CUDA device.
     screening = None
     if verified_inputs is not None and payload.get("manuscript_domain", True):
         screening = screen_negative_condition(verified_inputs, device=b.device)
@@ -397,11 +321,11 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
     affine_fast = {key: host["affine_" + key] for key in affine}
     scalars = {key: host["norm_" + key] for key in norm_names}
     screen = None if screening is None else {key: host["screen_" + key] for key in screen_names}
-    for name, values in scalars.items():
-        vector = torch.as_tensor(values, dtype=torch.float64)
+    for name in norm_names:
+        vector = torch.as_tensor(payload[name], dtype=torch.float64, device=b.device)
         if vector.shape != (count,) or not bool(torch.isfinite(vector).all() & (vector >= 0).all()):
             raise ValueError("Invalid nonnegative norm sufficient input: " + name)
-    stored_weights = torch.as_tensor(payload["current_weights"], dtype=torch.float64)
+    stored_weights = torch.as_tensor(payload["current_weights"], dtype=torch.float64, device=b.device)
     if stored_weights.shape != b.shape or not bool(torch.isfinite(stored_weights).all() & (stored_weights >= 0).all()) or bool((stored_weights.sum(1) <= 0).any()):
         raise ValueError("Invalid current reference weights")
     atoms = None
@@ -454,12 +378,17 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
             "numerical_gain_before": str(old.get("direct_prop5_gain_status", "unavailable")),
             "numerical_condition_before": str(old.get("direct_prop5_condition_status", "unavailable")),
             "numerical_decimal_precision": 0, "numerical_decimal_products": 0, "numerical_variation_nodes": 0,
+            "numerical_gpu_products": 0, "numerical_backend": "cuda_outward_binary64",
+            "numerical_effective_mantissa_bits": 53,
+            "numerical_gpu_refinement_selected": False, "numerical_gpu_refinement_executed": False,
+            "numerical_gpu_refinement_reason": "none",
             "numerical_max_decimal_products": policy.max_decimal_products,
             "numerical_max_variation_nodes": policy.max_variation_nodes,
-            "numerical_max_decimal_precision": 2 * policy.decimal_precision,
+            "numerical_max_decimal_precision": 0,
+            "numerical_max_gpu_products": policy.max_decimal_products,
             "numerical_variation_absolute_width": policy.variation_absolute_width,
             "numerical_certification_scope": "none_float64_assessment",
-            "numerical_stopping_reason": "fallback_disabled_by_zero_budget" if policy.max_decimal_products == 0 else "float64_gain_assessed_condition_not_enclosed",
+            "numerical_stopping_reason": "gpu_refinement_disabled_by_zero_budget" if policy.max_decimal_products == 0 else "float64_gain_assessed_condition_not_enclosed",
             "numerical_publication_blocker": False, "implication_eligible": False,
             "implication_audit_status": "unavailable_same_endpoint_and_original_input_enclosure_required",
             "numerical_gain_underflow": H == 0 and sign in {"positive", "negative"},
@@ -532,13 +461,13 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
         condition_retry = result["condition_sign_status"] == "unresolved"
         reasons = [name for name, selected in (("gain_arithmetic", gain_retry),
             ("condition_sign", condition_retry), ("source_perturbation", source_retry)) if selected]
-        result["numerical_cpu_fallback_selected"] = bool(reasons)
-        result["numerical_cpu_fallback_reason"] = "+".join(reasons) or "none"
+        result["numerical_gpu_refinement_selected"] = bool(reasons)
+        result["numerical_gpu_refinement_reason"] = "+".join(reasons) or "none"
         if not reasons:
             output.append(result)
             continue
         if policy.max_decimal_products == 0:
-            result["numerical_stopping_reason"] = "fallback_disabled_by_zero_budget"
+            result["numerical_stopping_reason"] = "gpu_refinement_disabled_by_zero_budget"
             output.append(result)
             continue
         # Avoid moving/converting a raw row when even the unavoidable clean
@@ -550,23 +479,22 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
             # The original margin remains unknown without eu and V.
             minimum_work += _posterior_work_floor(support.size, support.dimension, original_inputs=original_certificate)
         if minimum_work > policy.max_decimal_products:
-            result["numerical_stopping_reason"] = "decimal_operation_budget_exhausted_before_raw_conversion"
+            result["numerical_stopping_reason"] = "gpu_operation_budget_exhausted_before_raw_enclosure"
             output.append(result)
             continue
-        raw = _raw_row(verified_inputs, index)
-        result["numerical_cpu_fallback_executed"] = True
+        raw = _raw_row(verified_inputs, index, device=b.device)
+        result["numerical_gpu_refinement_executed"] = True
         total_operations = 0
         saved_gain = None
         affine_gain = None
         segment = None
         variation = None
-        for precision in (policy.decimal_precision, 2 * policy.decimal_precision):
+        for _attempt in range(1):  # More work cannot increase binary64 precision.
             remaining = policy.max_decimal_products - total_operations
             if remaining <= 0:
                 break
-            c = Directed(precision, remaining)
+            c = GpuDirected(max_products=remaining, device=b.device)
             previous_nodes = result["numerical_variation_nodes"]
-            result["numerical_decimal_precision"] = precision
             try:
                 if raw is not None:
                     clean = _clean_intervals(c, raw)
@@ -574,9 +502,9 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
                 else:
                     clean = None
                     precheck = negative_condition_precheck(
-                        Interval.point(scalars["delta_norm"][index]), Interval.point(scalars["conditional_error"][index]),
-                        Interval.point(scalars["unconditional_reference_error"][index]), arithmetic=c)
-                result["numerical_condition_precheck_upper_l2"] = Interval.point(precheck["upper"]).floats()[1]
+                        c.interval(scalars["delta_norm"][index]), c.interval(scalars["conditional_error"][index]),
+                        c.interval(scalars["unconditional_reference_error"][index]), arithmetic=c)
+                result["numerical_condition_precheck_upper_l2"] = float(precheck["upper"])
                 if precheck["condition_sign_status"] == "negative":
                     result["condition_sign_status"] = "negative"
                     result["numerical_margin_upper_l2"] = result["numerical_condition_precheck_upper_l2"]
@@ -591,28 +519,27 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
                 if _posterior_work_floor(support.size, support.dimension, original_inputs=original_certificate) > c.max_products - c.products:
                     raise ArithmeticBudgetExceeded("remaining budget cannot cover a full declared support projection")
                 if atoms is None:
-                    c.charge(support.size * support.dimension + support.size)
-                    atoms = [_points(atom) for atom in support.flat.detach().cpu().tolist()]
-                    masses = _points(support.weights.detach().cpu().tolist())
+                    atoms = c.interval(support.flat)
+                    masses = c.interval(support.weights)
                 if raw is not None:
-                    segment = _raw_segment(c, raw, atoms, masses, target, clean)
+                    segment = _raw_segment(c, raw, atoms, masses, target, clean, chunk=support.candidate_chunk)
                 else:
-                    bi, ai, si = (_points(value[index].detach().cpu().tolist(), c) for value in (b, a, actual_a))
-                    weights = _points(torch.as_tensor(payload["current_weights"])[index].tolist(), c)
+                    bi, ai, si = (c.interval(value[index]) for value in (b, a, actual_a))
+                    weights = c.interval(stored_weights[index])
                     if "current_logits" in payload:
-                        weights = c.softmax(_points(torch.as_tensor(payload["current_logits"])[index].tolist(), c))
+                        weights = c.softmax(c.interval(torch.as_tensor(payload["current_logits"], device=b.device, dtype=torch.float64)[index]))
                         convex = True
                         defect = None
                     else:
                         total = c.total(weights)
-                        residual = c.sub(total, Interval.point(1))
-                        defect = Interval.point(max(residual.lower.copy_abs(), residual.upper.copy_abs()))
+                        residual = c.sub(total, c.interval(1))
+                        defect = c.interval(torch.maximum(residual.lower.abs(), residual.upper.abs()))
                         convex = False
                     segment = {"b": bi, "slopes": ai, "saved_slopes": si,
                                "current_mean": posterior_mean(c, atoms, weights),
-                               "D": Interval.point(scalars["delta_norm"][index]),
-                               "ec": Interval.point(scalars["conditional_error"][index]),
-                               "eu": Interval.point(scalars["unconditional_reference_error"][index]),
+                               "D": c.interval(scalars["delta_norm"][index]),
+                               "ec": c.interval(scalars["conditional_error"][index]),
+                               "eu": c.interval(scalars["unconditional_reference_error"][index]),
                                "convex": convex, "mass_defect": defect}
                 saved_gain = interval_gain(c, segment["b"], segment["saved_slopes"], target)
                 affine_gain = interval_gain(c, segment["b"], segment["slopes"], target)
@@ -621,12 +548,14 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
                     for name, interval in (("numerical_log_probability_gain", saved_gain["H"]), ("numerical_log_odds_gain", saved_gain["G"])):
                         if interval is not None:
                             old_value = result[name]
-                            if not math.isfinite(old_value) or not interval.lower <= Decimal.from_float(old_value) <= interval.upper:
-                                result[name] = float(c.near.divide(c.near.add(interval.lower, interval.upper), Decimal(2)))
+                            if not math.isfinite(old_value) or not bool((interval.lower <= old_value) & (old_value <= interval.upper)):
+                                midpoint = interval.lower / 2. + interval.upper / 2.
+                                if bool(torch.isfinite(midpoint)):
+                                    result[name] = float(midpoint)
 
                 result["arithmetic_status"] = "certified_original_saved_inputs" if original_certificate else "certified_reduced_payload_only"
-                result["arithmetic_error_method"] = "directed_Decimal_input_to_gain_enclosure"
-                result["numerical_certification_scope"] = "original_saved_tensors_atoms_masses_and_scalar_coefficients" if original_certificate else "rounded_cached_sufficient_floats_only_not_original_tensor_construction"
+                result["arithmetic_error_method"] = "outward_cuda_binary64_input_to_gain_enclosure"
+                result["numerical_certification_scope"] = "original_saved_tensors_atoms_masses_and_scalar_coefficients_cuda_binary64_enclosure" if original_certificate else "rounded_cached_sufficient_floats_only_not_original_tensor_construction"
                 for prefix, gain in (("numerical_gain", saved_gain), ("numerical_affine_gain", affine_gain)):
                     _store_interval(result, prefix + "_H", gain["H"])
                     _store_interval(result, prefix + "_G", gain["G"])
@@ -646,14 +575,14 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
                     else:
                         result["numerical_gain_sign_audit_status"] = "consistent_or_H_magnitude_unresolved_sign_follows_G"
                     # Concavity bounds: slope at 1 <= G <= slope at 0.
-                    violation = saved_gain["G"].lower > saved_gain["slope0"].upper or saved_gain["G"].upper < saved_gain["slope1"].lower
+                    violation = bool((saved_gain["G"].lower > saved_gain["slope0"].upper) | (saved_gain["G"].upper < saved_gain["slope1"].lower))
                     result["numerical_concavity_audit_status"] = "failed_certified_concavity" if violation else "consistent_interval_concavity"
                     result["numerical_publication_blocker"] |= violation
                 if result["condition_sign_status"] not in {"negative", "positive", "zero"}:
                     full_pre = negative_condition_precheck(segment["D"], segment["ec"], segment["eu"], arithmetic=c)
                     if full_pre["condition_sign_status"] == "negative":
                         result["condition_sign_status"] = "negative"
-                        result["numerical_margin_upper_l2"] = Interval.point(full_pre["upper"]).floats()[1]
+                        result["numerical_margin_upper_l2"] = float(full_pre["upper"])
                         result["numerical_stopping_reason"] = "negative_condition_precheck_full_reference"
                         result["condition_arithmetic_status"] = result["arithmetic_status"]
                     else:
@@ -668,13 +597,13 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
                         result["numerical_variation_lower_l2"], result["numerical_variation_upper_l2"] = variation["V"].floats()
                         result["numerical_margin_lower_l2"], result["numerical_margin_upper_l2"] = variation["M"].floats()
                         result["condition_sign_status"] = variation["M"].sign
-                        result["numerical_condition_nonnegative_certified"] = variation["M"].lower >= 0 and original_certificate
+                        result["numerical_condition_nonnegative_certified"] = bool(variation["M"].lower >= 0) and original_certificate
                         result["condition_value_status"] = "enclosed_original_margin" if original_certificate else "enclosed_reduced_payload_margin_only"
                         result["quadrature_status"] = "certified_enclosure" if original_certificate else "certified_reduced_payload_only"
                         result["quadrature_error_scope"] = variation["error_method"]
                         result["numerical_variation_nodes"] += variation["nodes"]
                         _store_interval(result, "numerical_integrated_affine_H", variation["integrated_H"])
-                        disjoint = variation["integrated_H"].upper < affine_gain["H"].lower or variation["integrated_H"].lower > affine_gain["H"].upper
+                        disjoint = bool((variation["integrated_H"].upper < affine_gain["H"].lower) | (variation["integrated_H"].lower > affine_gain["H"].upper))
                         result["numerical_integral_identity_status"] = "failed_certified_affine_integral_identity" if disjoint else "consistent_affine_endpoint_integral_enclosures"
                         result["numerical_integral_audit_status"] = result["numerical_integral_identity_status"]
                         result["numerical_publication_blocker"] |= disjoint
@@ -685,23 +614,23 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
                     transferred = c.sub(lower_bound, segment["transfer"])
                     result["numerical_endpoint_transfer_bound"] = segment["transfer"].floats()[1]
                     result["numerical_saved_gain_theorem_lower_bound"] = transferred.floats()[0]
-                    result["implication_eligible"] = variation["M"].lower > 0 and transferred.lower > 0
-                    contradiction = result["implication_eligible"] and saved_gain["G"] is not None and saved_gain["G"].upper <= 0
+                    result["implication_eligible"] = bool((variation["M"].lower > 0) & (transferred.lower > 0))
+                    contradiction = result["implication_eligible"] and saved_gain["G"] is not None and bool(saved_gain["G"].upper <= 0)
                     result["implication_audit_status"] = "failed_certified_positive_margin_implication" if contradiction else "checked_original_affine_bound_with_proven_saved_endpoint_transfer" if result["implication_eligible"] else "unavailable_positive_margin_or_endpoint_transfer_not_resolved"
                     result["numerical_publication_blocker"] |= contradiction
                 if result["fixed_cache_gain_sign"] != "unresolved" and result["condition_sign_status"] != "unresolved":
                     break
             except ArithmeticBudgetExceeded:
-                result["numerical_stopping_reason"] = "decimal_operation_budget_exhausted"
+                result["numerical_stopping_reason"] = "gpu_operation_budget_exhausted"
                 break
-            except (ArithmeticError, DecimalException, ValueError, OverflowError) as error:
+            except (ArithmeticError, ValueError, OverflowError) as error:
                 result["numerical_stopping_reason"] = "arithmetic_enclosure_unavailable: " + type(error).__name__
                 result["numerical_enclosure_failure"] = str(error)
                 break
             finally:
                 total_operations += c.products
                 result["numerical_variation_nodes"] = max(result["numerical_variation_nodes"], previous_nodes + c.evaluated_nodes)
-        result["numerical_decimal_products"] = total_operations
+        result["numerical_gpu_products"] = total_operations
         result["numerical_gain_underflow"] = H == 0 and result["fixed_cache_gain_sign"] in {"positive", "negative"}
         if not original_certificate:
             # A certificate of rounded reduced statistics is useful diagnostic
@@ -709,24 +638,3 @@ def refine_payload(support, payload, base_rows, *, policy=None, verified_inputs=
             result["input_contract_status"] = "rounded_sufficient_inputs_only_original_construction_unenclosed"
         output.append(result)
     return output
-
-
-def source_robust_gain_interval(gain, *, beta_radius, endpoint_radii, justification, arithmetic=None):
-    """Propagate only a declared, justified endpoint-location perturbation.
-
-    The law and destination coefficients are fixed. Each spatial gradient of
-    log p and logit p has norm <= beta*R; independent endpoint radius bounds
-    therefore contribute beta*R*(r0+r1). This API refuses a bare dtype heuristic.
-    """
-    if (not isinstance(justification, dict) or justification.get("status") != "justified_bound"
-            or justification.get("scope") != "endpoint_locations_only_fixed_law_and_coefficients"
-            or not justification.get("derivation")):
-        raise ValueError("Endpoint perturbation radii need an explicit justified scope and derivation")
-    if len(endpoint_radii) != 2 or any(not math.isfinite(float(value)) or value < 0 for value in endpoint_radii):
-        raise ValueError("Endpoint radii must be finite and nonnegative")
-    c = arithmetic or Directed()
-    beta_radius = beta_radius if isinstance(beta_radius, Interval) else Interval.point(beta_radius)
-    if beta_radius.lower < 0:
-        raise ValueError("Spatial Lipschitz factor must be nonnegative")
-    error = c.mul(beta_radius, c.total(Interval.point(value) for value in endpoint_radii))
-    return Interval(c.sub(gain, error).lower, c.add(gain, error).upper)

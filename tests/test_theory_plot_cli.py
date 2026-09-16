@@ -372,6 +372,11 @@ if [[ "$wrapper_name" == "$FAIL_WRAPPER" && " $* " == *" --model $FAIL_MODEL "* 
         wrapper = project / f"{name}.sh"
         wrapper.write_text(fake)
         wrapper.chmod(0o755)
+    # Stub only the CUDA availability preflight; stage commands remain logged
+    # independently. These routing fixtures must never import a numerical stack.
+    interpreter = project / "python-preflight"
+    interpreter.write_text('#!/bin/sh\ncat >/dev/null\nexit "${CUDA_PREFLIGHT_EXIT_CODE:-0}"\n')
+    interpreter.chmod(0o755)
     log = tmp_path / "calls.log"
     result = subprocess.run(
         ["bash", str(runner), *arguments],
@@ -379,6 +384,7 @@ if [[ "$wrapper_name" == "$FAIL_WRAPPER" && " $* " == *" --model $FAIL_MODEL "* 
         env={
             **os.environ,
             "RUN_ALL_LOG": str(log),
+            "PYTHON": str(interpreter),
             "DOWNLOAD_EXIT_CODE": "0",
             "FAIL_WRAPPER": "",
             "FAIL_MODEL": "",
@@ -500,6 +506,9 @@ def test_root_matrix_filters_only_requested_axes(tmp_path, arguments, expected):
         ("--selection-strategy=all",),
         ("--center", "wrong"),
         ("--no-mu", "--use-mu"),
+        ("--no-mu",),
+        ("--center", "zero"),
+        ("--center=zero",),
         ("--use-mu",),
         ("--center", "zero", "--cached-baseline", "/tmp/old"),
         ("--evaluation-source", "trajectory"),
@@ -518,14 +527,27 @@ def test_root_invalid_options_fail_before_any_stage(tmp_path, arguments):
     assert not calls
 
 
-def test_root_preflight_whole_matrix_precedes_every_plot(tmp_path):
+@pytest.mark.parametrize(
+    "failed_model, failed_pairs",
+    [("sdv1", ("sdv1:ddim", "sdv1:ddpm")),
+     ("sdv2", ("sdv2:ddim",)), ("realvis", ("realvis:ddim",))],
+)
+def test_root_preflight_whole_matrix_precedes_every_plot(tmp_path, failed_model, failed_pairs):
     result, calls = _run_all_stub(
-        tmp_path, ("--plot",), FAIL_WRAPPER="theory_validation.sh", FAIL_MODEL="sdv2"
+        tmp_path, ("--plot",), FAIL_WRAPPER="theory_validation.sh", FAIL_MODEL=failed_model
     )
     assert result.returncode == 17
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert all("--validate-only" in c for c in calls)
     assert not any("--plot" in c for c in calls)
+    assert [(_option(c, "--model"), _option(c, "--scheduler")) for c in calls] == [
+        ("sdv1", "ddim"), ("sdv1", "ddpm"), ("sdv2", "ddim"), ("realvis", "ddim"),
+    ]
+    assert f"plot preflight failed for {len(failed_pairs)}/4 configurations" in result.stderr
+    assert "no figures were changed" in result.stderr
+    for pair in failed_pairs:
+        assert f"  {pair}\n" in result.stderr
+    assert "--model and --scheduler" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -565,7 +587,7 @@ def test_root_preserves_nondefault_guidance_seeds_and_upstream_overwrite_scope(
             "--T",
             "4",
             "--center",
-            "zero",
+            "reference-initial",
         ),
     )
     assert result.returncode == 0, result.stderr
@@ -579,7 +601,7 @@ def test_root_preserves_nondefault_guidance_seeds_and_upstream_overwrite_scope(
         "3",
         "0",
     ]
-    assert _option(calls[-1], "--center") == "zero"
+    assert _option(calls[-1], "--center") == "reference-initial"
     assert all("--overwrite" not in c for c in calls if c[0] != "compute_proximity.sh")
 
 
@@ -667,6 +689,94 @@ def test_normal_cli_runs_paper_and_plot_reuses_compact_inputs(tmp_path, monkeypa
     }
 
 
+@pytest.fixture
+def saved_initial_mean_cli(tmp_path, monkeypatch):
+    """Exercise CLI inheritance while replacing measurement and rendering calls."""
+    from scripts import theory_validation
+    from utils.experiments.theory.contracts import numerical_config
+    from utils.experiments.theory import paper_contracts
+    import types
+
+    science = numerical_config(
+        model_name="sdv1", scheduler_name="ddim", mean_source="reference-initial",
+        num_mean_samples=12000, mean_seed=29, reference_snr_decades=5.,
+    )
+    paper = paper_contracts.PaperPaths.build(tmp_path, **science).output_directory
+    paper.mkdir(parents=True)
+    (paper / "run_config.json").write_text(json.dumps({"scientific_config": science}))
+    calls = []
+
+    def run_paper(root, **kwargs):
+        assert root == tmp_path
+        calls.append(("analysis", kwargs))
+        return paper
+
+    def validate_paper_bundle(bundle, **kwargs):
+        assert bundle == paper
+        calls.append(("validate", kwargs["expected_config"]))
+
+    def render_saved_paper(bundle, **kwargs):
+        assert bundle == paper
+        calls.append(("plot", kwargs["expected_config"]))
+
+    monkeypatch.setattr(theory_validation, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setitem(sys.modules, "utils.experiments.theory.paper_reduce",
+                        types.SimpleNamespace(run_paper=run_paper))
+    monkeypatch.setattr(paper_contracts, "validate_paper_bundle", validate_paper_bundle)
+    monkeypatch.setattr(paper_contracts, "render_saved_paper", render_saved_paper)
+    return types.SimpleNamespace(main=theory_validation.main, paper=paper,
+                                 science=science, calls=calls)
+
+
+@pytest.mark.parametrize("arguments, expected_source, count, seed, decades, recompute", [
+    ([], "reference-min-snr", 12000, 29, 5., False),
+    (["--recompute-experiments"], "reference-min-snr", 12000, 29, 5., True),
+    (["--mean-source", "reference-initial"], "reference-initial", 12000, 29, 5., False),
+    (["--mean-source", "reference-min-snr", "--num-mean-samples", "16000",
+      "--mean-seed", "7", "--reference-snr-decades", "8"],
+     "reference-min-snr", 16000, 7, 8., False),
+])
+def test_analysis_migrates_initial_mean_default_and_preserves_draw_settings(
+    saved_initial_mean_cli, arguments, expected_source, count, seed, decades, recompute
+):
+    case = saved_initial_mean_cli
+    before = (case.paper / "run_config.json").read_bytes()
+    assert case.main(arguments) == 0
+    assert [name for name, _ in case.calls] == ["analysis"]
+    settings = case.calls[0][1]
+    assert settings["mean_source"] == expected_source
+    assert settings["num_mean_samples"] == count
+    assert settings["mean_seed"] == seed
+    assert settings["reference_snr_decades"] == decades
+    assert settings["recompute"] is recompute
+    assert settings["center"] == "reference-initial"
+    assert (case.paper / "run_config.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("portable", [False, True])
+def test_plot_keeps_saved_initial_mean_instead_of_adopting_analysis_default(
+    saved_initial_mean_cli, portable
+):
+    case = saved_initial_mean_cli
+    before = (case.paper / "run_config.json").read_bytes()
+    arguments = ["--plot"] + (["--bundle", str(case.paper)] if portable else [])
+    assert case.main(arguments) == 0
+    assert [name for name, _ in case.calls] == ["validate", "plot"]
+    assert all(settings == case.science for _, settings in case.calls)
+    assert (case.paper / "run_config.json").read_bytes() == before
+
+
+def test_plot_rejects_reinterpreting_saved_initial_mean_as_minimum_snr(
+    saved_initial_mean_cli, capsys
+):
+    case = saved_initial_mean_cli
+    assert case.main(["--plot", "--mean-source", "reference-min-snr"]) == 1
+    assert case.calls == []
+    error = capsys.readouterr().err
+    assert "Explicit plot settings conflict" in error and "mean_source" in error
+    assert "--mean-source reference-min-snr" in error
+
+
 def test_preflight_rejects_missing_registered_figure(scalar_bundle):
     path = scalar_bundle / "statement_registry.json"
     registry = json.loads(path.read_text())
@@ -728,7 +838,7 @@ def test_theory_cli_passes_device_to_reducer_without_resolution(
     assert called[0]["device"] == device
 
 
-@pytest.mark.parametrize("device", ("cpu", "cuda", "cuda:2"))
+@pytest.mark.parametrize("device", ("auto", "cuda", "cuda:2"))
 def test_root_forwards_selected_device_to_theory_recomputation(tmp_path, device):
     result, calls = _run_all_stub(
         tmp_path,
@@ -1078,3 +1188,21 @@ def test_optional_center_formulas_define_the_actual_center(
             assert audit["center_source"] == "/tmp/independent-center.pt"
     finally:
         plt.close(fig)
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+def test_root_rejects_cpu_numerical_execution_before_stages(tmp_path, device):
+    result, calls = _run_all_stub(tmp_path, ["--recompute-experiments", "--device", device])
+    assert result.returncode != 0 and calls == []
+    assert "requires CUDA" in result.stderr
+
+
+def test_root_cuda_preflight_failure_starts_no_scientific_stage(tmp_path):
+    result, calls = _run_all_stub(tmp_path, ["--recompute-experiments"], CUDA_PREFLIGHT_EXIT_CODE="1")
+    assert result.returncode != 0 and calls == []
+
+
+def test_plot_skips_cuda_preflight(tmp_path):
+    result, calls = _run_all_stub(tmp_path, ["--plot"], CUDA_PREFLIGHT_EXIT_CODE="1")
+    assert result.returncode == 0, result.stderr
+    assert calls and all("--plot" in call or "--validate-only" in call for call in calls)

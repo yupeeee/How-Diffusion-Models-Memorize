@@ -1,4 +1,4 @@
-"""Completed probe-cache compatibility regressions for the batching repair."""
+"""Unexecuted narrow source-transition regressions for completed probe caches."""
 
 from copy import deepcopy
 from pathlib import Path
@@ -12,6 +12,9 @@ from utils.experiments.theory import direct_probe_cache as cache
 @pytest.fixture(autouse=True)
 def audited_fixed_source(monkeypatch):
     monkeypatch.setattr(cache, "AUDITED_FIXED_SOURCE_SHA256", "b" * 64)
+    monkeypatch.setattr(cache, "AUDITED_ZERO_BASELINE_PROBE_SHA256", "b" * 64)
+    monkeypatch.setattr(cache, "AUDITED_ZERO_BASELINE_MATH_SHA256", "e" * 64)
+    monkeypatch.setattr(cache, "ZERO_BASELINE_MATH_PREDECESSOR_SHA256", "c" * 64)
 
 
 def task_paths(directory, task):
@@ -19,11 +22,11 @@ def task_paths(directory, task):
     return base.with_suffix(".parquet"), base.with_suffix(".json")
 
 
-def make_task(*, source_hash="b" * 64, **extra):
+def make_task(*, source_hash="b" * 64, math_hash="c" * 64, **extra):
     identity = {
         "source_code": {
             cache.PROBE_SOURCE_KEY: source_hash,
-            "experiments/theory/direct_probe_math.py": "c" * 64,
+            cache.MATH_SOURCE_KEY: math_hash,
             "models/sampling.py": "d" * 64,
         },
         "policy": {"schema_version": 1, "formula_version": "direct-probe-math-1"},
@@ -132,3 +135,73 @@ def test_future_orchestrator_edits_do_not_inherit_predecessor_compatibility(tmp_
     assert cache.resolve_completed_task(tmp_path, future, path_for_task=task_paths) == (
         future["task_hash"], data, marker
     )
+
+
+@pytest.mark.parametrize("table", sorted(cache.ZERO_BASELINE_UNCHANGED_TABLES))
+def test_zero_baseline_addition_reuses_only_unchanged_observations_read_only(tmp_path, table):
+    prior = make_task(table=table)
+    current = make_task(table=table, math_hash="e" * 64)
+    data, marker = save_task(tmp_path, prior)
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (data, marker)}
+    untouched = deepcopy(current)
+    assert cache.resolve_completed_task(tmp_path, current, path_for_task=task_paths) == (
+        prior["task_hash"], data, marker
+    )
+    assert current == untouched
+    assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before}
+    assert not any(path.exists() for path in task_paths(tmp_path, current))
+    # The real source task hash survives into caller provenance; no scalar row
+    # or completion marker is relabeled as a newly measured observation.
+    assert read_json(marker)["task_hash"] == prior["task_hash"]
+    new_data, new_marker = save_task(tmp_path, current)
+    assert cache.resolve_completed_task(tmp_path, current, path_for_task=task_paths) == (
+        current["task_hash"], new_data, new_marker
+    )
+
+
+@pytest.mark.parametrize("table", ["gaussian_reference", "genuine_gaussian_unconditional_controls", "unknown_table"])
+def test_zero_baseline_addition_never_relabels_missing_zero_fields_or_other_tables(tmp_path, table):
+    save_task(tmp_path, make_task(table=table))
+    requested = make_task(table=table, math_hash="e" * 64)
+    assert cache.resolve_completed_task(tmp_path, requested, path_for_task=task_paths) is None
+
+
+@pytest.mark.parametrize("changed", ["count", "loss_seed", "reference_law", "formula", "checkpoint", "sampling", "math", "orchestrator"])
+def test_zero_baseline_compatibility_requires_all_other_identity_fields(tmp_path, changed):
+    prior = make_task()
+    current = make_task(math_hash="e" * 64)
+    identity = deepcopy(prior["identity"])
+    if changed == "count":
+        identity["count"] = 128
+    elif changed == "loss_seed":
+        identity["loss_seed"] = 123
+    elif changed == "reference_law":
+        identity["reference_law_hash"] = "different-law"
+    elif changed == "formula":
+        identity["policy"]["formula_version"] = "unreviewed-formula"
+    elif changed == "checkpoint":
+        identity["checkpoint"] = {"model_id": "different-model"}
+    elif changed == "sampling":
+        identity["source_code"]["models/sampling.py"] = "f" * 64
+    elif changed == "math":
+        identity["source_code"][cache.MATH_SOURCE_KEY] = "f" * 64
+    else:
+        identity["source_code"][cache.PROBE_SOURCE_KEY] = "f" * 64
+    prior.update(identity=identity, count=identity["count"], task_hash=canonical_hash(identity))
+    save_task(tmp_path, prior)
+    assert cache.resolve_completed_task(tmp_path, current, path_for_task=task_paths) is None
+
+
+@pytest.mark.parametrize("marker_updates", [{"complete": False}, {"rows": 63}, {"sha256": "corrupt"}, {"schema_version": 2}])
+def test_zero_baseline_compatibility_still_requires_verified_completed_payload(tmp_path, marker_updates):
+    save_task(tmp_path, make_task(), marker_updates=marker_updates)
+    requested = make_task(math_hash="e" * 64)
+    assert cache.resolve_completed_task(tmp_path, requested, path_for_task=task_paths) is None
+
+
+@pytest.mark.parametrize("future", ["math", "orchestrator"])
+def test_future_sources_do_not_inherit_zero_baseline_compatibility(tmp_path, future):
+    save_task(tmp_path, make_task())
+    requested = make_task(math_hash="9" * 64 if future == "math" else "e" * 64,
+                          source_hash="9" * 64 if future == "orchestrator" else "b" * 64)
+    assert cache.resolve_completed_task(tmp_path, requested, path_for_task=task_paths) is None

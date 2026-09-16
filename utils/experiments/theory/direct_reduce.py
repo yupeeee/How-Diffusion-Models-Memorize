@@ -224,7 +224,7 @@ def _read_law(path, digest, device, candidate_chunk_size, query_chunk_size):
                             candidate_chunk=candidate_chunk_size, query_chunk=query_chunk_size)
     support.weights = payload["weights"].to(device).clone()
     support.log_weights = support.weights.log()
-    return ReferenceLaw(support, metadata, payload["law_hash"])
+    return ReferenceLaw(support, metadata, payload["law_hash"], payload.get("estimated_mean_vector"))
 
 
 def _run_analytical_worker(*, sources, records, bundle, analysis_hash, law_path,
@@ -314,9 +314,11 @@ def run_direct_analysis(project_root, *, config, device="auto", probe_batch_size
     records = sources.selected
     if not records:
         raise TheoryError("No selected complete experiment records for direct comparisons")
+    devices = _resolve_theory_devices(device)
     schedule = load_schedule(sources)
     law = build_reference_law(sources, {**config, "candidate_chunk_size": candidate_chunk_size,
-                                     "query_chunk_size": query_chunk_size})
+                                     "query_chunk_size": query_chunk_size}, device=devices[0],
+                              allow_mean_compute=True, mean_device=device, mean_batch_size=probe_batch_size)
     paper = PaperPaths.build(root, **config).output_directory
     backing = contained_path(paper.parent.parent, "theory_measurements")
     probes = run_direct_probes(root, records=records, support=law, config=config,
@@ -334,10 +336,8 @@ def run_direct_analysis(project_root, *, config, device="auto", probe_batch_size
     integration_hash = canonical_hash(integration_identity)
     integrated_bundle = contained_path(bundle, "integrations/" + integration_hash)
     law_path, schedule_path = bundle / "reference_law.pt", bundle / "schedule.pt"
-    law_digest = atomic_torch_save({"atoms": law.support.atoms.cpu(), "weights": law.support.weights.cpu(),
-                                   "metadata": law.metadata, "law_hash": law.law_hash}, law_path)
+    law_digest = atomic_torch_save(law.to_payload(), law_path)
     schedule_digest = atomic_torch_save(schedule, schedule_path)
-    devices = _resolve_theory_devices(device)
     count = worker_count_for_tasks(devices, len(records))
     shards = [round_robin_shard(records, worker_index=k, worker_count=count) for k in range(count)]
     context = get_context("spawn")

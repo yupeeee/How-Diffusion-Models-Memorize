@@ -204,15 +204,21 @@ def counterfactual_metrics(counterfactual, actual, epsilon_counterfactual, epsil
 
 
 def _measure_task(task, log, adapter, *, science, components, scheduler, condition, batch_size):
+    device = torch.device(components.device)
+    if device.type != "cuda":
+        raise TheoryError("Counterfactual theory computation requires CUDA; CPU fallback is disabled")
     z, u, c, target = log
+    target = target.to(device=device)
     step, level = task["level"]["step_index"], task["level"]
+    # Transfer only this snapshot, retaining bounded device memory.
+    current, saved_next = z[:, step].to(device), z[:, step + 1].to(device)
     diagnostics, matched, _shift = adapter.direct_matched_update(
-        z[:, step], z[:, step + 1], u[:, step], c[:, step],
+        current, saved_next, u[:, step].to(device), c[:, step].to(device),
         task["identity"]["guidance_scale"], step, latent_ndim=target.ndim)
-    actual = z[:, step + 1].double()
+    actual = saved_next.double()
     # Interleave paired endpoints; no cached epsilon is ever fed through native
     # conversion. Adaptive OOM retries cannot drop or reorder a logical sample.
-    samples = torch.stack((matched.cpu(), actual.cpu()), dim=1).flatten(0, 1)
+    samples = torch.stack((matched, actual), dim=1).flatten(0, 1)
     fresh = torch.empty_like(samples, dtype=torch.float64)
     precision_rows = [None] * len(samples)
     for start, stop, prediction, precision in prediction_batches(
@@ -225,7 +231,7 @@ def _measure_task(task, log, adapter, *, science, components, scheduler, conditi
     if any(row is None for row in precision_rows):
         raise TheoryError("Counterfactual inference omitted an endpoint")
     paired = fresh.reshape(len(actual), 2, *actual.shape[1:])
-    values = counterfactual_metrics(matched, actual, paired[:, 0], paired[:, 1], u[:, step + 1], target,
+    values = counterfactual_metrics(matched, actual, paired[:, 0], paired[:, 1], u[:, step + 1].to(device), target,
                                    alpha=level["destination_alpha"], sigma=level["destination_sigma"])
     rows = _status_rows(task, status="measured", reason="both_learned_endpoints_measured_in_same_new_context")
     measurements = _rows(values | diagnostics, len(rows), {})

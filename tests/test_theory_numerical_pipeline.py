@@ -17,7 +17,7 @@ from utils.experiments.theory.paper_contracts import PaperPaths, saved_plot_conf
 
 
 def config(**changes):
-    return numerical_config(model_name="sdv1", scheduler_name="ddim", **changes)
+    return numerical_config(model_name="sdv1", scheduler_name="ddim", **({"mean_source": "cached-targets"} | changes))
 
 
 def row(index="001", seed=0):
@@ -192,12 +192,12 @@ def test_multiworker_policy_resume_preserves_observations_and_input_identity(tmp
 def test_root_refinement_calls_only_theory_and_forwards_policy(tmp_path):
     from tests.test_theory_plot_cli import _run_all_stub, _option
     result, calls = _run_all_stub(tmp_path, ["--model", "sdv1", "--scheduler", "ddim", "--refine-numerics",
-        "--numerical-decimal-precision", "96", "--numerical-max-decimal-products", "0",
+        "--numerical-max-products", "0",
         "--numerical-max-variation-nodes", "2", "--numerical-variation-absolute-width", ".001"])
     assert result.returncode == 0, result.stderr
     assert len(calls) == 1 and calls[0][0] == "theory_validation.sh"
     assert "--refine-numerics" in calls[0]
-    assert _option(calls[0], "--numerical-max-decimal-products") == "0"
+    assert _option(calls[0], "--numerical-max-products") == "0"
     assert _option(calls[0], "--numerical-max-variation-nodes") == "2"
 
 
@@ -220,10 +220,11 @@ def test_cli_refinement_inherits_observations_and_accepts_new_policy(tmp_path, m
         calls.append(options)
         return output
     monkeypatch.setattr(paper_reduce, "run_paper", run)
-    assert theory_validation.main(["--refine-numerics", "--numerical-decimal-precision", "96"]) == 0
+    assert theory_validation.main(["--refine-numerics", "--numerical-max-products", "20000000"]) == 0
     assert len(calls) == 1
     assert calls[0]["refine_numerics"] and calls[0]["recompute"]
-    assert calls[0]["num_loss_seeds"] == 23 and calls[0]["numerical_decimal_precision"] == 96
+    assert calls[0]["num_loss_seeds"] == 23 and calls[0]["numerical_max_decimal_products"] == 20000000
+    assert calls[0]["numerical_decimal_precision"] == 64  # Historical field, not effective GPU digits.
 
 
 def test_backing_schedule_and_law_are_pinned_to_original_evidence(tmp_path):
@@ -316,4 +317,19 @@ def test_worker_reassembles_completed_batches_without_raw_or_payload_deserializa
 def test_screening_is_a_policy_dependency_not_a_sufficient_input_dependency():
     assert "numerical_screening.py" in stage.policy_recipe(config())["source_code"]
     assert "numerical_screening.py" not in stage.input_recipe()["support_sources"]
-    assert stage.policy_recipe(config())["policy"]["version"] == "fixed-cache-numerics-2"
+    assert stage.policy_recipe(config())["policy"]["version"] == "fixed-cache-numerics-cuda-3"
+
+
+def test_explicit_decimal_precision_cannot_silently_select_cpu(tmp_path):
+    from tests.test_theory_plot_cli import _run_all_stub
+    result, calls = _run_all_stub(tmp_path, ["--refine-numerics", "--numerical-decimal-precision", "128"])
+    assert result.returncode != 0 and not calls
+    assert "binary64" in result.stderr
+
+
+def test_python_cli_rejects_arbitrary_decimal_precision(capsys):
+    from scripts import theory_validation
+    with pytest.raises(SystemExit) as error:
+        theory_validation.main(["--refine-numerics", "--numerical-decimal-precision", "128"])
+    assert error.value.code == 2
+    assert "binary64" in capsys.readouterr().err

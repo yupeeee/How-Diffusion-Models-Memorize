@@ -141,7 +141,8 @@ def _worker(*, sources, records, tasks, output_directory, device, batch_size, wo
         raise TheoryError("Preserved Gaussian-control scheduler changed")
     schedule = safe_torch_load(path)
     science = sources.runs["experiment"]["scientific_config"]
-    bank = gaussian_bank(science, schedule)
+    # Input draws retain the generation RNG convention; reductions use CUDA.
+    bank = gaussian_bank(science, schedule).to(device)
     seed_positions = {int(seed): index for index, seed in enumerate(science["seeds"])}
     tasks = [task for task in tasks if _completed_task(output_directory, task) is None]
     if not tasks:
@@ -173,7 +174,7 @@ def _worker(*, sources, records, tasks, output_directory, device, batch_size, wo
                     target_path = sources.experiment.target_latent_path(record.original_index)
                     if file_sha256(target_path) != pair["target_latent_sha256"]:
                         raise TheoryError("Preserved Gaussian-control target hash differs")
-                    target = safe_torch_load(target_path)
+                    target = safe_torch_load(target_path).to(device)
                     if list(target.shape) != science["latent_shape"] or not bool(torch.isfinite(target).all()):
                         raise TheoryError("Preserved Gaussian-control target latent is invalid")
                     targets.append(target.double())
@@ -204,7 +205,7 @@ def _worker(*, sources, records, tasks, output_directory, device, batch_size, wo
                 atomic_write_frame_parquet(pd.DataFrame(scalar_rows), data)
                 atomic_write_json(marker, {"schema_version": SCHEMA_VERSION, "task_hash": item["task_hash"],
                     "identity": item["identity"], "rows": len(scalar_rows), "complete": True, "sha256": file_sha256(data),
-                    "execution": {"device": str(device), "batch_size_requested": batch_size, "replica": replica,
+                    "execution": {"device": str(device), "numeric_backend": "worker_device_float64", "random_stream_backend": "preserved_CPU_seeded_input_draws", "batch_size_requested": batch_size, "replica": replica,
                                   "network_observations": 1, "shared_target_count": len(pairs)}})
                 completed.append(item["task_hash"])
                 report_worker_record(item["task_hash"], "reduced", device)

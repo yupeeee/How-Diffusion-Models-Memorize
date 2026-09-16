@@ -1,7 +1,7 @@
 """Offline integration tests with real tiny cache tensors and frozen metadata.
 
-The fixture uses scheduler arithmetic only. It never loads a model or downloads
-weights. It deliberately retains low-SSCD experiment seeds, duplicate raw
+The storage fixture uses CPU scheduler arithmetic only. Real measurement
+tests require CUDA; they never load a model or download weights. It deliberately retains low-SSCD experiment seeds, duplicate raw
 prompts, leading-zero IDs, and nonselected candidate targets.
 """
 
@@ -312,8 +312,11 @@ def saved_cache(tmp_path, monkeypatch):
     )
 
 
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for real cache reductions")
+
+
 def _reduce(fixture, **kwargs):
-    return reducer.run_theory(fixture["root"], **CONFIG, **kwargs)
+    return reducer.run_theory(fixture["root"], **CONFIG, **({"device": "cuda:0"} | kwargs))
 
 
 def test_real_cache_reader_string_ids_seed_roles_and_same_seed_scores(saved_cache):
@@ -333,6 +336,7 @@ def test_real_cache_reader_string_ids_seed_roles_and_same_seed_scores(saved_cach
         )
 
 
+@requires_cuda
 def test_reduction_bundle_retains_failures_units_and_every_registered_figure(
     saved_cache,
 ):
@@ -415,6 +419,7 @@ def test_reduction_bundle_retains_failures_units_and_every_registered_figure(
     assert (bundle / "applicability_report.json").is_file()
 
 
+@requires_cuda
 def test_copied_bundle_plots_without_raw_tensors_and_preserves_scalar_hashes(
     saved_cache, monkeypatch, tmp_path
 ):
@@ -451,6 +456,7 @@ def test_copied_bundle_plots_without_raw_tensors_and_preserves_scalar_hashes(
     assert before == {name: file_sha256(copy_bundle / name) for name in before}
 
 
+@requires_cuda
 def test_atomic_record_failure_then_resume_existing_shards(saved_cache, monkeypatch):
     original = reducer._record_metrics
     selected = sorted(saved_cache["selection"].included_indices)
@@ -539,6 +545,7 @@ def test_reference_block_mismatch_and_stale_frozen_selection_fail(saved_cache):
         cache_reader.discover_sources(saved_cache["root"], **CONFIG)
 
 
+@requires_cuda
 def test_scientific_hash_changes_with_center_and_source_tensor_staleness_is_rejected(
     saved_cache,
 ):
@@ -553,6 +560,7 @@ def test_scientific_hash_changes_with_center_and_source_tensor_staleness_is_reje
         _reduce(saved_cache)
 
 
+@requires_cuda
 def test_plot_rejects_scalar_tampering_and_root_rejects_metadata_inventory_change(
     saved_cache,
 ):

@@ -175,6 +175,8 @@ def build_support(
             ):
                 raise TheoryError(f"Missing/stale complete support target: {source}")
             target = safe_torch_load(source)
+            if isinstance(target, torch.Tensor):
+                target = target.to(device=device)
             if (
                 not isinstance(target, torch.Tensor)
                 or list(target.shape) != science["latent_shape"]
@@ -222,16 +224,8 @@ def build_support(
         identities=identities,
         candidate_chunk=candidate_chunk_size,
         query_chunk=query_chunk_size,
+        device=device,
     )
-    if str(device) != "cpu":
-        support = FiniteSupport(
-            support.atoms.to(device),
-            support.atom_ids,
-            support.aliases,
-            candidate_chunk=candidate_chunk_size,
-            query_chunk=query_chunk_size,
-            weights=support.weights,
-        )
     metadata = support.metadata()
     metadata["missing_candidates"] = missing
     metadata["bank_policy"] = (
@@ -679,17 +673,13 @@ def _summary(initial, trajectory, endpoint, center_metadata):
 
 
 def _resolve_theory_devices(requested):
-    """Reuse generation's visible-device semantics without changing precision."""
+    """Use generation's CUDA sharding, without a CPU/MPS compute fallback."""
     devices = resolve_devices(requested)
-    if any(device.type == "mps" for device in devices):
-        if isinstance(requested, str) and requested.strip().lower() == "auto":
-            print(
-                "[theory] MPS does not support the required float64 reductions; using CPU",
-                flush=True,
-            )
-            return (torch.device("cpu"),)
+    if not devices or any(device.type != "cuda" for device in devices) or getattr(torch.version, "hip", None):
         raise TheoryError(
-            "MPS cannot preserve theory float64 arithmetic; use cpu or cuda"
+            "Theory computation requires CUDA; CPU/MPS fallback is disabled. "
+            "Use --device auto, cuda, or cuda:N with a visible CUDA device. "
+            "Saved --plot/--validate-only modes do not require CUDA."
         )
     return tuple(devices)
 
@@ -1099,7 +1089,7 @@ def _run_theory(
         sources,
         candidate_chunk_size=candidate_chunk_size,
         query_chunk_size=query_chunk_size,
-        device="cpu",
+        device=devices[0],
     )
     package_dir = Path(__file__).parent
     code_hashes = {

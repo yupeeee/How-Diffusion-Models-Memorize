@@ -1,8 +1,8 @@
 """Multi-device cache reductions: dispatch, genuine spawn, parity, and resume.
 
-CUDA dispatch is checked with fake devices. The integration cases launch actual
-spawn workers on two CPU slots, so IPC, pickling and process-local state are
-exercised without requiring model weights or GPU hardware.
+CUDA dispatch is checked with fake devices without GPU execution. Integration
+cases require two CUDA devices and launch actual spawn workers, exercising IPC,
+pickling and process-local state without downloading or loading model weights.
 """
 
 from __future__ import annotations
@@ -51,8 +51,11 @@ def progress_bars(monkeypatch):
     return bars
 
 
-def _two_cpu(_request):
-    return (torch.device("cpu"), torch.device("cpu"))
+requires_two_cuda = pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Two CUDA devices required for actual parallel reductions")
+
+
+def _two_cuda(_request):
+    return (torch.device("cuda:0"), torch.device("cuda:1"))
 
 
 def _table_snapshot(bundle):
@@ -91,13 +94,14 @@ def test_explicit_device_remains_one_device(monkeypatch):
     assert reducer._resolve_theory_devices("cuda:2") == (requested,)
 
 
-def test_auto_mps_uses_cpu_for_preserved_float64_policy(monkeypatch):
+@pytest.mark.parametrize("backend", ["cpu", "mps"])
+def test_theory_rejects_non_cuda_without_fallback(monkeypatch, backend):
     monkeypatch.setattr(
-        reducer, "resolve_devices", lambda value: (torch.device("mps"),)
+        reducer, "resolve_devices", lambda value: (torch.device(backend),)
     )
-    assert reducer._resolve_theory_devices("auto") == (torch.device("cpu"),)
-    with pytest.raises((TheoryError, ValueError), match="(?i)mps|float64"):
-        reducer._resolve_theory_devices("mps")
+    for request in ("auto", backend):
+        with pytest.raises(TheoryError, match="requires CUDA; CPU/MPS fallback is disabled"):
+            reducer._resolve_theory_devices(request)
 
 
 @pytest.mark.parametrize("cuda_count", (1, 2, 8))
@@ -179,16 +183,17 @@ def test_fake_cuda_dispatch_is_disjoint_bounded_and_uses_spawn(
     assert len(all_indices) == len(set(all_indices)) == len(records)
 
 
-def test_two_actual_cpu_spawn_workers_match_serial_and_share_fixed_center(
+@requires_two_cuda
+def test_two_actual_cuda_spawn_workers_match_serial_and_share_fixed_center(
     saved_cache, monkeypatch, progress_bars
 ):
     root = saved_cache["root"]
     serial = reducer.run_theory(
-        root, **CONFIG, device="cpu", candidate_chunk_size=2, query_chunk_size=2
+        root, **CONFIG, device="cuda:0", candidate_chunk_size=2, query_chunk_size=2
     )
     before = _table_snapshot(serial)
     center_before = safe_torch_load(serial / "center.pt").clone()
-    monkeypatch.setattr(reducer, "_resolve_theory_devices", _two_cpu)
+    monkeypatch.setattr(reducer, "_resolve_theory_devices", _two_cuda)
     parallel = reducer.run_theory(
         root,
         **CONFIG,
@@ -206,7 +211,7 @@ def test_two_actual_cpu_spawn_workers_match_serial_and_share_fixed_center(
     assert parallel == serial, "Worker count and ordinal layout are execution metadata"
     _assert_table_parity(before, parallel)
     assert manifest["execution"]["worker_count"] == 2
-    assert manifest["execution"]["resolved_devices"] == ["cpu", "cpu"]
+    assert manifest["execution"]["resolved_devices"] == ["cuda:0", "cuda:1"]
     shards = manifest["execution"]["device_shards"]
     assert len({shard["pid"] for shard in shards}) == 2
     assert all(shard["cpu_threads"] >= 1 for shard in shards)
@@ -259,6 +264,7 @@ def test_two_actual_cpu_spawn_workers_match_serial_and_share_fixed_center(
     )
 
 
+@requires_two_cuda
 def test_parallel_failure_withholds_manifest_and_resumes_completed_other_worker(
     saved_cache, monkeypatch, progress_bars
 ):
@@ -272,7 +278,7 @@ def test_parallel_failure_withholds_manifest_and_resumes_completed_other_worker(
             raise RuntimeError("injected coordinator-worker record failure")
         return original(sources, record, *args, **kwargs)
 
-    monkeypatch.setattr(reducer, "_resolve_theory_devices", _two_cpu)
+    monkeypatch.setattr(reducer, "_resolve_theory_devices", _two_cuda)
     monkeypatch.setattr(reducer, "_record_metrics", fail_local_record)
     with pytest.raises(TheoryError, match="failed|complete manifest"):
         reducer.run_theory(
@@ -306,7 +312,7 @@ def test_parallel_failure_withholds_manifest_and_resumes_completed_other_worker(
     # Resume with a different device layout: numerical identity and completed
     # atomic record shards must remain reusable.
     monkeypatch.setattr(
-        reducer, "_resolve_theory_devices", lambda request: (torch.device("cpu"),)
+        reducer, "_resolve_theory_devices", lambda request: (torch.device("cuda:0"),)
     )
     resumed = reducer.run_theory(
         root, **CONFIG, device="auto", candidate_chunk_size=2, query_chunk_size=2
@@ -328,6 +334,7 @@ def test_parallel_failure_withholds_manifest_and_resumes_completed_other_worker(
     )
 
 
+@requires_two_cuda
 def test_worker_initial_consistency_uses_global_anchor_not_its_own_first_record(
     saved_cache, monkeypatch
 ):
@@ -343,7 +350,7 @@ def test_worker_initial_consistency_uses_global_anchor_not_its_own_first_record(
     marker = read_json(paths.record_path(changed_index))
     marker["tensor_file_sha256"]["noise_prediction"] = digest
     atomic_write_json(paths.record_path(changed_index), marker)
-    monkeypatch.setattr(reducer, "_resolve_theory_devices", _two_cpu)
+    monkeypatch.setattr(reducer, "_resolve_theory_devices", _two_cuda)
     with pytest.raises(TheoryError, match="failed|complete manifest"):
         reducer.run_theory(
             root, **CONFIG, device="auto", candidate_chunk_size=2, query_chunk_size=2

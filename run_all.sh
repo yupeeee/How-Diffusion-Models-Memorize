@@ -24,6 +24,9 @@ REFINE_NUMERICS=0
 INCLUDE_DIAGNOSTICS=0
 FIGURE_SUITE="paper"
 TARGET_ERROR_TOLERANCE=""
+MEAN_SOURCE=""
+NUM_MEAN_SAMPLES=""
+MEAN_SEED=""
 NUM_LOSS_SEEDS=""
 LOSS_SEED=""
 LOSS_TIMESTEPS=""
@@ -51,7 +54,7 @@ no matching pair fail before any stage. --scheduler ddpm selects sdv1 only.
 Protected generation, SSCD, and GMM proximity retain their existing defaults.
 Theory resumes shared denoiser probes and one analytical trajectory pass per
 model/scheduler, then renders four mechanism experiments and their
-fixed eleven appendices from saved scalar inputs. Probe workers use all visible GPUs.
+fixed twelve appendices from saved scalar inputs. Probe workers use all visible GPUs.
 The reference-only SNR extension and terminal bounds use separate reusable caches.
 
 Options:
@@ -59,6 +62,7 @@ Options:
   --plot                Render saved proximity and theory scalar outputs only
   --figure-suite paper  Optional alias for the default fixed paper suite
   --diagnostics         Also render saved optional diagnostic figures
+                        Counterfactual requires saved enablement/data; diagnostics/ only
   --target-error-tolerance FLOAT
                         Independently supplied raw latent L2 tolerance (optional)
   --recompute-experiments
@@ -66,10 +70,11 @@ Options:
                         bypass download, generation, SSCD and proximity rebuilding
   --refine-numerics     Refine existing posterior signs/condition intervals only;
                         no upstream work or learned-probe inference
+  --numerical-max-products INT
+                        Per-row CUDA interval-operation budget (default: 2000000)
+                        --numerical-max-decimal-products remains an alias; zero disables refinement
   --numerical-decimal-precision INT
-                        Flagged-row base precision (default: 64; retry doubles it)
-  --numerical-max-decimal-products INT
-                        Per-row product budget (default: 2000000; zero disables fallback)
+                        Legacy saved-policy field; unavailable for GPU computation
   --numerical-max-variation-nodes INT
                         Per-row interval node budget (default: 65)
   --numerical-variation-absolute-width FLOAT
@@ -81,6 +86,9 @@ Options:
   --g FLOAT             Guidance scale (default: 7.5; finite values supported)
   --T INTEGER           Inference steps (default: 50)
   --N INTEGER           Experiment seeds 0..N-1; reference N..2N-1 (default: 20)
+  --mean-source NAME    reference-min-snr (default), reference-initial, or cached-targets
+  --num-mean-samples INT Independent analytical reference estimates for mu (default: 10000)
+  --mean-seed INT        Dedicated mean-estimation RNG root (default: 0)
   --num-loss-seeds INT   Forward-target draws (analysis default: 64)
   --loss-seed INT        Independent probe RNG root (analysis default: 0)
   --loss-timesteps NAME  initial (default) or saved
@@ -99,25 +107,26 @@ Options:
                         Analytical-only 97-point grid depth (default: 6)
   --terminal-noise-run-alpha FLOAT
                         Simultaneous terminal Gaussian noise failure budget (default: 0.05)
-  --center NAME         Legacy diagnostics only: reference-initial, zero, cached-baseline
+  --center NAME         Legacy diagnostics only: reference-initial, cached-baseline
   --cached-baseline PATH Existing independent baseline for cached-baseline center
   --use-mu              Deprecated alias for --center cached-baseline;
                         requires --cached-baseline, never estimates a new center
-  --no-mu               Deprecated alias for --center zero
   --selection-strategy NAME
                         gmm only (default: gmm)
   --downscale INTEGER   Upstream preview downscale factor (default: 4)
-  --device DEVICE       auto, cpu, mps, cuda, or cuda:N (default: auto)
+  --device DEVICE       auto, cuda, or cuda:N; computation requires CUDA (default: auto)
                         auto uses all visible CUDA GPUs for generation and theory;
-                        theory falls back to CPU when CUDA is unavailable
+                        theory fails clearly when CUDA is unavailable
   --direct-workers INT  Webster direct-URL workers (default: 24)
   --direct-attempts INT Direct attempts per URL (default: 2)
   --per-host-concurrency INT Concurrent requests per host (default: 4)
   -h, --help            Show help
 
-Direct comparisons use the exact mean of one declared reference law: by default,
-uniform distinct compatible cached targets before selection. This finite law is
-not asserted to be the full training law. Legacy center options do not redefine it.
+Posterior comparisons use one declared reference law: by default, uniform
+distinct compatible cached targets before selection. The selected mu defaults
+to the average of analytical unconditional references at minimum analytical SNR.
+This finite law is not asserted to be the full training law. Legacy center
+options do not redefine the reference law or the selected mu.
 All selected experiment seeds remain in the analysis, including failed recovery.
 
 --plot validates every requested scalar bundle and saved proximity metadata
@@ -236,7 +245,7 @@ while (($# > 0)); do
             fi
             MEASURE_UNCONDITIONAL_LOSS="$1"; shift; continue ;;
         --use-mu) set_center cached-baseline; shift; continue ;;
-        --no-mu) set_center zero; shift; continue ;;
+        --no-mu) invalid_value "$1" "zero centering is retired; use the saved reference mean for mu" ;;
         -h|--help) usage; exit 0 ;;
     esac
     option="${1%%=*}"
@@ -253,6 +262,9 @@ while (($# > 0)); do
         --center) destination=CENTER_VALUE ;;
         --cached-baseline) destination=CACHED_BASELINE ;;
         --target-error-tolerance) destination=TARGET_ERROR_TOLERANCE ;;
+        --mean-source) destination=MEAN_SOURCE ;;
+        --num-mean-samples) destination=NUM_MEAN_SAMPLES ;;
+        --mean-seed) destination=MEAN_SEED ;;
         --num-loss-seeds) destination=NUM_LOSS_SEEDS ;;
         --loss-seed) destination=LOSS_SEED ;;
         --loss-timesteps) destination=LOSS_TIMESTEPS ;;
@@ -264,7 +276,7 @@ while (($# > 0)); do
         --reference-snr-decades) destination=REFERENCE_SNR_DECADES ;;
         --terminal-noise-run-alpha) destination=TERMINAL_NOISE_RUN_ALPHA ;;
         --numerical-decimal-precision) destination=NUMERICAL_DECIMAL_PRECISION ;;
-        --numerical-max-decimal-products) destination=NUMERICAL_MAX_DECIMAL_PRODUCTS ;;
+        --numerical-max-products|--numerical-max-decimal-products) destination=NUMERICAL_MAX_DECIMAL_PRODUCTS ;;
         --numerical-max-variation-nodes) destination=NUMERICAL_MAX_VARIATION_NODES ;;
         --numerical-variation-absolute-width) destination=NUMERICAL_VARIATION_ABSOLUTE_WIDTH ;;
         --selection-strategy) destination=SELECTION_STRATEGY ;;
@@ -289,7 +301,11 @@ done
 
 case "$MODEL" in all|sdv1|sdv2|realvis) ;; *) invalid_value "--model" "$MODEL" ;; esac
 case "$SCHEDULER" in all|ddim|ddpm) ;; *) invalid_value "--scheduler" "$SCHEDULER" ;; esac
-case "$CENTER" in reference-initial|zero|cached-baseline) ;; *) invalid_value "--center" "$CENTER" ;; esac
+case "$CENTER" in
+    reference-initial|cached-baseline) ;;
+    zero) invalid_value "--center" "zero centering is retired; use the saved reference mean for mu" ;;
+    *) invalid_value "--center" "$CENTER" ;;
+esac
 [[ "$SELECTION_STRATEGY" == "gmm" ]] || invalid_value "--selection-strategy" "$SELECTION_STRATEGY"
 if [[ "$CENTER" == cached-baseline && -z "$CACHED_BASELINE" && "$PLOT_ONLY" == 0 && "$REFINE_NUMERICS" == 0 ]]; then
     invalid_value "--cached-baseline" "required for the existing independent baseline center"
@@ -311,6 +327,12 @@ DEVICE="${DEVICE#"${DEVICE%%[![:space:]]*}"}"
 DEVICE="${DEVICE%"${DEVICE##*[![:space:]]}"}"
 DEVICE="${DEVICE,,}"
 [[ "$DEVICE" =~ ^(auto|cpu|mps|cuda|cuda:[0-9]+)$ ]] || invalid_value "--device" "$DEVICE"
+if ((!PLOT_ONLY)) && [[ "$DEVICE" == cpu || "$DEVICE" == mps ]]; then
+    invalid_value --device "theory computation requires CUDA; CPU/MPS fallback is disabled"
+fi
+if ((!PLOT_ONLY)) && [[ -n "$NUMERICAL_DECIMAL_PRECISION" ]]; then
+    invalid_value --numerical-decimal-precision "CUDA uses outward binary64 enclosures; increase --numerical-max-products or --numerical-max-variation-nodes instead"
+fi
 normalize_positive_integer "--N" "$NUM_SEEDS" NUM_SEEDS 4611686018427387904
 normalize_positive_integer "--T" "$NUM_INFERENCE_STEPS" NUM_INFERENCE_STEPS
 normalize_finite_float "--g" "$GUIDANCE_SCALE" GUIDANCE_SCALE
@@ -350,7 +372,7 @@ if [[ -n "$COUNTERFACTUAL_STEPS" ]]; then
     [[ "$COUNTERFACTUAL_STEPS" =~ ^[0-9]+(,[0-9]+)*$ ]] || invalid_value --counterfactual-steps "expected comma-separated nonnegative integers"
     THEORY_MEASUREMENT_ARGUMENTS+=(--counterfactual-steps "$COUNTERFACTUAL_STEPS")
 fi
-for option_variable in "num-loss-seeds:NUM_LOSS_SEEDS" "num-unconditional-loss-seeds:NUM_UNCONDITIONAL_LOSS_SEEDS" "probe-batch-size:PROBE_BATCH_SIZE" "numerical-decimal-precision:NUMERICAL_DECIMAL_PRECISION" "numerical-max-variation-nodes:NUMERICAL_MAX_VARIATION_NODES"; do
+for option_variable in "num-mean-samples:NUM_MEAN_SAMPLES" "num-loss-seeds:NUM_LOSS_SEEDS" "num-unconditional-loss-seeds:NUM_UNCONDITIONAL_LOSS_SEEDS" "probe-batch-size:PROBE_BATCH_SIZE" "numerical-decimal-precision:NUMERICAL_DECIMAL_PRECISION" "numerical-max-variation-nodes:NUMERICAL_MAX_VARIATION_NODES"; do
     option="--${option_variable%%:*}"; variable="${option_variable#*:}"
     if [[ -n "${!variable}" ]]; then
         normalize_positive_integer "$option" "${!variable}" "$variable"
@@ -359,7 +381,7 @@ for option_variable in "num-loss-seeds:NUM_LOSS_SEEDS" "num-unconditional-loss-s
 done
 if [[ -n "$NUMERICAL_MAX_DECIMAL_PRODUCTS" ]]; then
     normalize_nonnegative_integer --numerical-max-decimal-products "$NUMERICAL_MAX_DECIMAL_PRODUCTS" NUMERICAL_MAX_DECIMAL_PRODUCTS 9223372036854775807
-    THEORY_MEASUREMENT_ARGUMENTS+=(--numerical-max-decimal-products "$NUMERICAL_MAX_DECIMAL_PRODUCTS")
+    THEORY_MEASUREMENT_ARGUMENTS+=(--numerical-max-products "$NUMERICAL_MAX_DECIMAL_PRODUCTS")
 fi
 if [[ -n "$NUMERICAL_DECIMAL_PRECISION" ]] && decimal_greater_than 32 "$NUMERICAL_DECIMAL_PRECISION"; then
     invalid_value --numerical-decimal-precision "must be at least 32"
@@ -368,6 +390,17 @@ if [[ -n "$NUMERICAL_VARIATION_ABSOLUTE_WIDTH" ]]; then
     normalize_finite_float --numerical-variation-absolute-width "$NUMERICAL_VARIATION_ABSOLUTE_WIDTH" NUMERICAL_VARIATION_ABSOLUTE_WIDTH
     LC_ALL=C awk -v value="$NUMERICAL_VARIATION_ABSOLUTE_WIDTH" 'BEGIN {exit !(value > 0)}' || invalid_value --numerical-variation-absolute-width "must be positive"
     THEORY_MEASUREMENT_ARGUMENTS+=(--numerical-variation-absolute-width "$NUMERICAL_VARIATION_ABSOLUTE_WIDTH")
+fi
+if [[ -n "$NUM_MEAN_SAMPLES" ]] && ! decimal_greater_than "$NUM_MEAN_SAMPLES" 1; then
+    invalid_value --num-mean-samples "must be at least 2"
+fi
+if [[ -n "$MEAN_SOURCE" ]]; then
+    case "$MEAN_SOURCE" in reference-min-snr|reference-initial|cached-targets) ;; *) invalid_value --mean-source "$MEAN_SOURCE" ;; esac
+    THEORY_MEASUREMENT_ARGUMENTS+=(--mean-source "$MEAN_SOURCE")
+fi
+if [[ -n "$MEAN_SEED" ]]; then
+    normalize_nonnegative_integer --mean-seed "$MEAN_SEED" MEAN_SEED 9223372036854775807
+    THEORY_MEASUREMENT_ARGUMENTS+=(--mean-seed "$MEAN_SEED")
 fi
 if [[ -n "$LOSS_SEED" ]]; then
     normalize_nonnegative_integer --loss-seed "$LOSS_SEED" LOSS_SEED 9223372036854775807
@@ -459,9 +492,24 @@ RUN_CONTEXT="matrix preflight"
 trap 'status=$?; printf "run_all.sh: pipeline failed for %s (exit %s)\n" "$RUN_CONTEXT" "$status" >&2; exit "$status"' ERR
 # Validate the entire matrix before any renderer can write a figure.
 if ((PLOT_ONLY)); then
+    PREFLIGHT_STATUS=0
+    PREFLIGHT_FAILED_PAIRS=()
     for pair in "${MODEL_SCHEDULER_PAIRS[@]}"; do
-        "$PROJECT_ROOT/theory_validation.sh" --model "${pair%%:*}" --scheduler "${pair#*:}" --g "$GUIDANCE_SCALE" --T "$NUM_INFERENCE_STEPS" --N "$NUM_SEEDS" "${THEORY_CENTER_ARGUMENTS[@]}" "${THEORY_FIGURE_ARGUMENTS[@]}" "${THEORY_MEASUREMENT_ARGUMENTS[@]}" --validate-only --validate-proximity
+        printf '[Plot preflight] %s / %s\n' "${pair%%:*}" "${pair#*:}"
+        if "$PROJECT_ROOT/theory_validation.sh" --model "${pair%%:*}" --scheduler "${pair#*:}" --g "$GUIDANCE_SCALE" --T "$NUM_INFERENCE_STEPS" --N "$NUM_SEEDS" "${THEORY_CENTER_ARGUMENTS[@]}" "${THEORY_FIGURE_ARGUMENTS[@]}" "${THEORY_MEASUREMENT_ARGUMENTS[@]}" --validate-only --validate-proximity; then
+            :
+        else
+            PREFLIGHT_PAIR_STATUS=$?
+            if ((PREFLIGHT_STATUS == 0)); then PREFLIGHT_STATUS=$PREFLIGHT_PAIR_STATUS; fi
+            PREFLIGHT_FAILED_PAIRS+=("$pair")
+        fi
     done
+    if ((PREFLIGHT_STATUS)); then
+        printf 'run_all.sh: plot preflight failed for %s/%s configurations; no figures were changed:\n' "${#PREFLIGHT_FAILED_PAIRS[@]}" "$PAIR_TOTAL" >&2
+        printf '  %s\n' "${PREFLIGHT_FAILED_PAIRS[@]}" >&2
+        printf 'Use the repair commands above, or select compatible saved bundles with --model and --scheduler. An unrestricted --plot requires all four configurations.\n' >&2
+        exit "$PREFLIGHT_STATUS"
+    fi
 fi
 if ((DOWNLOAD_WEBSTER)); then
     if "$PROJECT_ROOT/download_webster.sh" --direct-workers "$DIRECT_WORKERS" --direct-attempts "$DIRECT_ATTEMPTS" --per-host-concurrency "$PER_HOST_CONCURRENCY"; then
@@ -470,6 +518,21 @@ if ((DOWNLOAD_WEBSTER)); then
         download_status=$?
         if ((download_status != 2)); then exit "$download_status"; fi
     fi
+fi
+# Preflight before any generation or analytical work; plot-only is host-only.
+if ((!PLOT_ONLY)); then
+    PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" "${PYTHON:-python}" -B - "$DEVICE" <<'PYGPU'
+import sys
+import torch
+from utils.models.devices import resolve_devices
+try:
+    devices = resolve_devices(sys.argv[1])
+except (ValueError, RuntimeError) as error:
+    raise SystemExit(f"run_all.sh: CUDA preflight failed: {error}") from error
+if not devices or any(device.type != "cuda" for device in devices) or getattr(torch.version, "hip", None):
+    raise SystemExit("run_all.sh: CUDA is required for computation; CPU/MPS fallback is disabled. Saved --plot remains available.")
+print("[Pipeline] Compute devices: " + ", ".join(map(str, devices)), flush=True)
+PYGPU
 fi
 PAIR_INDEX=0
 for pair in "${MODEL_SCHEDULER_PAIRS[@]}"; do

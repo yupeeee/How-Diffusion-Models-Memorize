@@ -37,6 +37,46 @@ class ReferenceLaw:
     support: FiniteSupport
     metadata: dict
     law_hash: str
+    estimated_mean_vector: torch.Tensor | None = None
+
+    def __post_init__(self):
+        receipt = self.metadata.get("theory_mean", {})
+        if receipt.get("source") in {"initial_unconditional_reference_monte_carlo",
+                                    "minimum_snr_unconditional_reference_monte_carlo"}:
+            if self.estimated_mean_vector is None:
+                raise ValueError("Estimated reference mean receipt lacks its saved vector")
+            value = self.estimated_mean_vector.to(device=self.support.flat.device, dtype=torch.float64)
+            if tuple(value.shape) != self.support.latent_shape or not bool(torch.isfinite(value).all()):
+                raise ValueError("Estimated reference mean shape or values differ from the reference space")
+            if _tensor_hash(value) != receipt.get("vector_sha256"):
+                raise ValueError("Estimated reference mean vector differs from its receipt")
+            self.estimated_mean_vector = value
+        elif self.estimated_mean_vector is not None:
+            raise ValueError("An estimated mean vector requires an explicit reference-estimation receipt")
+
+    @property
+    def theory_mean_vector(self):
+        """Selected comparison/injection centre; the atom-law mean stays exact."""
+        return self.mean_vector if self.estimated_mean_vector is None else self.estimated_mean_vector
+
+    @property
+    def theory_mean_metadata(self):
+        return self.metadata.get("theory_mean", {
+            "source": "declared_finite_bank_mean", "sample_count": None,
+            "vector_sha256": self.metadata.get("mean_sha256"),
+            "definition": "Exact declared weighted atom mean",
+        })
+
+    @property
+    def theory_mean_offset_l2(self):
+        return (self.mean_vector - self.theory_mean_vector).norm()
+
+    def to_payload(self):
+        payload = {"atoms": self.support.atoms.cpu(), "weights": self.support.weights.cpu(),
+                   "metadata": self.metadata, "law_hash": self.law_hash}
+        if self.estimated_mean_vector is not None:
+            payload["estimated_mean_vector"] = self.estimated_mean_vector.cpu()
+        return payload
 
     @property
     def mean_vector(self):
@@ -89,12 +129,13 @@ class ReferenceLaw:
         # Device placement must preserve the exact declared floating masses.
         support.weights = self.support.weights.to(device).clone()
         support.log_weights = support.weights.log()
-        return ReferenceLaw(support, dict(self.metadata), self.law_hash)
+        estimated_mean = None if self.estimated_mean_vector is None else self.estimated_mean_vector.to(device)
+        return ReferenceLaw(support, dict(self.metadata), self.law_hash, estimated_mean)
 
 
 def reference_law_from_atoms(atoms, atom_ids, *, weights=None, provenance=None,
                              preprocessing=None, scope="declared_finite_reference_law",
-                             candidate_chunk_size=256, query_chunk_size=16):
+                             candidate_chunk_size=256, query_chunk_size=16, device=None):
     """Deduplicate exact atoms and aggregate supplied probability masses.
 
     An omitted weight vector means equal mass per DISTINCT atom. Explicit
@@ -106,11 +147,11 @@ def reference_law_from_atoms(atoms, atom_ids, *, weights=None, provenance=None,
     if len(values) != len(ids) or not values or len(set(ids)) != len(ids):
         raise ValueError("A nonempty finite law requires unique source atom IDs")
     support = FiniteSupport.from_candidates(
-        zip(ids, values), candidate_chunk=candidate_chunk_size, query_chunk=query_chunk_size
+        zip(ids, values), candidate_chunk=candidate_chunk_size, query_chunk=query_chunk_size, device=device
     )
     excluded = []
     if weights is not None:
-        supplied = torch.as_tensor(weights, dtype=torch.float64)
+        supplied = torch.as_tensor(weights, dtype=torch.float64, device=support.flat.device)
         if supplied.shape != (len(ids),) or not bool(torch.isfinite(supplied).all() & (supplied >= 0).all()) or not bool((supplied > 0).any()):
             raise ValueError("Reference masses must be finite/nonnegative with positive total mass")
         # Scaling before summation avoids overflow without changing the law.
@@ -118,7 +159,7 @@ def reference_law_from_atoms(atoms, atom_ids, *, weights=None, provenance=None,
         if bool(((supplied > 0) & (scaled == 0)).any()):
             raise ValueError("Explicit positive reference mass underflows float64 normalization")
         supplied = scaled
-        masses = torch.zeros(support.size, dtype=torch.float64)
+        masses = torch.zeros(support.size, dtype=torch.float64, device=support.flat.device)
         for key, mass in zip(ids, supplied):
             masses[support.aliases[key]] += mass
         keep = masses > 0
@@ -170,12 +211,16 @@ def _prompt_scope(rows, law):
             "record_policy": "retain_all_records_without_assumption_based_selection"}
 
 
-def build_reference_law(sources, config, device="cpu"):
+def build_reference_law(sources, config, device="cpu", *, allow_mean_compute=False,
+                        mean_device=None, mean_batch_size=8):
     """Build once at analysis runtime, from one declared source and fixed masses."""
+    # Posterior chunk sizes control execution, not the scientific cache identity.
+    # Strip them from a local copy before forwarding config to the mean estimator.
+    config = dict(config)
     mode = config.get("reference_law", "cached-targets")
     manifest_path = config.get("reference_manifest")
-    chunks = {"candidate_chunk_size": config.get("candidate_chunk_size", 256),
-              "query_chunk_size": config.get("query_chunk_size", 16)}
+    chunks = {"candidate_chunk_size": config.pop("candidate_chunk_size", 256),
+              "query_chunk_size": config.pop("query_chunk_size", 16)}
     science = sources.runs["experiment"]["scientific_config"]
     preprocessing = {key: science.get(key) for key in (
         "vae_id", "vae_revision", "latent_shape", "target_preprocessing", "target_latent_definition"
@@ -184,14 +229,14 @@ def build_reference_law(sources, config, device="cpu"):
         if manifest_path is not None:
             raise ValueError("reference_manifest is forbidden for cached-targets law")
         from .reduce import build_support
-        support, source_metadata, rows = build_support(sources, **chunks, device="cpu")
+        support, source_metadata, rows = build_support(sources, **chunks, device=device)
         law = reference_law_from_atoms(
             support.atoms, support.atom_ids,
             provenance={key: value for key, value in source_metadata.items()
                         if key not in {"candidate_chunk", "query_chunk", "complexity"}},
             preprocessing=preprocessing,
             scope="D_K_all_compatible_complete_cached_targets_preselection_equal_distinct_atoms",
-            **chunks,
+            device=device, **chunks,
         )
         # Retain all cache record aliases, including duplicate exact atoms.
         law.support.aliases = dict(support.aliases)
@@ -232,7 +277,7 @@ def build_reference_law(sources, config, device="cpu"):
             provenance={**provenance, "manifest_sha256": file_sha256(path),
                         "declared_complete": specification["declared_complete"],
                         "completeness_scope": "explicit_source_claim_not_inferred_or_independently_established"},
-            scope="manifest_declared_finite_reference_law", **chunks,
+            scope="manifest_declared_finite_reference_law", device=device, **chunks,
         )
         # Audit retained source prompts against exact manifest atoms, preserving
         # missing target atoms as a scope issue rather than silently adding them.
@@ -246,6 +291,32 @@ def build_reference_law(sources, config, device="cpu"):
                          "target_atom_sha256": _tensor_hash(target)})
     else:
         raise ValueError("reference_law must be cached-targets or manifest")
+    if config.get("mean_source", "cached-targets") in {"reference-min-snr", "reference-initial"}:
+        # Estimation is an explicit run-level stage. A worker may only load the
+        # already completed immutable estimate, never launch nested computation.
+        from .reference_mean import estimate_reference_mean
+        estimated = estimate_reference_mean(
+            sources, config, reference_law=law,
+            device=device if mean_device is None else mean_device,
+            batch_size=mean_batch_size, allow_compute=allow_mean_compute,
+        )
+        receipt = estimated["metadata"]
+        keys = ("source", "mean_source", "estimator_hash", "vector_sha256", "sample_count", "mean_seed",
+                "initial_snr", "initial_level", "estimation_snr", "reference_snr_decades", "reference_grid_definition",
+                "level", "mean_norm_l2", "mean_norm_rmse",
+                "mean_mc_standard_error_l2", "mean_mc_standard_error_rmse",
+                "mean_mc_standard_error_max_coordinate", "split_half_difference_rmse",
+                "split_half_counts", "uncertainty_scope", "reference_atom_law_hash",
+                "definition", "bias_scope")
+        law.metadata["theory_mean"] = {key: receipt[key] for key in keys if key in receipt}
+        law.estimated_mean_vector = estimated["vector"].to(device=law.support.flat.device, dtype=torch.float64)
+        law.__post_init__()
+    else:
+        law.metadata["theory_mean"] = {
+            "source": "declared_finite_bank_mean", "sample_count": None,
+            "vector_sha256": law.metadata["mean_sha256"],
+            "definition": "Exact declared weighted atom mean",
+        }
     law.metadata["prompt_assumption_audit"] = _prompt_scope(rows, law)
     law.law_hash = canonical_hash({key: value for key, value in law.metadata.items()
                                   if key not in {"candidate_chunk", "query_chunk", "complexity"}})

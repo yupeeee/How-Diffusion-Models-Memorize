@@ -5,13 +5,46 @@ from __future__ import annotations
 from collections import Counter
 from multiprocessing import parent_process
 import sys
-from threading import Event, Thread
+from threading import Thread
 from time import monotonic
 
 from tqdm import tqdm
 
 
 _worker_progress_queue = None
+
+
+# Presentation labels live outside the source-hashed measurement modules so
+# renaming a progress bar never invalidates expensive numerical caches.
+_OPERATION_LABELS = {
+    ("reference_mean", "estimate_reference_mean"): "Analytical reference mean",
+    ("direct_probes", "run_direct_probes"): "Forward-loss and Gaussian probes",
+    ("direct_reduce", "run_direct_analysis"): "Trajectory metrics and posterior integration",
+    ("evidence_reduce", "run_evidence_analysis"): "Reference SNR sweep and terminal bounds",
+    ("numerical_reduce", "run_precision_analysis"): "Posterior and condition interval refinement",
+    ("four_stage_reduce", "prepare_four_stage_primary"): "Initial and trajectory measurements",
+    ("four_stage_reduce", "run_four_stage_analysis"): "Posterior response and trajectory shape",
+    ("gaussian_controls", "run_gaussian_control_analysis"): "Initial Gaussian unconditional controls",
+    ("counterfactual_probes", "run_counterfactual_analysis"): "Counterfactual denoiser probes",
+    ("candidate_reduce", "_dispatch"): "Candidate measurements",
+    ("reduce", "_dispatch_theory_shards"): "Cached trajectory theory measurements",
+}
+_CANDIDATE_STAGE_LABELS = {
+    "endpoints": "Candidate endpoint measurements",
+    "integration": "Candidate posterior integration",
+}
+
+
+def _operation_label(caller):
+    """Resolve existing callers without changing their scientific source hashes."""
+    module = caller.f_globals.get("__name__", "").rsplit(".", 1)[-1]
+    function = caller.f_code.co_name
+    key = module, function
+    if key == ("candidate_reduce", "_dispatch"):
+        stage = caller.f_locals.get("stage")
+        if stage in _CANDIDATE_STAGE_LABELS:
+            return _CANDIDATE_STAGE_LABELS[stage]
+    return _OPERATION_LABELS.get(key, function.strip("_").replace("_", " ").capitalize())
 
 
 def install_progress_queue(queue):
@@ -34,7 +67,8 @@ class RecordProgress:
     again to reconcile failures; repeated record IDs never advance the bar twice.
     """
 
-    def __init__(self, *, total, devices, context):
+    def __init__(self, *, total, devices, context, label=None):
+        self.label = str(label) if label is not None else _operation_label(sys._getframe(1))
         self.total = total
         self.devices = devices
         self.queue = context.Queue()
@@ -44,7 +78,7 @@ class RecordProgress:
     def __enter__(self):
         self.bar = tqdm(
             total=self.total,
-            desc="[Theory] Records",
+            desc="[Theory] " + self.label,
             unit="record",
             dynamic_ncols=True,
             leave=True,
@@ -94,18 +128,14 @@ class RecordProgress:
 
 
 class StageProgress:
-    """Parent-only elapsed-time logs for work without a meaningful item count.
+    """Parent-only start/completion logs without periodic progress messages.
 
-    The heartbeat keeps scalar aggregation and filesystem publication visible
-    after worker record bars finish. It uses tqdm.write to preserve any active
-    parent bar; workers never start a competing logger or timer thread.
+    Existing tqdm bars provide live progress. Stages with no item count report
+    their boundaries once, without starting a competing timer or progress bar.
     """
 
-    def __init__(self, label, *, heartbeat_seconds=20.):
-        if not 0 < heartbeat_seconds < float("inf"):
-            raise ValueError("heartbeat_seconds must be finite and positive")
+    def __init__(self, label):
         self.label = str(label)
-        self.heartbeat_seconds = heartbeat_seconds
         self.detail = ""
         self.enabled = parent_process() is None
 
@@ -119,21 +149,11 @@ class StageProgress:
     def __enter__(self):
         self.started = monotonic()
         if self.enabled:
-            self._stop = Event()
             self._write(self.label)
-            self._thread = Thread(target=self._heartbeat, name="theory-stage-progress", daemon=True)
-            self._thread.start()
         return self
-
-    def _heartbeat(self):
-        while not self._stop.wait(self.heartbeat_seconds):
-            detail = "; " + self.detail if self.detail else ""
-            self._write(f"{self.label}: still running ({monotonic() - self.started:.1f}s{detail})")
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self.enabled:
-            self._stop.set()
-            self._thread.join()
             status = "Finished" if exc_type is None else "Failed"
             self._write(f"{status}: {self.label} ({monotonic() - self.started:.1f}s)")
         return False

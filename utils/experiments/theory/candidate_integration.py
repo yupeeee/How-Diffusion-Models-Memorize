@@ -178,7 +178,7 @@ class _Segment:
         error = torch.maximum(
             (kronrod - gauss).abs(), 50 * torch.finfo(torch.float64).eps * magnitude
         )
-        return kronrod.detach().cpu().numpy(), error.detach().cpu().numpy()
+        return kronrod, error
 
 
 def _adaptive(segment, config):
@@ -196,30 +196,29 @@ def _adaptive(segment, config):
         truncated.append(over_budget)
     values, errors = segment.intervals(pending)
     leaves = [[] for _ in range(count)]
-    evaluations, refinements = np.zeros(count, dtype=int), np.zeros(count, dtype=int)
+    evaluations, refinements = [0] * count, [0] * count
     for (query, left, right), value, error in zip(pending, values, errors):
         leaves[query].append((left, right, value, error))
         evaluations[query] += 15
-    exhausted = np.asarray(truncated, dtype=bool)
-    absolute = np.array(
-        [config.absolute_tolerance] * 3 + [config.identity_absolute_tolerance]
+    exhausted = list(truncated)
+    absolute = torch.tensor(
+        [config.absolute_tolerance] * 3 + [config.identity_absolute_tolerance],
+        dtype=torch.float64, device=segment.device,
     )
     while True:
         pending, replacements = [], []
         for query, items in enumerate(leaves):
-            total = sum((leaf[2] for leaf in items), start=np.zeros(4))
-            error = sum((leaf[3] for leaf in items), start=np.zeros(4))
-            tolerance = absolute + config.relative_tolerance * np.abs(total)
-            if not (np.isfinite(total).all() and np.isfinite(error).all()) or np.all(
-                error <= tolerance
+            total = torch.stack([leaf[2] for leaf in items]).sum(0)
+            error = torch.stack([leaf[3] for leaf in items]).sum(0)
+            tolerance = absolute + config.relative_tolerance * total.abs()
+            if not bool(torch.isfinite(total).all() & torch.isfinite(error).all()) or bool(
+                (error <= tolerance).all()
             ):
                 continue
             if evaluations[query] + 30 > config.max_evaluations:
                 exhausted[query] = True
                 continue
-            worst = max(
-                range(len(items)), key=lambda index: np.max(items[index][3] / tolerance)
-            )
+            worst = int((torch.stack([item[3] for item in items]) / tolerance).amax(1).argmax())
             left, right = items[worst][:2]
             middle = (left + right) / 2
             if middle == left or middle == right:
@@ -238,12 +237,8 @@ def _adaptive(segment, config):
                 for j in (2 * offset, 2 * offset + 1)
             ]
             leaves[query][index : index + 1] = children
-    total = np.array(
-        [sum((leaf[2] for leaf in items), start=np.zeros(4)) for items in leaves]
-    )
-    error = np.array(
-        [sum((leaf[3] for leaf in items), start=np.zeros(4)) for items in leaves]
-    )
+    total = torch.stack([torch.stack([leaf[2] for leaf in items]).sum(0) for items in leaves])
+    error = torch.stack([torch.stack([leaf[3] for leaf in items]).sum(0) for items in leaves])
     return total, error, evaluations, refinements, exhausted
 
 

@@ -391,3 +391,42 @@ def test_payload_persistence_failure_does_not_erase_computed_endpoint_gain():
     assert torch.equal(actual["direct_prop5_log_odds_gain"], expected["direct_prop5_log_odds_gain"])
     assert torch.isnan(actual["direct_prop5_variation_l2"]).all()
     assert "synthetic payload storage failure" in actual["direct_prop5_integration_error"]
+
+
+@pytest.mark.parametrize("mean_source", [
+    "initial_unconditional_reference_monte_carlo",
+    "minimum_snr_unconditional_reference_monte_carlo",
+])
+def test_reference_mean_receipt_and_device_roundtrip_preserve_the_exact_atom_law(mean_source):
+    from utils.experiments.theory.reference_law import ReferenceLaw
+    from utils.experiments.theory.support import _tensor_hash
+    reference = law(((2., 1.), (6., -1.)), weights=[1., 3.])
+    estimate = torch.tensor([1., 2.], dtype=torch.float64)
+    receipt = {"source": mean_source, "vector_sha256": _tensor_hash(estimate), "sample_count": 10000}
+    metadata = reference.metadata | {"theory_mean": receipt}
+    selected = ReferenceLaw(reference.support, metadata, "selected-mean-fixture", estimate)
+    query = torch.tensor([[.3, -.1]], dtype=torch.float64)
+    torch.testing.assert_close(selected.mean_vector, reference.mean_vector, rtol=0, atol=0)
+    torch.testing.assert_close(selected.theory_mean_vector, estimate, rtol=0, atol=0)
+    torch.testing.assert_close(selected.posterior_mean(query, .6, .8), reference.posterior_mean(query, .6, .8), rtol=0, atol=0)
+    moved = selected.to("cpu")
+    torch.testing.assert_close(moved.theory_mean_vector, estimate, rtol=0, atol=0)
+    assert moved.theory_mean_metadata == receipt
+    torch.testing.assert_close(moved.to_payload()["estimated_mean_vector"], estimate, rtol=0, atol=0)
+    with pytest.raises(ValueError, match="lacks its saved vector"):
+        ReferenceLaw(reference.support, metadata, "selected-mean-fixture")
+    with pytest.raises(ValueError, match="differs from its receipt"):
+        ReferenceLaw(reference.support, metadata, "selected-mean-fixture", estimate + 1)
+    assert selected.target_radius("atom-0") == reference.target_radius("atom-0")
+    unconditional = torch.tensor([[4., 3.]], dtype=torch.float64)
+    conditional = torch.tensor([[2., 1.]], dtype=torch.float64)
+    target = reference.support.atoms[0]
+    old, _, _ = direct.current_reference_metrics(query, unconditional, conditional, target,
+                                                 reference, "atom-0", .6, .8)
+    current, _, _ = direct.current_reference_metrics(query, unconditional, conditional, target,
+                                                     selected, "atom-0", .6, .8)
+    for field in ("direct_target_log_probability", "direct_target_log_complement",
+                  "direct_unconditional_reference_error_l2", "direct_radius_tail_l2", "direct_lemma6_rhs_l2"):
+        torch.testing.assert_close(current[field], old[field], rtol=0, atol=0)
+    torch.testing.assert_close(current["direct_reference_to_bank_mean_error_l2"], old["direct_reference_mean_offset_l2"], rtol=0, atol=0)
+    assert not torch.equal(current["direct_reference_mean_offset_l2"], old["direct_reference_mean_offset_l2"])

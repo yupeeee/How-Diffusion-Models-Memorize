@@ -11,7 +11,7 @@ from utils.experiments.theory.paper_contracts import (
 
 
 def config(**changes):
-    return numerical_config(model_name="sdv1", scheduler_name="ddim", **changes)
+    return numerical_config(model_name="sdv1", scheduler_name="ddim", **({"mean_source": "cached-targets"} | changes))
 
 
 def test_optional_network_settings_do_not_change_base_scientific_configuration():
@@ -66,6 +66,8 @@ def test_primary_preparation_precedes_integration_and_optional_stage_is_separate
                                          numerical_reduce, gaussian_controls, paper_reduce, paper_plotting)
     from tests.test_theory_four_stage_figures import four_stage_config
     from tests.test_theory_paper_pipeline import measured_fixture
+    from utils.experiments.theory import reduce as shared_reduce
+    monkeypatch.setattr(shared_reduce, "_resolve_theory_devices", lambda _device: ("cuda:0",))
     sequence = []
     measurements = measured_fixture(tmp_path)
     settings = four_stage_config() | {"counterfactual_unconditional": True, "counterfactual_steps": [0]}
@@ -135,9 +137,65 @@ def test_explicit_center_override_drops_inherited_independent_baseline(tmp_path,
         return bundle
     monkeypatch.setattr(paper_reduce, "run_paper", measure)
     assert cli.main(["--model", "sdv1", "--scheduler", "ddim",
-                     "--recompute-experiments", "--center", "zero"]) == 0
-    assert observed[0]["center"] == "zero"
+                     "--recompute-experiments", "--center", "reference-initial"]) == 0
+    assert observed[0]["center"] == "reference-initial"
     assert "cached_baseline" not in observed[0]
+
+
+
+@pytest.mark.parametrize("options", [("--center", "zero"), ("--no-mu",)])
+def test_cli_rejects_zero_center_before_measurement(options, monkeypatch):
+    from scripts import theory_validation as cli
+    from utils.experiments.theory import paper_reduce
+    def forbidden(*args, **kwargs):
+        pytest.fail("retired zero centering reached measurement")
+    monkeypatch.setattr(paper_reduce, "run_paper", forbidden)
+    with pytest.raises(SystemExit) as error:
+        cli.main(list(options))
+    assert error.value.code == 2
+
+
+def test_new_analysis_upgrades_legacy_zero_center_without_changing_saved_receipt(tmp_path, monkeypatch):
+    from scripts import theory_validation as cli
+    from utils.experiments.theory import paper_reduce
+    from utils.experiments.theory.paper_contracts import PaperPaths
+    saved = config(center="zero", num_loss_seeds=93, mean_source="reference-min-snr")
+    bundle = PaperPaths.build(tmp_path, **saved).output_directory
+    receipt = {"scientific_config": saved}
+    atomic_write_json(bundle / "run_config.json", receipt)
+    monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+    observed = []
+    def measure(root, **options):
+        observed.append(options)
+        return bundle
+    monkeypatch.setattr(paper_reduce, "run_paper", measure)
+    assert cli.main(["--model", "sdv1", "--scheduler", "ddim", "--recompute-experiments"]) == 0
+    assert observed[0]["center"] == "reference-initial"
+    assert observed[0]["mean_source"] == "reference-min-snr"
+    assert observed[0]["num_loss_seeds"] == 93
+    assert read_json(bundle / "run_config.json") == receipt
+
+
+def test_historical_zero_center_remains_readable_and_retry_uses_reference_center(tmp_path):
+    import shlex
+    saved = config(center="zero", mean_source="reference-min-snr")
+    receipt = {"scientific_config": saved}
+    atomic_write_json(tmp_path / "run_config.json", receipt)
+    assert saved_plot_configuration(tmp_path, requested=config(), portable=True) == saved
+    tokens = shlex.split(recompute_command(saved))
+    assert tokens[tokens.index("--center") + 1] == "reference-initial"
+    assert tokens[tokens.index("--mean-source") + 1] == "reference-min-snr"
+    assert read_json(tmp_path / "run_config.json") == receipt
+
+
+def test_direct_paper_compute_rejects_legacy_zero_center_before_cuda_or_publication(tmp_path, monkeypatch):
+    from utils.experiments.theory import paper_reduce, reduce as shared_reduce
+    def forbidden(*args, **kwargs):
+        pytest.fail("retired zero centering reached CUDA setup")
+    monkeypatch.setattr(shared_reduce, "_resolve_theory_devices", forbidden)
+    with pytest.raises(TheoryError, match="Zero centering is retired"):
+        paper_reduce.run_paper(tmp_path, **config(center="zero"))
+    assert not list(tmp_path.iterdir())
 
 
 def test_shell_refine_center_can_inherit_saved_baseline_path(tmp_path):
