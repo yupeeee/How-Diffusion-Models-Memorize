@@ -64,19 +64,25 @@ def test_direct_publication_plot_isolation_and_failure_preserve_active_role(tmp_
     main = [entry for entry in paper_registry() if entry["category"] == "main"]
     assert len(main) == 6
     manifest = read_json(output / "figure_manifest.json")
+    from utils.experiments.figure_paths import publication_directory
+    destination = publication_directory(output)
+    assert manifest["publication"]["directory"] == str(destination)
+    assert manifest["export_formats"] == ["pdf"]
     assert manifest["manuscript_extension_required"] is True
     for entry in main:
         assert summary["figures"][entry["stem"]]["status"] == "available"
-        for relative in entry["outputs"].values():
-            assert file_sha256(output / relative) == manifest["files"][relative]
+        name = Path(entry["outputs"]["pdf"]).name
+        assert file_sha256(destination / name) == manifest["publication"]["files"][name]
     assert set(frames) == {entry["stem"] for entry in main}
     assert "final_reproduction_bound" not in frames
     assert "final_reproduction_bound" in summary["figures"]
     assert "final_reproduction_bound" in summary["plot_data"]
     assert {entry["stem"] for entry in measurement_registry()} <= set(summary["plot_data"])
-    image_paths = {path for path in manifest["files"] if Path(path).suffix in {".png", ".pdf"}}
-    assert len(image_paths) == 12 and all(Path(path).parent.as_posix() == "figures" for path in image_paths)
-    assert "figures/guidance_scale_vs_loss.png" in image_paths
+    image_paths = set(manifest["publication"]["files"])
+    assert len(image_paths) == 6 and all(Path(path).suffix == ".pdf" and Path(path).name == path for path in image_paths)
+    assert "guidance_scale_vs_loss.pdf" in image_paths
+    assert set(manifest["files"]) == {"figure_captions.md"}
+    assert not list(output.rglob("*.png")) and not list(output.rglob("*.pdf"))
     assert not manifest.get("timestep_figures")
     saved_registry = read_json(output / "registry.json")
     assert len(saved_registry["figures"]) == 6
@@ -99,6 +105,7 @@ def test_direct_publication_plot_isolation_and_failure_preserve_active_role(tmp_
     assert {name: file_sha256(output / name) for name in before} == before
     assert (file_sha256(protected), protected.stat().st_mtime_ns) == protected_before
     active_before = _snapshot(output)
+    publication_before = _snapshot(destination)
     original = four_stage_figures.build_four_stage_plot_inputs
 
     def block(*args, **kwargs):
@@ -109,9 +116,11 @@ def test_direct_publication_plot_isolation_and_failure_preserve_active_role(tmp_
     with pytest.raises(TheoryError, match="correctness audit blocked publication"):
         paper_reduce.run_paper(tmp_path, device="cuda:0", **config)
     assert _snapshot(output) == active_before
+    assert _snapshot(destination) == publication_before
     with pytest.raises(TheoryError, match="scientific configuration differs"):
         paper_reduce.run_paper(tmp_path, device="cuda:0", **{**config, "num_loss_seeds": 128})
     assert _snapshot(output) == active_before
+    assert _snapshot(destination) == publication_before
 
 
 def test_previous_behavioral_bundle_cannot_supply_missing_loss(tmp_path, monkeypatch):

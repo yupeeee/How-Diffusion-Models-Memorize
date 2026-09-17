@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 import inspect
 import io
 import json
@@ -38,6 +39,17 @@ from utils.models.latent import compute_latent_distances
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_NAME = "sdv1_ddim_g7.5_T50_N20"
+
+
+def _proximity_summary(figure):
+    return next(text for text in [*figure.texts, *figure.axes[0].texts]
+                if text.get_text().startswith("#Prompts:"))
+
+
+def _proximity_category_colors():
+    cmap = plotting_module.matplotlib.colormaps["magma"]
+    return {"MV": cmap(.70), "RV": cmap(.20), "TV": "#168C91",
+            "N": "#536B8A", "Other / unlabeled": "#858B93"}
 
 
 def _run_args(
@@ -512,7 +524,6 @@ def test_reference_plot_proximity_uses_only_frozen_selection_artifacts(
         "list_completed_records",
         "_load_sscd_config",
         "reference_completion_fingerprint",
-        "_write_examples",
     ):
         monkeypatch.setattr(
             proximity_module,
@@ -524,25 +535,33 @@ def test_reference_plot_proximity_uses_only_frozen_selection_artifacts(
     plotted: list[tuple[str, object, object]] = []
 
     def plot_selection(
-        path: str | Path, *, output_directory: str | Path
+        path: str | Path, *, output_directory: str | Path, figure_directory: str | Path
     ) -> plotting_module.AnalysisStatistics:
-        output = Path(output_directory)
+        output = Path(figure_directory)
+        assert len(example_calls) == 1 and example_calls[0][-1] is True
         plotted.append(("scatter", Path(path), output))
         output.mkdir(parents=True)
-        for filename in plotting_module.PROXIMITY_FIGURE_FILENAMES:
+        for filename in plotting_module.PROXIMITY_PDF_FILENAMES:
             (output / filename).write_bytes(b"scatter figure")
         return plotting_module.AnalysisStatistics(1, 1, 1, 1.0, -1.0)
 
     def plot_gmm(
-        path: str | Path, *, frame: pd.DataFrame, configuration: object
+        path: str | Path, *, frame: pd.DataFrame, configuration: object, figure_directory: str | Path
     ) -> None:
-        output = Path(path)
+        output = Path(figure_directory)
         plotted.append(("gmm", output, (frame, configuration)))
-        for filename in plotting_module.SELECTION_GMM_FIGURES.values():
+        for filename in (plotting_module.SELECTION_GMM_FIGURES["pdf"],):
             (output / filename).write_bytes(b"GMM figure")
 
     monkeypatch.setattr(proximity_module, "write_selection_figure", plot_selection)
     monkeypatch.setattr(proximity_module, "write_gmm_fit_figure", plot_gmm)
+    example_calls: list[tuple[ProximityPaths, Path, int, bool]] = []
+
+    def write_examples(paths: ProximityPaths, *, table_path: Path, num_seeds: int,
+                       validate_only: bool = False) -> None:
+        example_calls.append((paths, table_path, num_seeds, validate_only))
+
+    monkeypatch.setattr(proximity_module, "_write_examples", write_examples)
 
     result = proximity_module.plot_proximity(
         tmp_path,
@@ -560,7 +579,7 @@ def test_reference_plot_proximity_uses_only_frozen_selection_artifacts(
     assert result.paths.output_directory == directory
     output = (
         tmp_path
-        / "outputs/sdv2_ddpm_g3.25_T17_N7/proximity/reference_S7_N7"
+        / "figures/sdv2_ddpm_g3.25_T17_N7/proximity/reference_S7_N7"
     )
     assert loaded == [
         {
@@ -576,6 +595,16 @@ def test_reference_plot_proximity_uses_only_frozen_selection_artifacts(
         ("scatter", directory, output),
         ("gmm", output, (frame, configuration)),
     ]
+    assert len(example_calls) == 2
+    example_paths, example_table, example_seeds, preflight = example_calls[0]
+    assert preflight is True
+    assert example_calls[1] == (example_paths, example_table, example_seeds, False)
+    assert example_paths.figure_directory == output
+    assert example_paths.output_directory == (
+        tmp_path / "outputs/sdv2_ddpm_g3.25_T17_N7/proximity/reference_S7_N7"
+    )
+    assert example_paths.generation_run == result.paths.generation_run
+    assert example_table == directory / "selection.csv" and example_seeds == 7
     for filename, (contents, stat) in before.items():
         path = directory / filename
         assert path.read_bytes() == contents
@@ -583,7 +612,7 @@ def test_reference_plot_proximity_uses_only_frozen_selection_artifacts(
         assert path.stat().st_ctime_ns == stat.st_ctime_ns
     assert {path.name for path in directory.iterdir()} == set(artifacts)
     assert {path.name for path in output.iterdir()} == set(
-        plotting_module.SELECTION_FIGURE_FILENAMES
+        plotting_module.SELECTION_PDF_FILENAMES
     )
     assert not (output / "examples").exists()
     assert not (tmp_path / "logs").exists()
@@ -816,7 +845,7 @@ def _saved_experiment_plot_fixture(
         pd.concat([_observations("1"), _observations("2")], ignore_index=True),
         selection,
     )
-    write_analysis_outputs(paths.output_directory, analysis=analysis)
+    write_analysis_outputs(paths.output_directory, analysis=analysis, figure_directory=paths.figure_directory)
     return arguments, paths, selection
 
 
@@ -875,7 +904,6 @@ def test_experiment_plot_proximity_reads_only_saved_contract_and_renders_figures
         "list_completed_records",
         "_load_sscd_config",
         "reference_completion_fingerprint",
-        "_write_examples",
         "write_analysis_outputs",
         "write_selection_figure",
         "write_gmm_fit_figure",
@@ -893,11 +921,20 @@ def test_experiment_plot_proximity_reads_only_saved_contract_and_renders_figures
     rendered: list[Path] = []
     statistics = plotting_module.AnalysisStatistics(1, 1, 1, 1.0, -1.0)
 
-    def render(directory: str | Path) -> plotting_module.AnalysisStatistics:
+    def render(directory: str | Path, *, figure_directory: str | Path) -> plotting_module.AnalysisStatistics:
+        assert Path(figure_directory) == paths.figure_directory
+        assert example_calls == [(paths, paths.output_directory / "proximity.csv", 2, True)]
         rendered.append(Path(directory))
         return statistics
 
     monkeypatch.setattr(proximity_module, "write_saved_analysis_figures", render)
+    example_calls: list[tuple[ProximityPaths, Path, int, bool]] = []
+
+    def write_examples(observed: ProximityPaths, *, table_path: Path, num_seeds: int,
+                       validate_only: bool = False) -> None:
+        example_calls.append((observed, table_path, num_seeds, validate_only))
+
+    monkeypatch.setattr(proximity_module, "_write_examples", write_examples)
 
     result = proximity_module.plot_proximity(tmp_path, **arguments)
 
@@ -916,6 +953,10 @@ def test_experiment_plot_proximity_reads_only_saved_contract_and_renders_figures
     assert json_reads == [paths.run_config_json]
     assert csv_reads == [paths.output_directory / "proximity.csv"]
     assert rendered == [paths.output_directory]
+    assert example_calls == [
+        (paths, paths.output_directory / "proximity.csv", 2, True),
+        (paths, paths.output_directory / "proximity.csv", 2, False),
+    ]
     assert result.values == {
         "complete": True,
         "plot_only": True,
@@ -1062,9 +1103,9 @@ def test_frozen_reference_fast_path_does_not_touch_tensors(
     plotted: list[tuple[Path, Path]] = []
 
     def plot_selection(
-        directory: str | Path, *, output_directory: str | Path
+        directory: str | Path, *, output_directory: str | Path, figure_directory: str | Path
     ) -> plotting_module.AnalysisStatistics:
-        plotted.append((Path(directory), Path(output_directory)))
+        plotted.append((Path(directory), Path(figure_directory)))
         return plotting_module.AnalysisStatistics(1, 1, 1, 1.0, -1.0)
 
     monkeypatch.setattr(proximity_module, "write_selection_figure", plot_selection)
@@ -1075,8 +1116,9 @@ def test_frozen_reference_fast_path_does_not_touch_tensors(
         *,
         frame: pd.DataFrame,
         configuration: object,
+        figure_directory: str | Path,
     ) -> None:
-        gmm_plotted.append((Path(directory), frame, configuration))
+        gmm_plotted.append((Path(figure_directory), frame, configuration))
 
     monkeypatch.setattr(proximity_module, "write_gmm_fit_figure", plot_gmm)
     exported: list[tuple[ProximityPaths, Path, int]] = []
@@ -1106,10 +1148,11 @@ def test_frozen_reference_fast_path_does_not_touch_tensors(
     )
     assert result.values == summary
     assert result.paths.summary_json == directory / "summary.json"
-    assert plotted == [(directory, output)]
+    figure_output = tmp_path / "figures/sdv1_ddpm_g3.25_T17_N7/proximity/reference_S7_N7"
+    assert plotted == [(directory, figure_output)]
     assert len(gmm_plotted) == 1
     gmm_directory, gmm_frame, gmm_configuration = gmm_plotted[0]
-    assert gmm_directory == output
+    assert gmm_directory == figure_output
     assert gmm_frame is loaded_frame
     assert gmm_configuration is loaded_configuration
     assert [identity["selection_strategy"] for identity in path_identities] == ["gmm"]
@@ -1385,12 +1428,12 @@ def test_analysis_configuration_and_summary_preserve_selection_strategy(
     assert summary["selection_strategy"] == "gmm"
     assert summary["figures"] == {
         scope: {
-            file_format: (paths.output_directory / filename)
+            file_format: (paths.figure_directory / filename)
             .relative_to(tmp_path.resolve())
             .as_posix()
             for file_format, filename in formats.items()
         }
-        for scope, formats in plotting_module.PROXIMITY_FIGURES.items()
+        for scope, formats in plotting_module.PROXIMITY_PDF_FIGURES.items()
     }
 
 
@@ -1432,7 +1475,7 @@ def test_saved_analysis_plotting_regenerates_figures_without_rewriting_csv(
     csv_path = tmp_path / "proximity.csv"
     csv_contents = csv_path.read_bytes()
     csv_stat = csv_path.stat()
-    for filename in plotting_module.PROXIMITY_FIGURE_FILENAMES:
+    for filename in plotting_module.PROXIMITY_PDF_FILENAMES:
         (tmp_path / filename).unlink()
     monkeypatch.setattr(
         plotting_module,
@@ -1450,14 +1493,14 @@ def test_saved_analysis_plotting_regenerates_figures_without_rewriting_csv(
     assert csv_path.stat().st_ctime_ns == csv_stat.st_ctime_ns
     assert {
         path.name for path in tmp_path.iterdir()
-    } == {"proximity.csv", *plotting_module.PROXIMITY_FIGURE_FILENAMES}
-    for filename in plotting_module.PROXIMITY_FIGURE_FILENAMES:
+    } == {"proximity.csv", *plotting_module.PROXIMITY_PDF_FILENAMES}
+    for filename in plotting_module.PROXIMITY_PDF_FILENAMES:
         artifact = tmp_path / filename
         header = b"%PDF" if artifact.suffix == ".pdf" else b"\x89PNG"
         assert artifact.read_bytes().startswith(header)
 
 
-def test_figure_catalog_and_failure_cleanup_cover_only_four_known_outputs(
+def test_pdf_cleanup_preserves_frozen_catalog_and_historical_pngs(
     tmp_path: Path,
 ) -> None:
     assert plotting_module.PROXIMITY_FIGURES == {
@@ -1484,7 +1527,8 @@ def test_figure_catalog_and_failure_cleanup_cover_only_four_known_outputs(
     proximity_module._remove_figure_outputs(tmp_path)
 
     assert unrelated.read_bytes() == b"keep"
-    assert {path.name for path in tmp_path.iterdir()} == {"proximity.csv"}
+    assert {path.name for path in tmp_path.iterdir()} == {"proximity.csv", "proximity_vs_sscd.png", "proximity_vs_sscd_all_prompts.png"}
+    assert plotting_module.PROXIMITY_PDF_FILENAMES == ("proximity_vs_sscd.pdf", "proximity_vs_sscd_all_prompts.pdf")
 
 
 def _gmm_figure_inputs() -> tuple[pd.DataFrame, dict[str, object]]:
@@ -1529,21 +1573,25 @@ def _gmm_figure_inputs() -> tuple[pd.DataFrame, dict[str, object]]:
     return frame, configuration
 
 
-def test_gmm_fit_figure_writes_png_pdf_from_all_fitted_reference_rows(
+def test_gmm_fit_figure_writes_only_pdf_from_all_fitted_reference_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from matplotlib.collections import PathCollection
+    from matplotlib.colors import to_rgba
+    from utils.experiments import proximity_style
     from matplotlib.patches import Ellipse
 
     frame, configuration = _gmm_figure_inputs()
     captured: list[object] = []
+    export_calls: list[dict[str, object]] = []
     real_publish = plotting_module._publish_figures
 
-    def publish(output: Path, figures: object) -> None:
+    def publish(output: Path, figures: object, **options) -> None:
         items = tuple(figures)  # type: ignore[arg-type]
         captured.extend(figure for figure, _filenames in items)
-        real_publish(output, items)
+        export_calls.append(options)
+        real_publish(output, items, **options)
 
     monkeypatch.setattr(plotting_module, "_publish_figures", publish)
     plotting_module.write_gmm_fit_figure(
@@ -1558,12 +1606,12 @@ def test_gmm_fit_figure_writes_png_pdf_from_all_fitted_reference_rows(
         plotting_module.SELECTION_GMM_FIGURES["pdf"],
     )
     assert {path.name for path in tmp_path.iterdir()} == set(
-        plotting_module.SELECTION_GMM_FIGURES.values()
+        (plotting_module.SELECTION_GMM_FIGURES["pdf"],)
     )
     assert not any(
         path.is_dir() or path.name.startswith(".") for path in tmp_path.iterdir()
     )
-    for file_format, filename in plotting_module.SELECTION_GMM_FIGURES.items():
+    for file_format, filename in {"pdf": plotting_module.SELECTION_GMM_FIGURES["pdf"]}.items():
         header = b"%PDF" if file_format == "pdf" else b"\x89PNG"
         assert (tmp_path / filename).read_bytes().startswith(header)
 
@@ -1574,25 +1622,22 @@ def test_gmm_fit_figure_writes_png_pdf_from_all_fitted_reference_rows(
         for collection in axis.collections
         if isinstance(collection, PathCollection)
     ]
-    assert len(scatter_groups) == 2
+    assert len(scatter_groups) == 1
     fitted = frame.loc[frame["observation_status"].eq("complete")]
-    expected_groups = {
-        frozenset(
-            map(
-                tuple,
-                fitted.loc[
-                    fitted["gmm_component"].eq(component), ["l2_norm", "sscd"]
-                ].to_numpy(dtype=np.float64),
-            )
-        )
-        for component in ("low_sscd_mode", "high_sscd_mode")
-    }
-    observed_groups = {
-        frozenset(map(tuple, collection.get_offsets().tolist()))
-        for collection in scatter_groups
-    }
-    assert observed_groups == expected_groups
-    assert (2.5, 0.2) in set().union(*observed_groups)
+    points = scatter_groups[0]
+    observed_xy = [tuple(pair) for pair in points.get_offsets().tolist()]
+    assert Counter(observed_xy) == Counter(map(tuple, fitted[["l2_norm", "sscd"]].to_numpy()))
+    assert (2.5, 0.2) in observed_xy
+    source_components = {(float(row.l2_norm), float(row.sscd)): row.gmm_component
+                         for row in fitted.itertuples()}
+    for xy, color in zip(observed_xy, points.get_facecolors(), strict=True):
+        assert color == pytest.approx(to_rgba(
+            proximity_style.GMM_COMPONENT_COLORS[source_components[xy]], alpha=.35))
+    assert points.get_sizes().tolist() == [10.]
+    assert points.get_alpha() == .35 and points.get_rasterized() is True
+    assert len(export_calls) == 1
+    assert export_calls[0]["formats"] == ("pdf",)
+    assert export_calls[0]["export_options"][plotting_module.SELECTION_GMM_FIGURES["pdf"]]["dpi"] == 600
 
     fit = configuration["gmm_fit"]
     assert isinstance(fit, dict)
@@ -1866,24 +1911,17 @@ def test_selection_figure_publishes_selected_and_completed_finite_group_views(
     assert 8.0 < all_axes.get_xlim()[1] < 20.0
     # Failed rows make CSV measurement columns object-typed; scatter coordinates
     # must remain numeric rather than becoming Matplotlib category positions.
-    assert [points.get_offsets().tolist() for points in all_axes.collections] == [
-        [[1.0, 0.9], [2.0, 0.1]],
-        [[8.0, 0.5], [8.0, 0.5]],
-    ]
-    assert selected_axes.texts[0].get_text().startswith("#prompts: 1\n")
-    assert all_axes.texts[0].get_text().startswith("#prompts: 2\n")
+    assert len(all_axes.collections) == 1
+    assert Counter(map(tuple, all_axes.collections[0].get_offsets().tolist())) == Counter(
+        [(1.0, 0.9), (2.0, 0.1), (8.0, 0.5), (8.0, 0.5)])
+    assert _proximity_summary(plotted_figures[1]).get_text().startswith("#Prompts: 1")
+    assert _proximity_summary(plotted_figures[0]).get_text().startswith("#Prompts: 2")
     assert {path.name for path in tmp_path.iterdir()} == {"selection.csv", "derived"}
     assert {path.name for path in output.iterdir()} == set(
-        plotting_module.PROXIMITY_FIGURE_FILENAMES
+        plotting_module.PROXIMITY_PDF_FILENAMES
     )
     assert not any(path.is_dir() for path in output.iterdir())
-    assert (output / "proximity_vs_sscd.png").read_bytes().startswith(b"\x89PNG")
     assert (output / "proximity_vs_sscd.pdf").read_bytes().startswith(b"%PDF")
-    assert (
-        (output / "proximity_vs_sscd_all_prompts.png")
-        .read_bytes()
-        .startswith(b"\x89PNG")
-    )
     assert (
         (output / "proximity_vs_sscd_all_prompts.pdf")
         .read_bytes()
@@ -2060,7 +2098,7 @@ def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
     )
     assert {path.name for path in tmp_path.iterdir()} == {
         "proximity.csv",
-        *plotting_module.PROXIMITY_FIGURE_FILENAMES,
+        *plotting_module.PROXIMITY_PDF_FILENAMES,
     }
     assert {
         key: plotting_module.matplotlib.rcParams[key] for key in original_style
@@ -2072,9 +2110,15 @@ def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
     }
     assert styles == [expected_style, expected_style]
     assert len(figures) == 2
-    assert sum(tight_layout_calls) == 2
+    assert not tight_layout_calls  # The paired figures keep a fixed physical data box.
     all_figure, figure = figures
-    assert tuple(figure.get_size_inches()) == pytest.approx((4.0, 4.0))
+    for panel in figures:
+        width, height = panel.get_size_inches()
+        position = panel.axes[0].get_position()
+        assert (position.width * width, position.height * height) == pytest.approx((3.1, 3.1))
+    assert tuple(figure.get_size_inches()) == pytest.approx((4.45, 4.2))
+    assert tuple(figure.get_size_inches()) == pytest.approx(tuple(all_figure.get_size_inches()))
+    assert all(getattr(panel, "_proximity_canvas_extent_artist", None) is None for panel in figures)
     assert figure._suptitle is None
     axis = figure.axes[0]
     all_axis = all_figure.axes[0]
@@ -2082,36 +2126,39 @@ def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
     assert axis.get_xscale() == axis.get_yscale() == "linear"
     assert axis.get_xlabel() == r"$\|\mathbf{x}_0-\mathbf{x}^{\star}\|$"
     assert axis.get_ylabel() == "SSCD"
-    assert axis.xaxis.label.get_fontsize() == 15
-    assert axis.yaxis.label.get_fontsize() == 15
+    assert axis.xaxis.label.get_fontsize() == 18
+    assert axis.yaxis.label.get_fontsize() == 18
     assert axis.xaxis.label.get_fontfamily() == ["STIXGeneral"]
     assert axis.yaxis.label.get_fontfamily() == ["STIXGeneral"]
-    assert all(label.get_fontsize() == 12 for label in axis.get_xticklabels())
-    assert all(label.get_fontsize() == 12 for label in axis.get_yticklabels())
-    assert len(axis.texts) == 1
-    assert axis.texts[0].get_text() == (
-        "#prompts: 3\n"
-        r"$\rho < 0$: 1/2 (50.0%)"
-        "\n"
-        r"Median $\rho$: 0.000"
-    )
-    assert all_axis.texts[0].get_text() == (
-        "#prompts: 4\n"
-        r"$\rho < 0$: 2/3 (66.7%)"
-        "\n"
-        r"Median $\rho$: -1.000"
-    )
+    assert all(label.get_fontsize() == 15 for label in axis.get_xticklabels())
+    assert all(label.get_fontsize() == 15 for label in axis.get_yticklabels())
+    summary = _proximity_summary(figure)
+    all_summary = _proximity_summary(all_figure)
+    assert summary.get_text() == (
+        "#Prompts: 3\n" + r"Median $\rho$: 0.000" + "\n"
+        + r"$\rho < 0$: 1/2 (50.0%) evaluable")
+    assert all_summary.get_text() == (
+        "#Prompts: 4\n" + r"Median $\rho$: -1.000" + "\n"
+        + r"$\rho < 0$: 2/3 (66.7%) evaluable")
     assert axis.get_xlim() == pytest.approx(all_axis.get_xlim())
     assert axis.get_ylim() == pytest.approx(all_axis.get_ylim())
+    assert axis.get_xticks() == pytest.approx(all_axis.get_xticks())
+    assert axis.get_yticks() == pytest.approx(all_axis.get_yticks())
     assert all_axis.get_xlim()[1] > 7.0
     assert all_axis.get_ylim()[1] > 9.0
-    assert "PCC" not in axis.texts[0].get_text()
-    for plotted_axis in (axis, all_axis):
-        assert plotted_axis.texts[0].get_position() == pytest.approx((0.02, 0.02))
-        assert plotted_axis.texts[0].get_horizontalalignment() == "left"
-        assert plotted_axis.texts[0].get_verticalalignment() == "bottom"
-    assert axis.texts[0].get_fontsize() == 10
-    assert axis.texts[0].get_fontfamily() == ["STIXGeneral"]
+    assert "PCC" not in summary.get_text()
+    for panel, label in ((figure, summary), (all_figure, all_summary)):
+        assert label.get_horizontalalignment() == "left"
+        assert label.get_verticalalignment() == "bottom"
+        assert label.get_position() == pytest.approx((.02, .02))
+        assert label.get_transform() is panel.axes[0].transAxes
+        box = label.get_bbox_patch()
+        assert box is not None and box.get_alpha() == .85
+        assert box.get_facecolor() == pytest.approx((1., 1., 1., .85))
+        assert box.get_edgecolor() == pytest.approx((.75, .75, .75, .85))
+        assert box.get_boxstyle().pad == .3
+        assert label.get_fontsize() == 12
+        assert label.get_fontfamily() == ["STIXGeneral"]
     from matplotlib.collections import PathCollection
     from matplotlib.colors import to_rgba
 
@@ -2125,61 +2172,46 @@ def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
         assert [text.get_text() for text in legend.get_texts()] == [
             plotting_module.category_legend_label(kind) for kind in kinds
         ]
-        assert all(text.get_fontsize() == 10 for text in legend.get_texts())
-        expected_colors = {"MV": "C3", "RV": "C1", "TV": "C0", "N": "C2"}
-        assert len(plotted_axis.collections) == len(kinds)
-        for points, handle, kind in zip(
-            plotted_axis.collections, legend.legend_handles, kinds, strict=True
-        ):
-            assert isinstance(points, PathCollection)
-            assert points.get_alpha() == pytest.approx(0.35)
-            assert points.get_sizes().tolist() == [12.0]
-            assert points.get_rasterized()
-            assert len(points.get_edgecolors()) == 0
-            assert points.get_facecolors()[0] == pytest.approx(
-                to_rgba(expected_colors[kind], alpha=0.35)
-            )
+        assert all(text.get_fontsize() == 12 for text in legend.get_texts())
+        assert legend.get_title().get_text() == ""
+        assert not legend.get_frame_on()
+        assert legend._loc == 1  # upper right, inside the axes
+        assert legend._ncols == 1
+        expected_colors = _proximity_category_colors()
+        assert len(plotted_axis.collections) == 1
+        points = plotted_axis.collections[0]
+        assert isinstance(points, PathCollection)
+        assert points.get_alpha() == pytest.approx(0.35)
+        assert points.get_sizes().tolist() == [10.0]
+        assert points.get_rasterized()
+        assert len(points.get_edgecolors()) == 0
+        for handle, kind in zip(legend.legend_handles, kinds, strict=True):
             assert handle.get_alpha() == 1.0
             assert handle.get_linestyle() == "None"
             assert to_rgba(handle.get_markerfacecolor()) == pytest.approx(
-                to_rgba(expected_colors[kind])
-            )
-    assert [points.get_offsets().tolist() for points in axis.collections] == [
-        [[5.0, 2.0], [5.0, 3.0]],
-        [[3.0, 1.0], [4.0, 4.0]],
-        [[1.0, 4.0], [2.0, 3.0]],
-    ]
-    assert all_axis.collections[0].get_offsets().tolist() == [
-        [6.0, 9.0],
-        [7.0, 8.0],
-    ]
+                to_rgba(expected_colors[kind]))
+        source = analysis if plotted_axis is all_axis else analysis.loc[analysis["include_prompt"]]
+        expected = Counter((float(row.l2_norm), float(row.sscd),
+                            tuple(to_rgba(expected_colors[row.kind], alpha=.35)))
+                           for row in source.itertuples())
+        actual = Counter((float(x), float(y), tuple(color))
+                         for (x, y), color in zip(points.get_offsets(), points.get_facecolors(), strict=True))
+        assert actual == expected
     assert save_calls == [
         {
-            "format": "png",
-            "dpi": 150,
+            "format": "pdf",
+            "dpi": 600,
             "bbox_inches": "tight",
             "pad_inches": 0.05,
         },
         {
             "format": "pdf",
-            "dpi": 150,
-            "bbox_inches": "tight",
-            "pad_inches": 0.05,
-        },
-        {
-            "format": "png",
-            "dpi": 150,
-            "bbox_inches": "tight",
-            "pad_inches": 0.05,
-        },
-        {
-            "format": "pdf",
-            "dpi": 150,
+            "dpi": 600,
             "bbox_inches": "tight",
             "pad_inches": 0.05,
         },
     ]
-    for filename in plotting_module.PROXIMITY_FIGURE_FILENAMES:
+    for filename in plotting_module.PROXIMITY_PDF_FILENAMES:
         artifact = tmp_path / filename
         assert artifact.is_file()
         expected_header = b"%PDF" if artifact.suffix == ".pdf" else b"\x89PNG"
@@ -2209,27 +2241,25 @@ def test_proximity_scatter_preserves_singletons_and_normalizes_categories() -> N
         assert len(figure.axes) == 1
         axis = figure.axes[0]
         assert not axis.lines
-        assert len(axis.collections) == 5
+        assert len(axis.collections) == 1
         kinds = ("MV", "RV", "TV", "N", "Other / unlabeled")
-        colors = ("C3", "C1", "C0", "C2", "#7F7F7F")
-        legend = axis.get_legend()
-        assert [label.get_text() for label in legend.get_texts()] == [
-            plotting_module.category_legend_label(kind) for kind in kinds
-        ]
-        assert [len(points.get_offsets()) for points in axis.collections] == [
-            1,
-            1,
-            1,
-            1,
-            4,
-        ]
-        for points, color in zip(axis.collections, colors, strict=True):
-            assert isinstance(points, PathCollection)
-            assert points.get_facecolors()[0] == pytest.approx(
-                to_rgba(color, alpha=0.35)
-            )
-        assert axis.collections[-1].get_offsets()[:, 0].tolist() == [4, 5, 6, 7]
-        assert all(handle.get_alpha() == 1.0 for handle in legend.legend_handles)
+        colors = _proximity_category_colors()
+        from matplotlib.legend import Legend
+        legends = [item for item in axis.get_children() if isinstance(item, Legend)]
+        assert len(legends) == 1
+        assert legends[0]._loc == 1 and legends[0]._ncols == 1
+        assert [label.get_text() for legend in legends for label in legend.get_texts()] == [
+            plotting_module.category_legend_label(kind) for kind in kinds]
+        assert legends[0].get_title().get_text() == ""
+        points = axis.collections[0]
+        assert isinstance(points, PathCollection)
+        assert len(points.get_offsets()) == len(frame)
+        expected = {index: kind for index, kind in enumerate(kinds[:4])}
+        expected.update({index: "Other / unlabeled" for index in range(4, 8)})
+        for (x, y), color in zip(points.get_offsets(), points.get_facecolors(), strict=True):
+            assert y == pytest.approx(.1 * x)
+            assert color == pytest.approx(to_rgba(colors[expected[int(x)]], alpha=.35))
+        assert all(handle.get_alpha() == 1.0 for legend in legends for handle in legend.legend_handles)
     finally:
         plotting_module.plt.close(figure)
 
@@ -2262,7 +2292,7 @@ def test_proximity_scatter_handles_missing_categories_and_empty_frames(
             points = axis.collections[0]
             assert points.get_offsets().tolist() == [[2.0, 0.7]]
             assert points.get_facecolors()[0] == pytest.approx(
-                to_rgba("#7F7F7F", alpha=0.35)
+                to_rgba("#858B93", alpha=0.35)
             )
             assert [text.get_text() for text in axis.get_legend().get_texts()] == [
                 plotting_module.category_legend_label("Other / unlabeled")
@@ -2331,7 +2361,7 @@ def test_proximity_kind_legend_order_and_typewriter_labels(
     assert [label.get_text() for label in legend.get_texts()] == [
         rf"$\mathtt{{{kind}}}$" for kind in ("MV", "RV", "TV", "N", "Other")
     ]
-    assert all(label.get_fontsize() == 10 for label in legend.get_texts())
+    assert all(label.get_fontsize() == 12 for label in legend.get_texts())
     assert all(handle.get_alpha() == 1.0 for handle in legend.legend_handles)
     # Reordering the legend must not swap the existing RV and TV encodings.
     assert [handle.get_linestyle() for handle in legend.legend_handles] == [
@@ -2429,7 +2459,7 @@ def test_gmm_diagnostic_writes_three_single_panel_prompt_line_views(
         assert (curve.norm.vmin, curve.norm.vmax) == (0.0, 1.0)
         assert colorbar_axis.get_ylabel() == "SSCD"
         assert colorbar_axis.collections[-1].get_alpha() == 1.0
-        assert axis.xaxis.label.get_fontsize() == 15
+        assert axis.xaxis.label.get_fontsize() == 18
         assert all(
             handle.get_alpha() == 1.0 for handle in axis.get_legend().legend_handles
         )
@@ -2742,6 +2772,10 @@ def test_write_examples_downscales_ranked_pairs_and_preserves_source_images(
     notes = paths.output_directory / "examples/retained/highest_l2_training.notes.txt"
     notes.parent.mkdir(parents=True)
     notes.write_text("unrelated user note", encoding="utf-8")
+    old_png = notes.with_name("highest_l2_training.png")
+    old_png.write_bytes(b"preserved historical example PNG")
+    old_png_before = (old_png.read_bytes(), old_png.stat().st_mtime_ns)
+    table_before = (table_path.read_bytes(), table_path.stat().st_mtime_ns)
     monkeypatch.setattr(
         proximity_module,
         "safe_torch_load",
@@ -2778,7 +2812,13 @@ def test_write_examples_downscales_ranked_pairs_and_preserves_source_images(
         ("discarded", "median", "discarded-middle"),
         ("discarded", "lowest", "discarded-low"),
     ]
+    gallery = paths.figure_directory / "examples"
+    assert manifest["format"] == "pdf"
+    assert manifest["figure_directory"] == gallery.relative_to(paths.project_root).as_posix()
     assert manifest["image_export"] == {
+        "format": "pdf",
+        "pdf_dpi": 150,
+        "pad_inches": .05,
         "generated_scale": 0.75,
         "training_max_edge": 256,
         "resampling": "lanczos",
@@ -2804,10 +2844,10 @@ def test_write_examples_downscales_ranked_pairs_and_preserves_source_images(
             == target.relative_to(paths.project_root).as_posix()
         )
         generated_output = (
-            paths.output_directory / "examples" / entry["generated_image_path"]
+            gallery / entry["generated_image_path"]
         )
         training_output = (
-            paths.output_directory / "examples" / entry["training_image_path"]
+            gallery / entry["training_image_path"]
         )
         assert generated.read_bytes() == generated_bytes
         assert target.read_bytes() == target_bytes
@@ -2822,15 +2862,20 @@ def test_write_examples_downscales_ranked_pairs_and_preserves_source_images(
         assert entry["generated_image_size"] == [600, 480]
         assert entry["training_source_size"] == [1024, 768]
         assert entry["training_image_size"] == [256, 192]
-        with Image.open(generated_output) as exported:
-            assert exported.format == "PNG"
-            assert exported.size == (600, 480)
-        with Image.open(training_output) as exported:
-            assert exported.format == "PNG"
-            assert exported.size == (256, 192)
+        assert generated_output.suffix == training_output.suffix == ".pdf"
+        assert generated_output.read_bytes().startswith(b"%PDF")
+        assert training_output.read_bytes().startswith(b"%PDF")
+        assert Path(entry["generated_image_path"]).parent.name == entry["group"]
+        assert Path(entry["training_image_path"]).parent.name == entry["group"]
     assert notes.read_text(encoding="utf-8") == "unrelated user note"
-    assert (paths.output_directory / "examples/retained").is_dir()
-    assert not (paths.output_directory / "examples/kept").exists()
+    assert (old_png.read_bytes(), old_png.stat().st_mtime_ns) == old_png_before
+    assert (table_path.read_bytes(), table_path.stat().st_mtime_ns) == table_before
+    assert (gallery / "retained").is_dir() and (gallery / "discarded").is_dir()
+    assert not (gallery / "kept").exists()
+    assert len(list(gallery.rglob("*.pdf"))) == 12
+    assert not list(gallery.rglob("*.png"))
+    assert {item.suffix for item in gallery.rglob("*") if item.is_file()} == {".pdf"}
+    assert not list((paths.output_directory / "examples").rglob("*.pdf"))
     assert len(validation_calls) == 6
     assert all(
         options["load_tensors"] is False
@@ -2841,7 +2886,7 @@ def test_write_examples_downscales_ranked_pairs_and_preserves_source_images(
     )
 
 
-def test_write_examples_keeps_small_training_png_when_reencoding_cannot_shrink_it(
+def test_write_examples_keeps_small_training_dimensions_and_preserves_cached_png(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2875,12 +2920,11 @@ def test_write_examples_keeps_small_training_png_when_reencoding_cannot_shrink_i
     entry = next(
         item for item in manifest["examples"] if item["original_index"] == "kept-high"
     )
-    output = gallery / entry["training_image_path"]
-    assert output.read_bytes() == original
-    assert len(output.read_bytes()) <= len(original)
+    output = paths.figure_directory / "examples" / entry["training_image_path"]
+    assert output.suffix == ".pdf" and output.read_bytes().startswith(b"%PDF")
     assert target.read_bytes() == original
     assert entry["training_source_size"] == entry["training_image_size"] == [1, 1]
-    assert entry["training_image_sha256"] == source_hash
+    assert entry["training_image_sha256"] == file_sha256(output)
     assert entry["training_source_sha256"] == source_hash
     assert entry["target_image_sha256"] == source_hash
 
@@ -2918,6 +2962,7 @@ def test_write_examples_rejects_corrupt_pairs_before_publishing(
         proximity_module._write_examples(paths, table_path=table_path, num_seeds=20)
     assert not (paths.output_directory / "examples/manifest.json").exists()
     assert not list((paths.output_directory / "examples").glob("*/*.png"))
+    assert not list((paths.figure_directory / "examples").rglob("*.pdf"))
 
 
 def test_write_examples_preserves_existing_gallery_when_late_source_cannot_decode(
@@ -2929,12 +2974,15 @@ def test_write_examples_preserves_existing_gallery_when_late_source_cannot_decod
     )
     proximity_module._write_examples(paths, table_path=table_path, num_seeds=20)
     gallery = paths.output_directory / "examples"
+    figure_gallery = paths.figure_directory / "examples"
     original_outputs = {
-        path.relative_to(gallery): path.read_bytes()
-        for path in gallery.rglob("*")
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for directory in (gallery, figure_gallery)
+        for path in directory.rglob("*")
         if path.is_file()
     }
-    assert Path("manifest.json") in original_outputs
+    assert gallery / "manifest.json" in original_outputs
+    assert sum(path.suffix == ".pdf" for path in original_outputs) == 12
 
     corrupted_source = sources["discarded-low"][0]
     corrupted_source.write_bytes(b"checksum-valid but undecodable montage")
@@ -2946,8 +2994,177 @@ def test_write_examples_preserves_existing_gallery_when_late_source_cannot_decod
         proximity_module._write_examples(paths, table_path=table_path, num_seeds=20)
 
     after_outputs = {
-        path.relative_to(gallery): path.read_bytes()
-        for path in gallery.rglob("*")
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for directory in (gallery, figure_gallery)
+        for path in directory.rglob("*")
         if path.is_file()
     }
     assert after_outputs == original_outputs
+
+
+def test_external_pdf_publication_preserves_cached_tables_and_historical_images(tmp_path, monkeypatch):
+    paths = ProximityPaths.build(
+        tmp_path, Path(RUN_NAME) / "experiment_S0_N20",
+        role="experiment", seed_start=0, num_seeds=20)
+    analysis = _annotate_selection(
+        pd.concat([_observations("1"), _observations("2")], ignore_index=True),
+        _selection(("1", "2")))
+    paths.output_directory.mkdir(parents=True)
+    historical = paths.output_directory / "proximity_vs_sscd.png"
+    historical.write_bytes(b"preserved historical image")
+    captured = []
+    def publish(output, figures, *, formats, **options):
+        assert formats == ("pdf",)
+        assert Path(output) == paths.figure_directory
+        Path(output).mkdir(parents=True, exist_ok=True)
+        for _figure, names in figures:
+            assert set(names) == {"pdf"}
+            (Path(output) / names["pdf"]).write_bytes(b"saved PDF fixture")
+            captured.append(names["pdf"])
+    monkeypatch.setattr(plotting_module, "_publish_figures", publish)
+    expected = write_analysis_outputs(
+        paths.output_directory, analysis=analysis, figure_directory=paths.figure_directory)
+    assert paths.figure_directory == tmp_path / "figures" / RUN_NAME / "proximity/experiment_S0_N20"
+    assert sorted(captured) == sorted(plotting_module.PROXIMITY_PDF_FILENAMES)
+    assert {path.name for path in paths.output_directory.iterdir()} == {"proximity.csv", historical.name}
+    before = {path.name: (file_sha256(path), path.stat().st_mtime_ns)
+              for path in paths.output_directory.iterdir()}
+    monkeypatch.setattr(plotting_module, "atomic_write_frame_csv",
+                        lambda *args, **kwargs: pytest.fail("plot-only rewrote cached scalar CSV"))
+    assert plotting_module.write_saved_analysis_figures(
+        paths.output_directory, figure_directory=paths.figure_directory) == expected
+    assert {path.name: (file_sha256(path), path.stat().st_mtime_ns)
+            for path in paths.output_directory.iterdir()} == before
+    assert {path.suffix for path in paths.figure_directory.iterdir()} == {".pdf"}
+
+
+def test_external_pdf_failure_keeps_previous_publication_and_cache(tmp_path, monkeypatch):
+    from matplotlib.figure import Figure
+    paths = ProximityPaths.build(
+        tmp_path, Path(RUN_NAME) / "experiment_S0_N20",
+        role="experiment", seed_start=0, num_seeds=20)
+    paths.figure_directory.mkdir(parents=True)
+    old = {name: ("old " + name).encode() for name in plotting_module.PROXIMITY_PDF_FILENAMES}
+    for name, content in old.items():
+        (paths.figure_directory / name).write_bytes(content)
+    # Fail the second PDF after one has staged; neither old PDF may be replaced.
+    calls = []
+    def fail_second(self, destination, **options):
+        assert options["format"] == "pdf"
+        calls.append(Path(destination))
+        Path(destination).write_bytes(b"new staged PDF")
+        if len(calls) == 2:
+            raise RuntimeError("injected second PDF failure")
+    monkeypatch.setattr(Figure, "savefig", fail_second)
+    frame = pd.DataFrame({"original_index": ["p", "p"], "seed": [0, 1],
+                          "kind": ["TV", "TV"], "l2_norm": [1., 2.], "sscd": [.8, -.1],
+                          "prompt_spearman": [-1., -1.]})
+    before = frame.copy(deep=True)
+    with pytest.raises(RuntimeError, match="second PDF"):
+        plotting_module._write_scatter_views(
+            paths.figure_directory, all_prompts=frame, selected=frame,
+            spearman_column="prompt_spearman")
+    assert {path.name: path.read_bytes() for path in paths.figure_directory.iterdir()} == old
+    assert not paths.output_directory.exists()
+    pd.testing.assert_frame_equal(frame, before)
+    assert not plotting_module.plt.get_fignums()
+
+
+def _example_publication_snapshot(paths: ProximityPaths) -> dict[Path, tuple[bytes, int]]:
+    return {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for directory in (paths.output_directory / "examples", paths.figure_directory / "examples")
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_example_plot_preflight_decodes_sources_without_encoding_or_writing(tmp_path, monkeypatch):
+    paths, table_path, sources, validation_calls = _example_export_fixture(tmp_path, monkeypatch)
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in tmp_path.rglob("*") if path.is_file()}
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("example preflight must not encode, publish, or load latent tensors")
+
+    for name in ("_example_png", "_example_pdf", "_publish_example_payloads",
+                 "atomic_write_bytes", "atomic_write_json", "safe_torch_load"):
+        monkeypatch.setattr(proximity_module, name, forbidden)
+
+    assert proximity_module._write_examples(
+        paths, table_path=table_path, num_seeds=20, validate_only=True,
+    ) is None
+
+    assert len(validation_calls) == len(sources) == 6
+    assert all(options["load_tensors"] is False and options["tensor_names"] == ()
+               and options["require_preview"] is True and options["verify_file_hashes"] is True
+               for _index, options in validation_calls)
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert not paths.figure_directory.exists()
+    assert not (paths.output_directory / "examples").exists()
+
+
+def test_example_late_pdf_encoding_failure_preserves_manifest_and_all_old_pdfs(tmp_path, monkeypatch):
+    paths, table_path, sources, _calls = _example_export_fixture(tmp_path, monkeypatch)
+    proximity_module._write_examples(paths, table_path=table_path, num_seeds=20)
+    before = _example_publication_snapshot(paths)
+    source_before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                     for generated, _generated_bytes, target, _target_bytes in sources.values()
+                     for path in (generated, target)}
+    encode = proximity_module._example_pdf
+    encoded = []
+
+    def fail_last_image(content):
+        encoded.append(len(content))
+        if len(encoded) == 12:
+            raise ProximityError("injected final example PDF encoding failure")
+        return encode(content)
+
+    monkeypatch.setattr(proximity_module, "_example_pdf", fail_last_image)
+    with pytest.raises(ProximityError, match="final example PDF encoding failure"):
+        proximity_module._write_examples(paths, table_path=table_path, num_seeds=20)
+
+    assert len(encoded) == 12
+    assert _example_publication_snapshot(paths) == before
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in source_before} == source_before
+    assert not list((paths.figure_directory / "examples").rglob("*.png"))
+
+
+@pytest.mark.parametrize("failed_artifact", ["last_pdf", "manifest"])
+def test_example_late_install_failure_restores_old_pdfs_and_manifest(tmp_path, monkeypatch, failed_artifact):
+    paths, table_path, sources, _calls = _example_export_fixture(tmp_path, monkeypatch)
+    proximity_module._write_examples(paths, table_path=table_path, num_seeds=20)
+    old_png = paths.output_directory / "examples/retained/highest_l2_generated.png"
+    old_png.parent.mkdir(parents=True, exist_ok=True)
+    old_png.write_bytes(b"preserved historical gallery PNG")
+    before = _example_publication_snapshot(paths)
+    source_before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                     for generated, _generated_bytes, target, _target_bytes in sources.values()
+                     for path in (generated, target)}
+    table_before = (table_path.read_bytes(), table_path.stat().st_mtime_ns)
+    encode = proximity_module._example_pdf
+    # Valid trailing PDF comments distinguish replacement payloads from the old
+    # publication, so rollback is tested even with deterministic image exports.
+    monkeypatch.setattr(proximity_module, "_example_pdf",
+                        lambda content: encode(content) + b"\n% replacement fixture\n")
+    target = (paths.output_directory / "examples/manifest.json" if failed_artifact == "manifest"
+              else paths.figure_directory / "examples/discarded/lowest_l2_training.pdf")
+    replace = proximity_module.os.replace
+    failures = []
+
+    def fail_once(source, destination):
+        if Path(destination) == target and not failures:
+            failures.append((Path(source), Path(destination)))
+            raise OSError("injected late example installation failure")
+        return replace(source, destination)
+
+    monkeypatch.setattr(proximity_module.os, "replace", fail_once)
+    with pytest.raises((OSError, ProximityError), match="late example installation failure"):
+        proximity_module._write_examples(paths, table_path=table_path, num_seeds=20)
+
+    assert len(failures) == 1
+    assert _example_publication_snapshot(paths) == before
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in source_before} == source_before
+    assert (table_path.read_bytes(), table_path.stat().st_mtime_ns) == table_before
+    assert not list((paths.figure_directory / "examples").rglob("*.png"))

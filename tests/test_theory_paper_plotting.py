@@ -488,7 +488,8 @@ def test_real_exports_single_page_single_axes_and_no_numeric_mutation(
     def capture(output, items, **options):
         for figure, names in items:
             assert len([a for a in figure.axes if a.get_label() != "<colorbar>"]) == 1
-            assert list(figure.get_size_inches()) == [4.0, 4.0]
+            from utils.experiments.theory.paper_style import CANVAS_SIZE_INCHES
+            assert list(figure.get_size_inches()) == list(CANVAS_SIZE_INCHES)
             seen.append(names)
         real_publish(output, items, **options)
 
@@ -502,7 +503,7 @@ def test_real_exports_single_page_single_axes_and_no_numeric_mutation(
     monkeypatch.setattr(torch, "load", forbidden)
     monkeypatch.setattr(np, "load", forbidden)
     monkeypatch.setattr(pd, "read_parquet", forbidden)
-    manifest = plotting.render_paper(root)
+    manifest = plotting.render_paper(root, formats=("png", "pdf"))
     assert len(seen) == 6
     assert len(manifest["figures"]) == 6
     assert manifest["timestep_figures"] == []
@@ -534,7 +535,7 @@ def test_real_exports_single_page_single_axes_and_no_numeric_mutation(
         "null",
     ]
     assert frames["initial_loss_recovery"].mean_terminal_sscd.tolist() == [-0.1, 0.5, 0.8, 1.1]
-    second = plotting.render_paper(root)
+    second = plotting.render_paper(root, formats=("png", "pdf"))
     assert second["files"].keys() == manifest["files"].keys()
     assert all(
         second["files"][name] == digest
@@ -547,7 +548,7 @@ def test_export_failure_keeps_old_pair_manifest_and_closes_figures(
     tmp_path, monkeypatch
 ):
     root = compact_fixture(tmp_path / "paper")
-    first = plotting.render_paper(root)
+    first = plotting.render_paper(root, formats=("png", "pdf"))
     before = {
         name: (root / name).read_bytes()
         for name in [*first["files"], "figure_manifest.json"]
@@ -564,7 +565,7 @@ def test_export_failure_keeps_old_pair_manifest_and_closes_figures(
 
     monkeypatch.setattr(Figure, "savefig", fail_second)
     with pytest.raises(RuntimeError, match="second export"):
-        plotting.render_paper(root)
+        plotting.render_paper(root, formats=("png", "pdf"))
     assert not plt.get_fignums()
     assert all((root / name).read_bytes() == value for name, value in before.items())
     assert not list(root.rglob("*.tmp"))
@@ -588,7 +589,7 @@ def test_unowned_collision_is_checked_before_any_export(
         lambda *a: pytest.fail("export before collision check"),
     )
     with pytest.raises(TheoryError, match="unowned"):
-        plotting.render_paper(root)
+        plotting.render_paper(root, formats=("png", "pdf"))
     assert path.read_text() == "user-owned"
     assert not plt.get_fignums()
 
@@ -655,7 +656,7 @@ def test_public_shared_publisher_rejects_unsafe_or_mismatched_pair(tmp_path, nam
 
 def test_optional_diagnostics_do_not_add_publication_exports(tmp_path):
     root = compact_fixture(tmp_path / "paper", diagnostics=True)
-    manifest = plotting.render_paper(root, diagnostics=True)
+    manifest = plotting.render_paper(root, diagnostics=True, formats=("png", "pdf"))
     assert [entry["stem"] for entry in manifest["figures"]] == [entry["stem"] for entry in paper_registry()]
     assert manifest["timestep_figures"] == []
     assert manifest["requested_counts"]["diagnostics"] == 0
@@ -674,7 +675,7 @@ def test_unselected_alias_remains_saved_without_export(tmp_path):
         alias_of="joint_target_recovery_early")
     atomic_write_json(path, summary)
     before = path.read_bytes()
-    manifest = plotting.render_paper(root, diagnostics=True)
+    manifest = plotting.render_paper(root, diagnostics=True, formats=("png", "pdf"))
     assert "joint_target_recovery_late" not in {e["stem"] for e in manifest["figures"]}
     assert not (root / "diagnostics/joint_target_recovery_late.pdf").exists()
     assert path.read_bytes() == before
@@ -733,9 +734,9 @@ def test_previous_registry_fixture_retains_fifteen_saved_tables(tmp_path):
                 "corollary3_guidance_scale_vs_loss", "reference_variation_per_prompt"}.intersection(summary["plot_data"])
 
 
-def test_default_render_retains_dormant_ownership_receipts(tmp_path):
+def test_explicit_paired_render_retains_dormant_ownership_receipts(tmp_path):
     root = compact_fixture(tmp_path / "paper")
-    first = plotting.render_paper(root)
+    first = plotting.render_paper(root, formats=("png", "pdf"))
     # Two dormant origins are merged, without granting ownership to unknown files.
     dormant = root / "diagnostics/retained_diagnostic.pdf"
     dormant.parent.mkdir()
@@ -748,7 +749,7 @@ def test_default_render_retains_dormant_ownership_receipts(tmp_path):
     first["preserved_files"] = {"diagnostics/other_diagnostic.png": file_sha256(already_preserved)}
     atomic_write_json(root / "figure_manifest.json", first)
     before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (dormant, already_preserved, unknown)}
-    second = plotting.render_paper(root)
+    second = plotting.render_paper(root, formats=("png", "pdf"))
     assert second["preserved_files"] == {
         "diagnostics/retained_diagnostic.pdf": file_sha256(dormant),
         "diagnostics/other_diagnostic.png": file_sha256(already_preserved),
@@ -844,12 +845,12 @@ def test_condition_margin_keeps_pooled_finite_values_without_timestep_exports(tm
     frames[stem].loc[frames[stem].step_index.eq(1), "x"] = [np.nan, np.inf]
     before = frames[stem].copy(deep=True)
     monkeypatch.setattr(plotting, "load_paper_inputs", lambda *args, **kwargs: (config, summary, audit, frames))
-    manifest = plotting.render_paper(root)
+    manifest = plotting.render_paper(root, formats=("png", "pdf"))
     assert len(manifest["figures"]) == 6 and manifest["timestep_figures"] == []
     entry = next(e for e in manifest["figures"] if e["stem"] == stem)
     assert entry["display_audit"]["finite_pairs"] == 2
     assert entry["display_audit"]["missing_coordinate_pairs"] == 2
-    assert entry["display_audit"]["scatter_alpha"] == .01
+    assert entry["display_audit"]["scatter_alpha"] == .1
     assert len(manifest["files"]) == 13
     assert not (root / "appendix").exists()
     assert frames[stem].equals(before)
@@ -858,14 +859,14 @@ def test_condition_margin_keeps_pooled_finite_values_without_timestep_exports(tm
 
 def test_modified_owned_selected_export_is_rejected_before_publishing(tmp_path, monkeypatch):
     root = compact_fixture(tmp_path / "owned_figure")
-    plotting.render_paper(root)
+    plotting.render_paper(root, formats=("png", "pdf"))
     figure = root / "figures/posterior_feedback_condition_margin.png"
     figure.write_bytes(b"user-edited selected figure")
     def forbidden(*args, **kwargs):
         pytest.fail("export started before checking existing figure ownership")
     monkeypatch.setattr(plotting, "publish_figures", forbidden)
     with pytest.raises(TheoryError, match="modified outside"):
-        plotting.render_paper(root)
+        plotting.render_paper(root, formats=("png", "pdf"))
     assert figure.read_bytes() == b"user-edited selected figure"
     assert not plt.get_fignums()
 
@@ -883,7 +884,7 @@ def test_selected_scatter_opacities_apply_to_all_points(tmp_path):
         try:
             dots = [artist for artist in fig.axes[0].collections if isinstance(artist, PathCollection)]
             assert dots
-            expected = .01 if stem == "posterior_feedback_condition_margin" else .8
+            expected = .1 if stem == "posterior_feedback_condition_margin" else .8
             assert all(artist.get_alpha() == expected for artist in dots)
         finally:
             plt.close(fig)

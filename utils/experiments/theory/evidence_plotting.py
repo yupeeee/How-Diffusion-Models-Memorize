@@ -16,9 +16,10 @@ import numpy as np
 import pandas as pd
 
 from utils.experiments.plotting import (
-    SCATTER_ALPHA, SCATTER_SIZE, SSCD_COLOR_RANGE, add_sscd_colorbar,
+    SUMMARY_FONT_SIZE, SCATTER_ALPHA, SCATTER_SIZE, SSCD_COLOR_RANGE, add_sscd_colorbar,
 )
 from .contracts import TheoryError
+from . import paper_style
 from .paper_registry import GROUPS, GROUP_COLORS, GROUP_LABELS
 
 EVIDENCE_RENDERING_VERSION = "precise-seven-evidence-stix-2"
@@ -135,23 +136,40 @@ def _curve(ax, rows, *, color, style, band=False, native=True):
     return count
 
 
-def _pair_loss(fig, ax, frame, metadata):
+def _pair_loss(fig, ax, frame, metadata, *, styled=False):
     x, y, control = (_number(frame, key) for key in ("x", "y", "control_y"))
     scores = _number(frame, "mean_terminal_sscd")
     valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(control)
     if not valid.any():
         raise TheoryError("Loss recovery has no common finite pair summaries")
+    size = paper_style.SPARSE_SIZE if styled else SCATTER_SIZE
+    alpha = paper_style.SPARSE_ALPHA if styled else SCATTER_ALPHA
+    outline = paper_style.CONTROL_COLOR if styled else ".55"
+    interval_color = paper_style.REFERENCE_COLOR if styled else ".55"
     ax.vlines(x[valid], np.minimum(y[valid], control[valid]), np.maximum(y[valid], control[valid]),
-              color=".65", linewidth=.55, alpha=.3, zorder=1)
-    ax.scatter(x[valid], control[valid], s=SCATTER_SIZE * .65, facecolors="none", edgecolors=".55", linewidths=.6, alpha=SCATTER_ALPHA, rasterized=True)
+              color=paper_style.CONNECTOR_COLOR if styled else ".65",
+              linewidth=paper_style.CONNECTOR_WIDTH if styled else .55,
+              alpha=paper_style.CONNECTOR_ALPHA if styled else .3, zorder=1)
+    control_options = {"zorder": 3} if styled else {}
+    conditional_options = {"zorder": 4} if styled else {}
+    ax.scatter(x[valid], control[valid], s=size if styled else size * .65,
+               facecolors="none", edgecolors=outline,
+               linewidths=paper_style.CONTROL_WIDTH if styled else .6,
+               alpha=alpha, rasterized=not styled, **control_options)
     colored = valid & np.isfinite(scores)
-    ax.scatter(x[colored], y[colored], c=scores[colored], cmap="viridis",
-               norm=Normalize(*SSCD_COLOR_RANGE, clip=True), s=SCATTER_SIZE,
-               edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
+    ax.scatter(x[colored], y[colored], c=scores[colored],
+               cmap=paper_style.SSCD_CMAP if styled else "viridis",
+               norm=paper_style.SSCD_NORM if styled else Normalize(*SSCD_COLOR_RANGE, clip=True), s=size,
+               edgecolors="none", alpha=alpha, rasterized=not styled, **conditional_options)
     if (valid & ~colored).any():
-        ax.scatter(x[valid & ~colored], y[valid & ~colored], color=".5", s=SCATTER_SIZE, edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
-    bar = add_sscd_colorbar(fig, ax, scores[colored])
-    bar.set_label("Mean terminal SSCD")
+        ax.scatter(x[valid & ~colored], y[valid & ~colored],
+                   color=paper_style.CONTROL_COLOR if styled else ".5", s=size,
+                   edgecolors="none", alpha=alpha, rasterized=not styled, **conditional_options)
+    if styled:
+        bar = paper_style.add_theory_sscd_colorbar(fig, ax, scores[colored])
+    else:
+        bar = add_sscd_colorbar(fig, ax, scores[colored])
+        bar.set_label("Mean terminal SSCD")
     intervals = all(key in frame for key in ("x_low", "x_high", "y_low", "y_high"))
     rendered_intervals = False
     if intervals:
@@ -161,15 +179,16 @@ def _pair_loss(fig, ax, frame, metadata):
             raise TheoryError("Invalid saved Monte Carlo bootstrap interval")
         if valid.sum() <= 40:
             # Percentile intervals need not contain their original point estimate.
-            ax.hlines(y[interval_rows], xl[interval_rows], xh[interval_rows], color=".55", alpha=.35, linewidth=.6)
-            ax.vlines(x[interval_rows], yl[interval_rows], yh[interval_rows], color=".55", alpha=.35, linewidth=.6)
+            interval_options = {"zorder": 2} if styled else {}
+            ax.hlines(y[interval_rows], xl[interval_rows], xh[interval_rows], color=interval_color, alpha=.35, linewidth=.6, **interval_options)
+            ax.vlines(x[interval_rows], yl[interval_rows], yh[interval_rows], color=interval_color, alpha=.35, linewidth=.6, **interval_options)
             rendered_intervals = bool(interval_rows.any())
     _nonnegative_limits(ax, [x[valid], xl if intervals else [] , xh if intervals else []], axis="x")
     _nonnegative_limits(ax, [y[valid], control[valid], yl if intervals else [], yh if intervals else []])
-    handles = [Line2D([], [], marker="o", linestyle="none", color=".3", label="Conditional"),
-               Line2D([], [], marker="o", linestyle="none", markerfacecolor="none", color=".55", label="Unconditional control")]
+    handles = [Line2D([], [], marker="o", linestyle="none", color=paper_style.TEXT_COLOR if styled else ".3", label="Conditional"),
+               Line2D([], [], marker="o", linestyle="none", markerfacecolor="none", color=outline, label="Unconditional control")]
     if rendered_intervals:
-        handles.append(Line2D([], [], color=".55", linewidth=.7, label="Monte Carlo bootstrap intervals"))
+        handles.append(Line2D([], [], color=interval_color, linewidth=.7, label="Monte Carlo bootstrap intervals"))
     _legend(ax, handles, loc="upper left")
     counts = metadata.get("counts", {})
     needed = {"pairs", "gaussian_seeds_per_pair", "forward_draws"}
@@ -180,7 +199,10 @@ def _pair_loss(fig, ax, frame, metadata):
             f"{counts['pairs']} pairs; {counts['gaussian_seeds_per_pair']} Gaussian seeds/pair\n{counts['forward_draws']} forward draws/pair",
             transform=ax.transAxes, ha="right", va="bottom", fontsize=8)
     return {"finite_pair_summaries": int(valid.sum()), "excluded_nonfinite_pairs": int((~valid).sum()),
-            "colorbar_label": "Mean terminal SSCD", "equality_guide": False,
+            "colorbar_label": "SSCD" if styled else "Mean terminal SSCD", "equality_guide": False,
+            "color_population": "Pair mean terminal SSCD",
+            "selected_sparse_style": bool(styled), "scatter_size": float(size), "scatter_alpha": float(alpha),
+            "control_outline_color": outline, "conditional_missing_sscd_count": int((valid & ~colored).sum()),
             "paired_connector_count": int(valid.sum()),
             "bootstrap_intervals_rendered": rendered_intervals,
             "bootstrap_interval_definition": "Monte Carlo bootstrap intervals",
@@ -233,7 +255,7 @@ def _reference(ax, frame, metadata, *, native_sweep=False):
                                   linestyle="-" if metric == "reference" else "none", label=label))
             total += 1
         ax.axvspan(lower, boundary, color=".85", alpha=.22, zorder=-1)
-        ax.text(.02, .02, "Analytical reference only", transform=ax.transAxes, fontsize=8, va="bottom")
+        ax.text(.02, .02, "Analytical reference only", transform=ax.transAxes, fontsize=10, va="bottom")
         ax.set_xlim(lower / 1.1, boundary * 1.6)
         analytical_range = [lower, boundary]
     handles.append(Line2D([], [], color=".45", linestyle=":", label=r"$\mathrm{SNR}_T$"))
@@ -483,7 +505,7 @@ def _terminal(ax, frame, metadata, *, components=False):
     if scope != "original_clean_terminal_theorem" and metadata.get("manuscript_extension_required") is not True:
         raise TheoryError("A finite terminal extension must declare its manuscript requirement")
     if not components:
-        ax.set_title(_SCOPES[scope], fontsize=10)
+        ax.set_title(_SCOPES[scope], fontsize=SUMMARY_FONT_SIZE)
     handles = [Line2D([], [], color=color, linestyle=style, label=label) for label, color, style in definitions.values()]
     if tolerance is not None:
         if tolerance == 0:
@@ -516,7 +538,7 @@ def draw_evidence(fig, ax, entry, frame, metadata, config):
     """Draw one designated evidence design without changing its saved inputs."""
     kind = entry["kind"]
     if kind == "pair_loss":
-        return _pair_loss(fig, ax, frame, metadata)
+        return _pair_loss(fig, ax, frame, metadata, styled=paper_style.is_selected(entry))
     if kind in {"reference_convergence", "reference_native_sweep"}:
         return _reference(ax, frame, metadata, native_sweep=kind == "reference_native_sweep")
     if kind == "injection_geometry":

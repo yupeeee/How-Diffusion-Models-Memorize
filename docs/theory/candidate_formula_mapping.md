@@ -1,6 +1,6 @@
 # Candidate discovery formula mapping
 
-The active contract is `projected-gap-error-1`: e_t^parallel(Delta)=u^T(Delta-bar{Delta}) is signed and mathcal{V} is the positive part after the unchanged signed unit-gap projection integral. Exactly zero gap extends u=0, e^parallel=0 and mathcal{V}=0 by convention without claiming a unit direction. The PDF formula table below is historical attribution; the active candidate margins use the revised formulas documented below. Run `bash run_all.sh --recompute-experiments`; historical gap-error norms cannot be relabeled as signed errors.
+The active contract is `projected-gap-error-1`: mathcal{E}_t=u^T(Delta-bar{Delta}) is signed and mathcal{V} is the positive part after the unchanged signed unit-gap projection integral. Exactly zero gap extends u=0, mathcal{E}_t=0 and mathcal{V}=0 by convention without claiming a unit direction. The PDF formula table below is historical attribution; the active candidate margins use the revised formulas documented below. Run `bash run_all.sh --recompute-experiments`; historical gap-error norms cannot be relabeled as signed errors.
 
 ## Audited source and implementation
 
@@ -95,13 +95,13 @@ identities. Under `projected-gap-error-1`, revised `M0` and `M1` use mathcal{V}=
 
 | Name | Formula | Saved prefix |
 |---|---|---|
-| Refined gap-error margin `M0` | `D-e_t^parallel(Delta)-[W]_+`, where `e_t^parallel(Delta)=u^T(r_c-r_u)=-S` | `candidate_margin_original` |
-| Signed projected-error alias `M1` | `D-e_t^parallel(Delta)-[W]_+` | `candidate_margin_combined` |
+| Refined gap-error margin `M0` | `D-mathcal{E}_t-[W]_+`, where `mathcal{E}_t=u^T(r_c-r_u)=-S` | `candidate_margin_original` |
+| Signed projected-error alias `M1` | `D-mathcal{E}_t-[W]_+` | `candidate_margin_combined` |
 | Signed-error margin `M2` | `D+S-V_norm` | `candidate_margin_signed_error` |
 | Projected-variation margin `M3` | `D+S-V_parallel` | `candidate_margin_projected_variation` |
 | Exact directional average `A` | `D+S-W` | `candidate_exact_directional_average` |
 
-Since e_t^parallel(Delta)=-S, the valid chain is `M2<=M3<=M0=M1<=A`: the norm and absolute-projection diagnostic integrals exceed [W]_+. The opposite M1<=M2 ordering is not asserted. Remaining diagnostic gaps are `V_norm-V_parallel` and `V_parallel-W`; `A-M0=[W]_+-W>=0`. Exactly zero gap extends u=0, E_parallel=0 and mathcal{V}=0 and never claims a unit direction. Equality of M0 and M1 is definitional, not an independent measured agreement. Equation 69 becomes
+Since mathcal{E}_t=-S, the valid chain is `M2<=M3<=M0=M1<=A`: the norm and absolute-projection diagnostic integrals exceed [W]_+. The opposite M1<=M2 ordering is not asserted. Remaining diagnostic gaps are `V_norm-V_parallel` and `V_parallel-W`; `A-M0=[W]_+-W>=0`. Exactly zero gap extends u=0, E_parallel=0 and mathcal{V}=0 and never claims a unit direction. Equality of M0 and M1 is definitional, not an independent measured agreement. Equation 69 becomes
 `H=(alpha_next*g*kappa*D/sigma_next^2)*A`. Thus `A` characterizes the measured
 gain's sign and is not an independent predictive certificate. Numerical
 condition signs retain their integration uncertainty and status. Common-mode residuals `r_c=r_u` give zero gap error even when individual branch errors are large; the shared target error Q is therefore not bounded by the refined S.
@@ -239,7 +239,7 @@ cached Gaussian input tensors. No learned prediction is extrapolated to a new
 SNR.
 
 TR uses two different bounds: `B_obs=A+B` and
-`B_thm^K=[e_c+(g-1)*(e_t^parallel(Delta)+R_K*(1-p_current^K))]/sqrt(d)`.
+`B_thm^K=[e_c+(g-1)*(mathcal{E}_t+R_K*(1-p_current^K))]/sqrt(d)`.
 Actual endpoint certification requires the structural Equation-5 clean update
 and its numerical check. A final DDPM variance floor remains nonzero even if
 its measured residual rounds to zero. A candidate-bound ratio at zero endpoint

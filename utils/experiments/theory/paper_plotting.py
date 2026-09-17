@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt  # noqa: E402
 from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.legend import Legend  # noqa: E402
-from matplotlib.ticker import FuncFormatter, MaxNLocator  # noqa: E402
+from matplotlib.ticker import FixedLocator, FuncFormatter, MaxNLocator, ScalarFormatter  # noqa: E402
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -22,6 +22,8 @@ from tqdm import tqdm
 from utils.common.io import atomic_write_json, file_sha256, json_value
 from utils.experiments.plotting import (
     PLOT_STYLE,
+    AXIS_LABEL_FONT_SIZE,
+    LEGEND_FONT_SIZE,
     SCATTER_ALPHA,
     SCATTER_SIZE,
     SSCD_COLOR_RANGE,
@@ -37,9 +39,11 @@ from .paper_registry import (
     RENDER_RETIREMENTS, RETIRED_RENDER_STEMS, paper_registry,
 )
 from .progress import StageProgress
+from . import paper_style
 from .paper_notation import (
     FEEDBACK_CONDITION_LABEL, FEEDBACK_GAIN_LABEL, INITIAL_BRANCH_LABELS,
     INITIAL_DISTRIBUTION_LABELS, NOTATION_VERSION, TERMINAL_LABELS,
+    projected_error_display_notation,
 )
 
 RENDERING_VERSION = NOTATION_VERSION
@@ -120,7 +124,7 @@ def _legend(ax, handles=None, *, strip=False, loc=None):
     items, names = zip(*unique)
     options = dict(
         frameon=False,
-        fontsize=10,
+        fontsize=LEGEND_FONT_SIZE,
         handlelength=2.0,
         handletextpad=0.5,
         borderaxespad=0.2,
@@ -148,7 +152,7 @@ def _synchronization_legend(ax, outcome_handles, branch_handles):
     """Keep outcome and branch/reference keys in separate columns inside the axes."""
     options = dict(
         frameon=False,
-        fontsize=10,
+        fontsize=LEGEND_FONT_SIZE,
         handlelength=2.0,
         handletextpad=0.5,
         borderaxespad=0.6,
@@ -191,6 +195,13 @@ def _identity(series, frame):
 
 
 def _draw_scatter(fig, ax, entry, frame, metadata, config):
+    styled = paper_style.is_selected(entry)
+    dense = styled and entry["stem"] == "posterior_feedback_condition_margin"
+    if dense:
+        # Local display randomness neither consumes the experiment RNG nor uses
+        # SSCD/sign/status to order points. Every associated row field moves together.
+        order = np.random.default_rng(paper_style.DISPLAY_ORDER_SEED).permutation(len(frame))
+        frame = frame.iloc[order]
     x, y = _number(frame, "x"), _number(frame, "y")
     finite = np.isfinite(x) & np.isfinite(y)
     if not finite.any():
@@ -233,23 +244,30 @@ def _draw_scatter(fig, ax, entry, frame, metadata, config):
     scatter_alpha = SCATTER_ALPHA
     if not entry.get("parent_figure"):
         scatter_alpha = entry.get("pooled_scatter_alpha", SCATTER_ALPHA)
+    if dense:
+        scatter_alpha = paper_style.DENSE_ALPHA
     for marker_class, (marker, label) in styles.items():
         selected = finite & (classes == marker_class)
         if not selected.any():
             continue
-        options = dict(s=SCATTER_SIZE, alpha=scatter_alpha, marker=marker, rasterized=True)
+        options = dict(s=paper_style.DENSE_MARKER_SIZE if dense else SCATTER_SIZE,
+                       alpha=scatter_alpha, marker=marker, rasterized=True)
+        if styled:
+            options["zorder"] = 3
         if marker not in {"x", "+"}:
             options["edgecolors"] = "none"
         show_label = label if len(visible_classes) > 1 or marker_class != "observed" else "_nolegend_"
         if (selected & colored).any():
             mask = selected & colored
-            ax.scatter(x[mask], y[mask], c=colors[mask], cmap="viridis", norm=Normalize(*SSCD_COLOR_RANGE, clip=True), label=show_label, **options)
+            ax.scatter(x[mask], y[mask], c=colors[mask], cmap=paper_style.SSCD_CMAP if styled else "viridis",
+                       norm=paper_style.SSCD_NORM if styled else Normalize(*SSCD_COLOR_RANGE, clip=True),
+                       label=show_label, **options)
             show_label = "_nolegend_"
         if (selected & ~colored).any():
             mask = selected & ~colored
-            ax.scatter(x[mask], y[mask], color=".35" if neutral_identity else ".5" if entry.get("sscd") else GROUP_COLORS[GROUPS[1]], label=show_label, **options)
+            ax.scatter(x[mask], y[mask], color=paper_style.COLORS["missing"] if styled else ".35" if neutral_identity else ".5" if entry.get("sscd") else GROUP_COLORS[GROUPS[1]], label=show_label, **options)
     if entry.get("sscd") and not neutral_identity:
-        add_sscd_colorbar(fig, ax, colors[colored])
+        (paper_style.add_theory_sscd_colorbar if styled else add_sscd_colorbar)(fig, ax, colors[colored])
     if entry.get("equal"):
         limits = _finite_limits(
             x[finite], y[finite], include_zero=entry.get("include_zero", entry["stem"] == "initial_recovery")
@@ -273,8 +291,10 @@ def _draw_scatter(fig, ax, entry, frame, metadata, config):
         ax.set_xlim(lower - padding, upper + padding)
         ax.set_ylim(_finite_limits(y[finite], include_zero=True))
     if entry.get("zero_guides"):
-        ax.axhline(0, color=".65", linewidth=0.7, label="Zero gain" if entry.get("direct_statement") else "_nolegend_")
-        ax.axvline(0, color=".65", linewidth=0.7, label="Zero condition margin" if entry.get("direct_statement") else "_nolegend_")
+        guide = dict(color=paper_style.COLORS["reference"] if styled else ".65",
+                     linewidth=.85 if styled else .7, zorder=2)
+        ax.axhline(0, label="Zero gain" if entry.get("direct_statement") else "_nolegend_", **guide)
+        ax.axvline(0, label="Zero condition margin" if entry.get("direct_statement") else "_nolegend_", **guide)
     if entry.get("signed"):
         threshold = float(metadata.get("symlog_linthresh", 0.001))
         if not math.isfinite(threshold) or threshold <= 0:
@@ -338,6 +358,11 @@ def _draw_scatter(fig, ax, entry, frame, metadata, config):
            if value_only else {}),
         "finite_pairs": int(finite.sum()),
         "scatter_alpha": float(scatter_alpha),
+        **({"display_order": "local fixed permutation of saved rows, independent of SSCD, sign and status",
+            "display_order_seed": paper_style.DISPLAY_ORDER_SEED,
+            "scatter_size": paper_style.DENSE_MARKER_SIZE,
+            "rasterization": f"dense scatter artist only; PDF {paper_style.DENSE_PDF_DPI:g} DPI; text, axes and guides remain vector; the opaque colorbar is rasterized without cell seams",
+            "color_value": "saved sample-level terminal SSCD"} if dense else {}),
         "missing_coordinate_pairs": int((~finite).sum()),
         "marker_counts": {name: int((finite & (classes == name)).sum()) for name in sorted(visible_classes)},
         "symlog_linthresh": float(metadata.get("symlog_linthresh", 0.001)) if entry.get("signed") else None,
@@ -827,7 +852,7 @@ def _curated_feedback_legend(ax, metadata, stats, frame):
                 Line2D([], [], color=".45", linestyle=":", label="Condition upper bound"),
                 Line2D([], [], color=".45", linestyle=":", label=r"$\mathrm{SNR}_T$")]
     ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(.5, 1.01), ncol=2,
-              frameon=False, fontsize=10, handlelength=1.5, columnspacing=.7,
+              frameon=False, fontsize=LEGEND_FONT_SIZE, handlelength=1.5, columnspacing=.7,
               handletextpad=.4, borderaxespad=0, labelspacing=.25)
     stats["legend_placement"] = "tight external top; complete time range remains unobscured"
 
@@ -870,7 +895,7 @@ def _active_presentation(ax, entry, metadata, stats, frame):
         }[metadata["terminal_scope"]]
         ax.legend(handles=handles, loc="lower center", bbox_to_anchor=(.5, 1.01),
                   bbox_transform=ax.transAxes, borderaxespad=0, frameon=False,
-                  fontsize=10, handlelength=1.8, labelspacing=.35)
+                  fontsize=LEGEND_FONT_SIZE, handlelength=1.8, labelspacing=.35)
         stats["legend_placement"] = "outside top"
         stats["terminal_scope_label"] = scope
         stats["terminal_scope_display"] = "caption_only"
@@ -913,7 +938,7 @@ def _active_presentation(ax, entry, metadata, stats, frame):
                 legend.remove()
             if handles:
                 ax.legend(handles=handles, labels=labels, loc="lower center", bbox_to_anchor=(.5, 1.01),
-                          ncol=2, frameon=False, fontsize=10, handlelength=1.5,
+                          ncol=2, frameon=False, fontsize=LEGEND_FONT_SIZE, handlelength=1.5,
                           columnspacing=.7, handletextpad=.4, borderaxespad=0, labelspacing=.25)
             stats["zero_padding_policy"] = "6% of the full finite zero-inclusive displayed span on both sides; empty space is not an observation"
             stats["legend_placement"] = "tight external top" if handles else "none"
@@ -925,12 +950,40 @@ def _active_presentation(ax, entry, metadata, stats, frame):
     # Split legends include an earlier legend retained via add_artist.
     for legend in (artist for artist in ax.get_children() if isinstance(artist, Legend)):
         for label in legend.get_texts():
-            label.set_fontsize(10)
-        legend.get_title().set_fontsize(10)
+            label.set_fontsize(LEGEND_FONT_SIZE)
+        legend.get_title().set_fontsize(LEGEND_FONT_SIZE)
     stats["annotations_saved_in_caption"] = True
 
 
 def _draw(entry, frame, metadata, config):
+    # Both direct artist use and publication keep the theme local to these six
+    # output routes. Unrelated renderers retain their existing rc settings.
+    if paper_style.is_selected(entry):
+        with plt.rc_context(paper_style.THEORY_STYLE):
+            return _draw_impl(entry, frame, metadata, config)
+    return _draw_impl(entry, frame, metadata, config)
+
+
+def _sparse_signed_ticks(ax):
+    """Reduce labels, preserving the complete symmetric-log transform."""
+    transform = ax.yaxis.get_transform()
+    base = float(transform.base)
+    ax.yaxis.get_major_locator().set_params(numticks=7)
+    def label(value, _position):
+        if value == 0:
+            return "$0$"
+        exponent = math.log(abs(value), base)
+        rounded = round(exponent)
+        if not math.isclose(exponent, rounded, rel_tol=0., abs_tol=1e-8):
+            return ""
+        sign = "-" if value < 0 else ""
+        return rf"${sign}{base:g}^{{{rounded}}}$"
+    ax.yaxis.set_major_formatter(FuncFormatter(label))
+    return {"base": base, "linthresh": float(transform.linthresh),
+            "linscale": float(transform.linscale), "labels": "selected base powers and zero"}
+
+
+def _draw_impl(entry, frame, metadata, config):
     if entry.get("parent_figure"):
         # Timestep companions share the parent's axes and marker styling;
         # parent_figure keeps pooled-only opacity separate from each slice.
@@ -996,9 +1049,13 @@ def _draw(entry, frame, metadata, config):
             raise TheoryError(f"{entry['stem']}: missing saved zero-baseline measurement contract. Run {recompute_command(config)}")
     fig = plt.Figure()
     ax = fig.subplots()
+    styled = paper_style.is_selected(entry)
     try:
-        ax.set_axisbelow(True)
-        ax.grid(True, color=".9", linewidth=0.6)
+        if styled:
+            paper_style.apply_layout(fig, ax)
+        else:
+            ax.set_axisbelow(True)
+            ax.grid(True, color=".9", linewidth=0.6)
         kind = entry["kind"]
         if kind in FOUR_STAGE_KINDS:
             stats = draw_four_stage(fig, ax, entry, frame, metadata, config)
@@ -1020,21 +1077,36 @@ def _draw(entry, frame, metadata, config):
                 artist.remove()
             if ax.get_legend() is not None:
                 for label in ax.get_legend().get_texts():
-                    label.set_fontsize(10)
+                    label.set_fontsize(paper_style.LEGEND_SIZE if styled else LEGEND_FONT_SIZE)
             if {"control_y_low", "control_y_high"}.issubset(frame):
                 x, low, high = (_number(frame, key) for key in ("x", "control_y_low", "control_y_high"))
                 valid = np.isfinite(x) & np.isfinite(low) & np.isfinite(high)
                 if np.any(valid & ((low < 0) | (low > high))):
                     raise TheoryError("Invalid saved paired unconditional bootstrap interval")
                 if len(frame) <= 40:
-                    ax.vlines(x[valid], low[valid], high[valid], color=".65", alpha=.35, linewidth=.6)
+                    ax.vlines(x[valid], low[valid], high[valid],
+                              color=paper_style.COLORS["control"] if styled else ".65",
+                              alpha=.35, linewidth=.6, zorder=2 if styled else None)
                 if valid.any():
                     ax.set_ylim(0, max(ax.get_ylim()[1], float(high[valid].max()) * 1.06))
             stats["annotations_saved_in_caption"] = True
         _active_presentation(ax, entry, metadata, stats, frame)
         _apply_saved_limits(ax, metadata, frame, entry)
-        ax.set_xlabel(entry["axes"]["x"])
-        ax.set_ylabel(entry["axes"]["y"])
+        label_size = paper_style.AXIS_LABEL_SIZE if styled else AXIS_LABEL_FONT_SIZE
+        ax.set_xlabel(entry["axes"]["x"], fontsize=label_size)
+        ax.set_ylabel(entry["axes"]["y"], fontsize=label_size)
+        if styled:
+            paper_style.apply_layout(fig, ax)
+            stats["style_version"] = paper_style.STYLE_VERSION
+            stats["layout"] = dict(paper_style.LAYOUT_RECEIPT)
+            if entry["stem"] == "posterior_feedback_condition_margin":
+                stats["signed_axis_display"] = _sparse_signed_ticks(ax)
+            # Legacy presentation renames branch handles; apply the common
+            # typography scale afterward without moving or merging legends.
+            for legend in (item for item in ax.get_children() if isinstance(item, Legend)):
+                for label in legend.get_texts():
+                    label.set_fontsize(paper_style.LEGEND_SIZE)
+                legend.get_title().set_fontsize(paper_style.LEGEND_SIZE)
         stats["axis_limits"] = {"x": list(ax.get_xlim()), "y": list(ax.get_ylim())}
         if entry.get("plot_recipe_version") == NOTATION_VERSION:
             stats["notation_version"] = NOTATION_VERSION
@@ -1048,7 +1120,7 @@ def _draw(entry, frame, metadata, config):
 def _caption(entry):
     metadata = json_value(entry["measurement_metadata"])
     text = [
-        "## " + str(Path(entry.get("requested_outputs", entry["outputs"])["pdf"]).with_suffix("")),
+        "## " + str(Path(_output_route(entry.get("requested_outputs", entry["outputs"]))).with_suffix("")),
         "",
         entry["semantic_question"],
         "",
@@ -1079,6 +1151,8 @@ def _caption(entry):
         ),
         "Groups: " + entry["group_rule"],
     ]
+    if entry.get("style_version"):
+        text.append("Appearance: " + entry["style_version"] + "; restricted magma SSCD palette, fixed [0,1] normalization. Higher-SSCD group: coral; lower-SSCD group: indigo. Final manuscript-size, grayscale and color-vision-deficiency inspection remains pending.")
     if entry.get("presentation_note"):
         text.append("Presentation: " + entry["presentation_note"])
     if entry.get("notation_details"):
@@ -1243,7 +1317,7 @@ def _caption(entry):
         "Full saved input/provenance and actual output hashes: `figure_manifest.json`.",
         "",
     ]
-    return "\n".join(text)
+    return projected_error_display_notation("\n".join(text))
 
 
 def _value_display_metadata(metadata):
@@ -1253,7 +1327,7 @@ def _value_display_metadata(metadata):
         display_policy="finite_saved_values",
         condition_display_policy="Every finite saved x/y pair is displayed as a circular dot; no sign-resolution gate, marker distinction or status legend",
         condition_interpretation="The scatter shows saved numerical values without claiming certified condition signs or implications",
-        endpoint_contract="x is the saved affine-path margin [||Delta||-e_t^parallel(Delta)-mathcal{V}]/sqrt(d), where e_t^parallel(Delta)=u_t dot (Delta_t-bar{Delta}_t) is signed and mathcal{V} is the positive part after the integrated unit-gap reference projection; y is the saved matched-endpoint log-probability gain. Sign classifications do not filter or alter the displayed values. Endpoint-transfer and scientific applicability remain separately recorded",
+        endpoint_contract="x is the saved affine-path margin [||Delta||-mathcal{E}_t-mathcal{V}]/sqrt(d), where mathcal{E}_t=u_t dot (Delta_t-bar{Delta}_t) is signed and mathcal{V} is the positive part after the integrated unit-gap reference projection; y is the saved matched-endpoint log-probability gain. Sign classifications do not filter or alter the displayed values. Endpoint-transfer and scientific applicability remain separately recorded",
     )
     return metadata
 
@@ -1309,16 +1383,97 @@ def _timestep_views(entry, frame, metadata, config):
     return views
 
 
-def render_paper(stage: Path, *, diagnostics=False):
-    """Export a complete staged paper set; caller owns the role lock/directory swap."""
+
+def _output_route(outputs):
+    """Stable display identity for paired or single-format figure exports."""
+    return outputs.get("pdf", next(iter(outputs.values())))
+
+
+def _export_formats(formats):
+    if isinstance(formats, str):
+        raise TheoryError("Figure formats must be a nonempty sequence of png/pdf names")
+    requested = tuple(formats)
+    if (not requested or len(set(requested)) != len(requested)
+            or any(value not in {"png", "pdf"} for value in requested)):
+        raise TheoryError("Figure formats must contain png and/or pdf exactly once")
+    return tuple(value for value in ("png", "pdf") if value in requested)
+
+
+def _finalize_presentations(pending, entries):
+    """Align only display axes and export bounds, leaving compact inputs intact."""
+    if not pending:
+        return {}
+    available = {_output_route(entry["outputs"]): entry for entry in entries if entry["outputs"]}
+    by_stem = {available[_output_route(names)]["stem"]: (fig, available[_output_route(names)])
+               for fig, names in pending}
+    loss_stems = ("initial_loss_recovery", "corollary3_guidance_scale_vs_loss")
+    if all(stem in by_stem for stem in loss_stems):
+        pairs = [by_stem[stem] for stem in loss_stems]
+        ranges = [tuple(fig.axes[0].get_xlim()) for fig, _entry in pairs]
+        limits = (min(value[0] for value in ranges), max(value[1] for value in ranges))
+        # Existing ranges already include each renderer's fixed padding and
+        # displayed uncertainty endpoints. Their union cannot crop either plot.
+        ticks = MaxNLocator(nbins=4).tick_values(*limits)
+        ticks = ticks[(ticks >= limits[0]) & (ticks <= limits[1])]
+        for fig, entry in pairs:
+            ax = fig.axes[0]
+            if ax.get_xscale() != "linear":
+                raise TheoryError("Normalized-loss presentation requires its existing linear x axis")
+            ax.xaxis.set_major_locator(FixedLocator(ticks))
+            ax.xaxis.set_major_formatter(ScalarFormatter())
+            ax.set_xlim(limits)
+            entry["display_audit"]["axis_limits"]["x"] = list(limits)
+            entry["display_audit"]["shared_loss_axis"] = {
+                "source_ranges": [list(value) for value in ranges],
+                "limits": list(limits), "ticks": ticks.tolist(),
+                "policy": "union of complete existing presentation ranges with their fixed padding; no values or square roots recalculated"}
+    options = {}
+    for _fig, names in pending:
+        entry = available[_output_route(names)]
+        entry["display_audit"]["export"] = {
+            "bbox_inches": "tight", "pad_inches": paper_style.FIGURE_PAD_INCHES}
+        entry["display_audit"] = json_value(entry["display_audit"])
+        for extension, relative in names.items():
+            options[relative] = {"bbox_inches": "tight"}
+            if extension == "pdf" and entry["stem"] == "posterior_feedback_condition_margin":
+                options[relative]["dpi"] = paper_style.DENSE_PDF_DPI
+    return options
+
+def render_paper(stage: Path, *, diagnostics=False, formats=("pdf",), figure_directory=None, publication_directory=None):
+    """Render saved scalars; callers stage external PDFs and metadata together.
+
+    Canonical bundles publish outside scientific outputs. Noncanonical low-level
+    fixtures may explicitly exercise the legacy local renderer; active pipeline
+    and CLI callers always supply the canonical external destination.
+    """
+    formats = _export_formats(formats)
     stage = Path(stage).absolute()
+    if figure_directory is None:
+        from utils.experiments.figure_paths import publication_directory as publication_path
+        try:
+            figure_directory = publication_path(stage)
+        except ValueError:
+            figure_directory = None
+    external = figure_directory is not None
+    figure_directory = Path(figure_directory).absolute() if external else stage
+    publication_directory = Path(publication_directory or figure_directory).absolute()
     with StageProgress("Loading and validating saved figure inputs"):
         config, summary, audit, frames = load_paper_inputs(stage, diagnostics=diagnostics)
     counterfactual = bool(config.get("supplemental_config", {}).get("counterfactual_unconditional", config.get("scientific_config", config).get("counterfactual_unconditional", False)))
-    registry = paper_registry(diagnostics=diagnostics, counterfactual=counterfactual)
+    registry = copy.deepcopy(paper_registry(diagnostics=diagnostics, counterfactual=counterfactual))
+    for entry in registry:
+        entry["outputs"] = {extension: entry["outputs"][extension] for extension in formats}
     previous_path = contained_path(stage, "figure_manifest.json")
     previous = json.loads(previous_path.read_text()) if previous_path.is_file() else {}
     owned = {**previous.get("preserved_files", {}), **previous.get("files", {})}
+    previous_publication = previous.get("publication", {})
+    if not isinstance(previous_publication, dict):
+        raise TheoryError("Invalid external figure ownership receipt")
+    if external and previous_publication.get("directory") == str(publication_directory):
+        publication_owned = {**previous_publication.get("preserved_files", {}),
+                             **previous_publication.get("files", {})}
+    else:
+        publication_owned = {}
     caption_path = contained_path(stage, "figure_captions.md")
     if caption_path.exists():
         if "figure_captions.md" not in owned:
@@ -1343,8 +1498,11 @@ def render_paper(stage: Path, *, diagnostics=False):
             dynamic_ncols=True, leave=True, disable=False,
         ) as progress:
             for specification, frame, metadata in jobs:
-                progress.set_postfix_str(str(Path(specification["outputs"]["png"]).with_suffix("")), refresh=True)
+                progress.set_postfix_str(str(Path(_output_route(specification["outputs"])).with_suffix("")), refresh=True)
                 entry = copy.deepcopy(specification)
+                entry["style_version"] = paper_style.STYLE_VERSION
+                if "notation_details" in entry:
+                    entry["notation_details"] = entry["notation_details"].replace("Gold/purple", "Coral/indigo")
                 stem = entry["stem"]
                 source_stem = entry.get("parent_figure", stem)
                 status = metadata["status"]
@@ -1376,12 +1534,14 @@ def render_paper(stage: Path, *, diagnostics=False):
                 )
                 if status in {"available", "complete"}:
                     for relative in entry["outputs"].values():
-                        path = contained_path(stage, relative)
-                        if path.exists() and relative not in owned:
+                        name = Path(relative).name if external else relative
+                        path = contained_path(figure_directory, name)
+                        destination_owned = publication_owned if external else owned
+                        if path.exists() and name not in destination_owned:
                             raise TheoryError(
                                 f"Refusing to replace unowned paper figure {relative}"
                             )
-                        if path.exists() and file_sha256(path) != owned[relative]:
+                        if path.exists() and file_sha256(path) != destination_owned[name]:
                             raise TheoryError(
                                 f"Owned paper figure was modified outside the renderer: {relative}"
                             )
@@ -1393,13 +1553,18 @@ def render_paper(stage: Path, *, diagnostics=False):
                 (timestep_entries if entry.get("parent_figure") else entries).append(entry)
                 progress.update(1)
         all_entries = [*entries, *timestep_entries]
+        with plt.rc_context(paper_style.THEORY_STYLE), StageProgress("Aligning figure layouts and loss axes"):
+            export_options = _finalize_presentations(pending, all_entries)
         # Validate caption metadata before expensive PNG/PDF export. The same
         # native JSON values are retained in the eventual figure manifest.
         with StageProgress("Preparing figure captions"):
-            captions = "# Fixed paper figure captions\n\n" + "\n".join(
+            destination_note = (f"Publication directory: `{publication_directory}`. "
+                                "PDF basenames are relative to this directory; captions, ownership receipts, "
+                                "and scientific tables remain in the source bundle.\n\n") if external else ""
+            captions = "# Fixed paper figure captions\n\n" + destination_note + "\n".join(
                 _caption(entry) for entry in all_entries
             )
-        with plt.rc_context(PLOT_STYLE), tqdm(
+        with plt.rc_context(paper_style.THEORY_STYLE), tqdm(
             total=sum(len(names) for _figure, names in pending),
             desc="[Theory] Exporting figures", unit="file",
             dynamic_ncols=True, leave=True, disable=False,
@@ -1409,29 +1574,48 @@ def render_paper(stage: Path, *, diagnostics=False):
                     progress.set_postfix_str(relative, refresh=True)
                 elif status == "saved":
                     progress.update(1)
-            publish_figures(stage, pending, progress=exported)
+            publish_options = {} if formats == ("png", "pdf") else {"formats": formats}
+            if external:
+                publication_pending = [(figure, {extension: Path(name).name for extension, name in names.items()})
+                                       for figure, names in pending]
+                publication_options = {Path(name).name: options for name, options in export_options.items()}
+            else:
+                publication_pending, publication_options = pending, export_options
+            publish_figures(figure_directory, publication_pending, progress=exported,
+                            export_options=publication_options, **publish_options)
         with StageProgress("Writing figure captions and manifest"):
-            files = {
-                relative: file_sha256(stage / relative)
+            rendered_files = {
+                (Path(relative).name if external else relative):
+                    file_sha256(figure_directory / (Path(relative).name if external else relative))
                 for entry in all_entries
                 for relative in entry["outputs"].values()
             }
             for entry in all_entries:
                 entry["output_hashes"] = {
-                    format: files[relative] for format, relative in entry["outputs"].items()
+                    format: rendered_files[Path(relative).name if external else relative]
+                    for format, relative in entry["outputs"].items()
                 }
+                if external:
+                    entry["publication_outputs"] = {format: Path(relative).name
+                                                    for format, relative in entry["outputs"].items()}
+            files = {} if external else rendered_files
             caption_path.write_text(captions)
             files["figure_captions.md"] = file_sha256(caption_path)
             manifest = {
-                "schema_version": 1,
+                "schema_version": 2 if external else 1,
                 "complete": True,
                 "registry_version": REGISTRY_VERSION,
                 "rendering_version": RENDERING_VERSION,
+                "style_version": paper_style.STYLE_VERSION,
                 "renderer_source_sha256": file_sha256(Path(__file__)),
-                "renderer_sources": {name: file_sha256(Path(__file__).with_name(name)) for name in ("paper_plotting.py", "evidence_plotting.py", "four_stage_plotting.py", "paper_notation.py")},
+                "renderer_sources": {
+                    **{name: file_sha256(Path(__file__).with_name(name)) for name in ("paper_plotting.py", "evidence_plotting.py", "four_stage_plotting.py", "paper_notation.py", "paper_style.py")},
+                    "publication_style.py": file_sha256(Path(__file__).parent.parent / "publication_style.py"),
+                },
                 "scientific_hash": config["scientific_hash"],
                 "metric_schema_version": config["metric_schema_version"],
                 "diagnostics_requested": diagnostics,
+                "export_formats": list(formats),
                 "manuscript_extension_required": any(
                     entry["measurement_metadata"].get("manuscript_extension_required") is True
                     for entry in entries
@@ -1449,6 +1633,14 @@ def render_paper(stage: Path, *, diagnostics=False):
                 "render_retirements": list(RENDER_RETIREMENTS),
                 "plot_recipe_version": PLOT_RECIPE_VERSION,
             }
+            if external:
+                manifest["publication"] = {
+                    "directory": str(publication_directory), "files": rendered_files,
+                    "preserved_files": {name: digest for name, digest in publication_owned.items()
+                                        if name not in rendered_files},
+                    "paths_relative_to": "publication.directory",
+                    "metadata_location": "scientific bundle; publication contains figures only",
+                }
             atomic_write_json(previous_path, manifest)
         return manifest
     finally:

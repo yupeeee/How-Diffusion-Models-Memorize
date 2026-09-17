@@ -6,7 +6,7 @@ This document describes source changes, not generated results. No tests, project
 
 ## Authority and fixed outputs
 
-The mathematical authority remains the mounted `revised.pdf` identified in [submission_alignment.md](submission_alignment.md) and the author's precise seven-statement brief. A matching LaTeX source is not available in this checkout. The refined condition uses e_t^parallel(Delta)=u^T(Delta-bar{Delta}) and uses the requested directional positive-part variation on manuscript t>=2, revising the historical Equation-15 norm integral. The refined terminal bound retains the clean-update prerequisite or the separately qualified correction extension.
+The mathematical authority remains the mounted `revised.pdf` identified in [submission_alignment.md](submission_alignment.md) and the author's precise seven-statement brief. A matching LaTeX source is not available in this checkout. The refined condition uses mathcal{E}_t=u^T(Delta-bar{Delta}) and uses the requested directional positive-part variation on manuscript t>=2, revising the historical Equation-15 norm integral. The refined terminal bound retains the clean-update prerequisite or the separately qualified correction extension.
 
 The seven primary stems are unchanged. The mandatory appendix registry adds only `lemma2_native_gaussian_sweep` and `proposition5_numerical_resolution`: twelve appendix entries total, with terminal components conditional on a supported terminal contract. One stem produces one data axes, one PNG, and one single-page PDF. The established proximity publisher, canonical output paths, safe staged publication, rollback, and ownership-based archival remain in use.
 
@@ -30,7 +30,7 @@ G = -log(sum_j nu_j*exp(a_j)).
 
 Center the log-sum-exp; do not obtain the new net gain only by subtracting two enormous absolute log odds. For bounded small slopes, evaluate `-log1p(sum_j nu_j*expm1(a_j))`, accumulating positive and negative terms separately and flagging cancellation for refinement. Large slopes never enter an unbounded expm1 branch. The old endpoint difference stays as a cross-check. Log-probability gain `H` retains its own magnitude, including saturation/underflow; `G` may resolve a sign but cannot replace that magnitude. Zero displacement and a single-atom law have explicit semantics; singleton log odds are undefined.
 
-Let `D=||Delta||`, `bar{Delta}=x_star-bar_x_current` under the single-target conditional reference, and `E=e_t^parallel(Delta)=u^T(Delta-bar{Delta})`.
+Let `D=||Delta||`, `bar{Delta}=x_star-bar_x_current` under the single-target conditional reference, and `E=mathcal{E}_t=u^T(Delta-bar{Delta})`.
 
 ```
 u = Delta/D for D>0

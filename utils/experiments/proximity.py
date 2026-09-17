@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import io
 import math
+import os
 import time
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,11 +51,13 @@ from .cache import (
     require_generation_run,
     validate_generation_record,
 )
+from .figure_paths import publication_directory
 from .plotting import (
     AnalysisStatistics,
     EXPERIMENT_SPEARMAN_COLUMN,
-    PROXIMITY_FIGURE_FILENAMES,
     PROXIMITY_FIGURES,
+    PROXIMITY_PDF_FIGURES,
+    PROXIMITY_PDF_FILENAMES,
     write_analysis_outputs,
     write_gmm_fit_figure,
     write_saved_analysis_figures,
@@ -118,6 +122,10 @@ class ProximityPaths:
         cls, root: Path, generation_run: Path, selection_directory: Path
     ) -> "ProximityPaths":
         return cls(root, generation_run, selection_directory, "config.json")
+
+    @property
+    def figure_directory(self) -> Path:
+        return publication_directory(self.output_directory)
 
     @property
     def failed_csv(self) -> Path:
@@ -439,7 +447,7 @@ def run_proximity(
     )
     _write_configuration(paths.run_config_json, configuration, overwrite=overwrite)
     if failures:
-        _remove_figure_outputs(paths.output_directory)
+        _remove_figure_outputs(paths.output_directory, figure_directory=paths.figure_directory)
         atomic_write_frame_csv(analysis, paths.output_directory / "proximity.csv")
         atomic_write_frame_csv(
             pd.DataFrame(failures, columns=FAILED_COLUMNS), paths.failed_csv
@@ -456,7 +464,8 @@ def run_proximity(
         )
     else:
         _remove_optional(paths.failed_csv)
-        statistics = write_analysis_outputs(paths.output_directory, analysis=analysis)
+        statistics = write_analysis_outputs(
+            paths.output_directory, analysis=analysis, figure_directory=paths.figure_directory)
         _write_examples(
             paths,
             table_path=paths.output_directory / "proximity.csv",
@@ -487,7 +496,7 @@ def plot_proximity(
     seed_start: int,
     selection_strategy: str = DEFAULT_SELECTION_STRATEGY,
 ) -> ProximitySummary:
-    """Regenerate only figures from immutable selection and analysis logs."""
+    """Publish scalar plots and cached-image examples without inference or tensor reads."""
 
     from utils.data.selection import (
         load_target_pair_selection,
@@ -529,15 +538,21 @@ def plot_proximity(
             num_seeds=num_seeds,
             selection_strategy=strategy,
         )
+        _write_examples(outputs, table_path=directory / "selection.csv",
+                        num_seeds=num_seeds, validate_only=True)
         write_selection_figure(
             directory,
             output_directory=outputs.output_directory,
+            figure_directory=outputs.figure_directory,
         )
         write_gmm_fit_figure(
             outputs.output_directory,
+            figure_directory=outputs.figure_directory,
             frame=selection.frame,
             configuration=selection.configuration,
         )
+        _write_examples(outputs, table_path=directory / "selection.csv",
+                        num_seeds=num_seeds)
         return ProximitySummary(
             paths,
             {
@@ -593,7 +608,12 @@ def plot_proximity(
         num_seeds=num_seeds,
         selection_strategy=strategy,
     )
-    statistics = write_saved_analysis_figures(paths.output_directory)
+    _write_examples(paths, table_path=paths.output_directory / "proximity.csv",
+                    num_seeds=num_seeds, validate_only=True)
+    statistics = write_saved_analysis_figures(
+        paths.output_directory, figure_directory=paths.figure_directory)
+    _write_examples(paths, table_path=paths.output_directory / "proximity.csv",
+                    num_seeds=num_seeds)
     return ProximitySummary(
         paths,
         {
@@ -853,9 +873,11 @@ def _frozen_reference_result(
     write_selection_figure(
         directory,
         output_directory=outputs.output_directory,
+        figure_directory=outputs.figure_directory,
     )
     write_gmm_fit_figure(
         outputs.output_directory,
+        figure_directory=outputs.figure_directory,
         frame=selection.frame,
         configuration=selection.configuration,
     )
@@ -1293,6 +1315,7 @@ def _without_derived_outputs(value: object) -> object:
 
 
 def _figure_filename_catalog() -> dict[str, dict[str, str]]:
+    """Keep historical config receipts stable; active PDF paths live in summaries."""
     return {
         scope: {file_format: filename for file_format, filename in formats.items()}
         for scope, formats in PROXIMITY_FIGURES.items()
@@ -1343,12 +1366,12 @@ def _summary(
         values["figures"] = {
             scope: {
                 file_format: _display_path(
-                    paths.output_directory / filename,
+                    paths.figure_directory / filename,
                     paths.project_root,
                 )
                 for file_format, filename in formats.items()
             }
-            for scope, formats in PROXIMITY_FIGURES.items()
+            for scope, formats in PROXIMITY_PDF_FIGURES.items()
         }
     return values
 
@@ -1458,23 +1481,28 @@ def _example_prompts(
     return chosen
 
 
-def _example_output_files(output_directory: Path) -> list[Path]:
-    """Find only files owned by this example export, never unrelated files."""
-    directory = output_directory / "examples"
-    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
-        raise ProximityError(f"unsafe example directory: {directory}")
-    owned = [directory / "manifest.json"]
+def _example_output_files(
+    output_directory: Path, *, figure_directory: Path | None = None
+) -> list[Path]:
+    """List current PDF exports and their cache receipt; never legacy PNGs."""
+    metadata_directory = output_directory / "examples"
+    image_directory = (figure_directory if figure_directory is not None else output_directory) / "examples"
+    owned = [metadata_directory / "manifest.json"]
     for group in ("retained", "discarded"):
-        folder = directory / group
-        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
-            raise ProximityError(f"unsafe example directory: {folder}")
         for rank in ("highest", "median", "lowest"):
-            owned.append(folder / f"{rank}_l2_generated.png")
-            owned.append(folder / f"{rank}_l2_training.png")
+            owned.extend(image_directory / group / f"{rank}_l2_{kind}.pdf"
+                         for kind in ("generated", "training"))
     for path in owned:
-        if path.is_symlink() or (path.exists() and not path.is_file()):
-            raise ProximityError(f"unsafe example output: {path}")
+        _validate_example_destination(path)
     return owned
+
+
+def _validate_example_destination(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ProximityError(f"unsafe example output: {path}")
+    for parent in path.absolute().parents:
+        if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+            raise ProximityError(f"unsafe example directory: {parent}")
 
 
 _EXAMPLE_GENERATED_SCALE = 0.75
@@ -1500,8 +1528,93 @@ def _example_png(
         raise ProximityError(f"cannot encode proximity example PNG: {error}") from error
 
 
-def _write_examples(paths: ProximityPaths, *, table_path: Path, num_seeds: int) -> None:
-    """Export compact cached montages and their paired targets, without inference."""
+def _example_decoded_size(content: bytes) -> tuple[int, int]:
+    """Validate cached image decodability without encoding a new image."""
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            image.load()
+            return image.size
+    except (OSError, ValueError) as error:
+        raise ProximityError(
+            "cannot decode cached proximity example image; restore the cached "
+            "montage or normalized PNG (no regeneration is performed): " + str(error)
+        ) from error
+
+
+def _example_pdf(content: bytes) -> bytes:
+    """Put the entire display-sized cached image on one aspect-preserving PDF page."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    with Image.open(io.BytesIO(content)) as source:
+        source.load()
+        width, height = source.size
+        figure = Figure(figsize=(width / 150., height / 150.), dpi=150, facecolor="white")
+        FigureCanvasAgg(figure)
+        try:
+            axes = figure.add_axes((0., 0., 1., 1.))
+            axes.imshow(source, interpolation="none", aspect="equal")
+            axes.set_axis_off()
+            buffer = io.BytesIO()
+            figure.savefig(buffer, format="pdf", dpi=150, bbox_inches="tight", pad_inches=.05,
+                           facecolor="white", metadata={"CreationDate": None, "ModDate": None})
+            return buffer.getvalue()
+        finally:
+            figure.clear()
+
+
+def _publish_example_payloads(payloads: Sequence[tuple[Path, bytes]], *, stale: Sequence[Path] = ()) -> None:
+    """Stage PDFs and the cache manifest before replacing any member of the set."""
+    current = [destination for destination, _content in payloads]
+    if len(set(current)) != len(current):
+        raise ProximityError("duplicate proximity example destinations")
+    stale = tuple(path for path in stale if path not in current and path.exists())
+    for path in (*current, *stale):
+        _validate_example_destination(path)
+    staged: list[tuple[Path, Path]] = []
+    backups: list[tuple[Path | None, Path]] = []
+    committed = False
+    try:
+        for destination, content in payloads:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(f".{destination.name}.stage-{uuid.uuid4().hex}")
+            staged.append((temporary, destination))
+            atomic_write_bytes(temporary, content)
+        # Stale PDFs are part of the same rollback set; the manifest is the
+        # final staged payload and is installed only after all image changes.
+        actions = [(None, path) for path in stale] + staged
+        for temporary, destination in actions:
+            _validate_example_destination(destination)
+            backup = None
+            if destination.exists():
+                backup = destination.with_name(f".{destination.name}.backup-{uuid.uuid4().hex}")
+                os.replace(destination, backup)
+            backups.append((backup, destination))
+            if temporary is not None:
+                os.replace(temporary, destination)
+        committed = True
+    except BaseException:
+        for backup, destination in reversed(backups):
+            if destination.exists() or destination.is_symlink():
+                if not destination.is_file() or destination.is_symlink():
+                    raise ProximityError(f"unsafe example destination during rollback: {destination}")
+                destination.unlink()
+            if backup is not None:
+                os.replace(backup, destination)
+        raise
+    finally:
+        for temporary, _destination in staged:
+            temporary.unlink(missing_ok=True)
+        if committed:
+            for backup, _destination in backups:
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
+
+
+def _write_examples(
+    paths: ProximityPaths, *, table_path: Path, num_seeds: int, validate_only: bool = False
+) -> None:
+    """Validate cached pairs, then publish PDF montages/targets without inference."""
     try:
         analysis = pd.read_csv(
             table_path,
@@ -1514,10 +1627,11 @@ def _write_examples(paths: ProximityPaths, *, table_path: Path, num_seeds: int) 
             f"cannot read example table {table_path}: {error}"
         ) from error
     examples = _example_prompts(analysis, num_seeds=num_seeds)
-    output = paths.output_directory / "examples"
-    previous = _example_output_files(paths.output_directory)
+    output = paths.figure_directory / "examples"
+    manifest_path = paths.output_directory / "examples" / "manifest.json"
+    previous = _example_output_files(paths.output_directory, figure_directory=paths.figure_directory)
     cache = GenerationPaths(paths.generation_run)
-    payloads: list[tuple[Path, bytes]] = []
+    previews: list[tuple[Path, bytes, dict[str, object], str]] = []
     entries: list[dict[str, object]] = []
     if examples:
         generation = require_generation_run(cache)
@@ -1585,8 +1699,8 @@ def _write_examples(paths: ProximityPaths, *, table_path: Path, num_seeds: int) 
             target, first["target_image_sha256"], "paired training image"
         )
         prefix = Path(str(example["group"])) / f"{example['rank']}_l2"
-        generated_relative = Path(f"{prefix}_generated.png")
-        training_relative = Path(f"{prefix}_training.png")
+        generated_relative = Path(f"{prefix}_generated.pdf")
+        training_relative = Path(f"{prefix}_training.pdf")
         # Read only images; the cached montage already contains every generation seed.
         generated_bytes, training_bytes = generated.read_bytes(), target.read_bytes()
         if (
@@ -1596,6 +1710,10 @@ def _write_examples(paths: ProximityPaths, *, table_path: Path, num_seeds: int) 
             != first["target_image_sha256"]
         ):
             raise ProximityError(f"example image changed during export: {index}")
+        _example_decoded_size(generated_bytes)
+        _example_decoded_size(training_bytes)
+        if validate_only:
+            continue
         generated_png, generated_source_size, generated_size = _example_png(
             generated_bytes, scale=_EXAMPLE_GENERATED_SCALE
         )
@@ -1607,12 +1725,6 @@ def _write_examples(paths: ProximityPaths, *, table_path: Path, num_seeds: int) 
         ):
             # Keep already-small targets from growing through PNG re-encoding.
             training_png = training_bytes
-        payloads.extend(
-            [
-                (output / generated_relative, generated_png),
-                (output / training_relative, training_png),
-            ]
-        )
         entries.append(
             {
                 **example,
@@ -1623,39 +1735,44 @@ def _write_examples(paths: ProximityPaths, *, table_path: Path, num_seeds: int) 
                 "target_image_sha256": first["target_image_sha256"],
                 "generated_source_sha256": metadata["preview_image_sha256"],
                 "training_source_sha256": first["target_image_sha256"],
-                "generated_image_sha256": hashlib.sha256(generated_png).hexdigest(),
-                "training_image_sha256": hashlib.sha256(training_png).hexdigest(),
                 "generated_source_size": list(generated_source_size),
                 "training_source_size": list(training_source_size),
                 "generated_image_size": list(generated_size),
                 "training_image_size": list(training_size),
             }
         )
-    # Validate every image pair before publication; a failed write must not leave
-    # an old manifest describing a partially replaced set of example images.
-    _remove_optional(output / "manifest.json")
-    for destination, content in payloads:
-        atomic_write_bytes(destination, content)
-    current = {destination for destination, _ in payloads}
-    for stale in previous:
-        if stale != output / "manifest.json" and stale not in current:
-            _remove_optional(stale)
-    atomic_write_json(
-        output / "manifest.json",
-        {
-            "ranking": "mean_terminal_l2_across_seeds",
-            "median_rule": "lower_middle_prompt",
-            "image_export": {
-                "generated_scale": _EXAMPLE_GENERATED_SCALE,
-                "training_max_edge": _EXAMPLE_TRAINING_MAX_EDGE,
-                "resampling": "lanczos",
-                "png_optimize": True,
-            },
-            "num_seeds": num_seeds,
-            "source_csv": _display_path(table_path, paths.project_root),
-            "examples": entries,
+        previews.extend([
+            (output / generated_relative, generated_png, entries[-1], "generated_image_sha256"),
+            (output / training_relative, training_png, entries[-1], "training_image_sha256"),
+        ])
+    if validate_only:
+        return
+    # Every source is validated before PDF rendering or publication starts.
+    # A failed late image/PDF leaves the previous exports and receipt intact.
+    payloads: list[tuple[Path, bytes]] = []
+    for destination, preview, entry, hash_field in previews:
+        content = _example_pdf(preview)
+        entry[hash_field] = hashlib.sha256(content).hexdigest()
+        payloads.append((destination, content))
+    manifest = {
+        "ranking": "mean_terminal_l2_across_seeds",
+        "median_rule": "lower_middle_prompt",
+        "format": "pdf",
+        "figure_directory": _display_path(output, paths.project_root),
+        "image_export": {
+            "format": "pdf", "pdf_dpi": 150, "pad_inches": .05,
+            "generated_scale": _EXAMPLE_GENERATED_SCALE,
+            "training_max_edge": _EXAMPLE_TRAINING_MAX_EDGE,
+            "resampling": "lanczos", "png_optimize": True,
         },
-    )
+        "num_seeds": num_seeds,
+        "source_csv": _display_path(table_path, paths.project_root),
+        "examples": entries,
+    }
+    payloads.append((manifest_path, (canonical_json(manifest) + "\n").encode("utf-8")))
+    current = {destination for destination, _content in payloads}
+    _publish_example_payloads(payloads, stale=[path for path in previous if path not in current])
+    print(f"[Proximity] Saved example PDFs: {output}", flush=True)
 
 
 def _canonical_score_path(root: Path, run: Path, value: object, expected: Path) -> Path:
@@ -1706,12 +1823,13 @@ def _remove_optional(path: Path) -> None:
         raise ProximityError(f"derived output is not a regular file: {path}")
 
 
-def _remove_figure_outputs(output_directory: Path) -> None:
-    """Remove only the known derived proximity figures after a failed run."""
+def _remove_figure_outputs(output_directory: Path, *, figure_directory: Path | None = None) -> None:
+    """Remove current derived PDFs after a failed run; retain historical images."""
 
-    for filename in PROXIMITY_FIGURE_FILENAMES:
-        _remove_optional(output_directory / filename)
-    for path in _example_output_files(output_directory):
+    figures = figure_directory if figure_directory is not None else output_directory
+    for filename in PROXIMITY_PDF_FILENAMES:
+        _remove_optional(figures / filename)
+    for path in _example_output_files(output_directory, figure_directory=figures):
         _remove_optional(path)
 
 

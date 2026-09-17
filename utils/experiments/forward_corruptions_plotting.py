@@ -23,7 +23,7 @@ from utils.experiments.plotting import (
     FIGURE_SIZE,
     LEGEND_FONT_SIZE,
     PLOT_STYLE,
-    TEXT_FONT_SIZE,
+    AXIS_LABEL_FONT_SIZE,
     _publish_figures,
 )
 
@@ -249,7 +249,7 @@ def _render_decoded_figure(payload: _DecodedStates, panel: str) -> Figure:
                         label = _DECODED_ROW_LABELS[row].replace(
                             "Absolute difference", "Absolute\ndifference"
                         )
-                        axis.set_ylabel(label, fontsize=TEXT_FONT_SIZE)
+                        axis.set_ylabel(label, fontsize=AXIS_LABEL_FONT_SIZE)
                     if row == 2:
                         axis.set_xlabel(
                             f"$t={payload.num_inference_steps - step}$",
@@ -599,10 +599,10 @@ def _render_figure(summary: pd.DataFrame, panel: str, *, upper_limit: float) -> 
             )
             axis.set_xlim(float(timesteps.max()), 0.0)
             axis.set_ylim(0.0, upper_limit)
-            axis.set_xlabel(r"$t$", fontsize=TEXT_FONT_SIZE)
+            axis.set_xlabel(r"$t$", fontsize=AXIS_LABEL_FONT_SIZE)
             axis.set_ylabel(
                 r"$\|\mathbf{x}_t-\mathbf{x}^{\star}\|$",
-                fontsize=TEXT_FONT_SIZE,
+                fontsize=AXIS_LABEL_FONT_SIZE,
             )
             axis.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
             axis.grid(True, which="both", alpha=0.18, linewidth=0.6)

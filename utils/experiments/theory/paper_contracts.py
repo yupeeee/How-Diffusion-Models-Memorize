@@ -440,13 +440,71 @@ def _copy_to_stage(source, destination):
     return shutil.copy2(source, destination)
 
 
+def _external_lock_paths(directory):
+    directory = reject_symlinks(directory)
+    if len(directory.parents) > 2 and directory.parents[2].name == "figures":
+        lock_root = directory.parents[2].parent / "outputs" / ".figure_locks"
+    else:
+        lock_root = Path(tempfile.gettempdir()) / "theory-figure-locks"
+    lock_root = reject_symlinks(lock_root)
+    token = canonical_hash(str(directory))
+    return (reject_symlinks(lock_root / (token + ".lock")),
+            reject_symlinks(lock_root / (token + ".pending.json")))
+
+
+def _external_pending_owner(directory, bundle):
+    _lock, pending = _external_lock_paths(directory)
+    if pending.exists():
+        receipt = read_object(pending)
+        if (receipt.get("schema_version") != 1 or receipt.get("directory") != str(directory)
+                or not isinstance(receipt.get("bundle"), str)):
+            raise TheoryError("Unrecognized pending external publication; receipt preserved")
+        if receipt["bundle"] != str(bundle):
+            raise TheoryError("External publication has an unfinished transaction owned by "
+                              + receipt["bundle"] + "; retry that owning bundle before publishing another source")
+    return pending
+
+
 @contextlib.contextmanager
-def publication_lock(output):
+def _external_figure_lock(directory, bundle):
+    """Serialize the destination and retain its interrupted transaction owner."""
+    directory, bundle = reject_symlinks(directory), reject_symlinks(bundle)
+    lock_path, _pending = _external_lock_paths(directory)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise TheoryError(f"Another theory invocation is publishing {directory}") from error
+        try:
+            pending = _external_pending_owner(directory, bundle)
+            try:
+                yield
+            finally:
+                marker = bundle.parent / ("." + bundle.name + ".transaction.json")
+                # An owner retry with no marker is safe: installation never
+                # begins before its marker exists. Other owners stay blocked.
+                if pending.exists() and not marker.exists():
+                    _external_pending_owner(directory, bundle).unlink()
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def publication_lock(output, *, figure_directory=None):
     """Serialize an active role, including directory-swap recovery after a crash."""
     output = reject_symlinks(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     lock_path = reject_symlinks(output.parent / ("." + output.name + ".lock"))
-    with lock_path.open("a+") as handle:
+    with contextlib.ExitStack() as stack:
+        if figure_directory is not None:
+            figure_directory = reject_symlinks(figure_directory)
+            if (figure_directory.is_relative_to(output) or output.is_relative_to(figure_directory)):
+                raise TheoryError("Scientific and publication directories must be separate")
+            # A portable bundle can target the same canonical figures as the
+            # repository bundle; serialize that destination as well.
+            stack.enter_context(_external_figure_lock(figure_directory, output))
+        handle = stack.enter_context(lock_path.open("a+"))
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -457,27 +515,40 @@ def publication_lock(output):
             marker = output.parent / ("." + output.name + ".transaction.json")
             if marker.exists():
                 state = read_object(marker)
-                if not str(state["backup"]).startswith(
+                if state.get("schema_version") == 2:
+                    _recover_external_publication(output, state, figure_directory)
+                    marker.unlink()
+                    state = None
+                if state is not None and (not str(state["backup"]).startswith(
                     "." + output.name + ".backup-"
-                ) or not str(state["stage"]).startswith("." + output.name + ".stage-"):
+                ) or not str(state["stage"]).startswith("." + output.name + ".stage-")):
                     raise TheoryError("Unsafe theory transaction marker")
-                backup = contained_path(output.parent, state["backup"])
-                stage = contained_path(output.parent, state["stage"])
-                if not output.exists() and backup.exists():
-                    os.replace(backup, output)
-                if backup.exists() and output.exists():
-                    _finish_backup(output, backup, state.get("archive_previous", False))
-                if stage.exists():
-                    shutil.rmtree(stage)
-                marker.unlink()
+                if state is not None:
+                    backup = contained_path(output.parent, state["backup"])
+                    stage = contained_path(output.parent, state["stage"])
+                    if not output.exists() and backup.exists():
+                        os.replace(backup, output)
+                    if backup.exists() and output.exists():
+                        _finish_backup(output, backup, state.get("archive_previous", False))
+                    if stage.exists():
+                        shutil.rmtree(stage)
+                    marker.unlink()
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @contextlib.contextmanager
-def staged_publication(output, *, archive_previous=False):
-    """Stage a compact role; shared figure publisher handles all image exports."""
+def staged_publication(output, *, archive_previous=False, figure_directory=None):
+    """Stage a compact role, optionally with its external publication directory.
+
+    External mode yields (bundle_stage, figure_stage) and commits both together;
+    the default single-directory contract remains available for legacy callers.
+    """
+    if figure_directory is not None:
+        with _staged_external_publication(output, figure_directory, archive_previous=archive_previous) as stages:
+            yield stages
+        return
     output = reject_symlinks(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(
@@ -535,6 +606,107 @@ def staged_publication(output, *, archive_previous=False):
             marker.unlink(missing_ok=True)
 
 
+def _external_resources(output, state, figure_directory):
+    """Validate the recovery allowlist against the caller's canonical destination."""
+    if figure_directory is None:
+        raise TheoryError("External figure recovery requires the canonical publication directory")
+    figure_directory = reject_symlinks(figure_directory)
+    publication = state.get("publication", {})
+    if (not isinstance(publication, dict)
+            or publication.get("directory") != str(figure_directory)
+            or state.get("phase") not in {"staging", "installing", "committed"}):
+        raise TheoryError("Unsafe external figure transaction marker")
+    resources = []
+    for destination, receipt, archive in (
+            (output, state, bool(state.get("archive_previous", False))),
+            (figure_directory, publication, False)):
+        stage_name, backup_name = receipt.get("stage"), receipt.get("backup")
+        if (not isinstance(stage_name, str) or not isinstance(backup_name, str)
+                or Path(stage_name).name != stage_name or Path(backup_name).name != backup_name
+                or not stage_name.startswith("." + destination.name + ".stage-")
+                or not backup_name.startswith("." + destination.name + ".backup-")
+                or not isinstance(receipt.get("had_output"), bool)):
+            raise TheoryError("Unsafe external figure transaction paths")
+        resources.append((destination, contained_path(destination.parent, stage_name),
+                          contained_path(destination.parent, backup_name),
+                          receipt["had_output"], archive))
+    return resources
+
+
+def _recover_external_publication(output, state, figure_directory):
+    resources = _external_resources(output, state, figure_directory)
+    if state["phase"] == "committed":
+        for destination, stage, backup, _existed, archive in resources:
+            if not destination.is_dir():
+                raise TheoryError("Committed external publication is missing a destination")
+            if backup.exists():
+                _finish_backup(destination, backup, archive)
+            if stage.exists():
+                shutil.rmtree(stage)
+        return
+    # Roll back both trees if installation was interrupted. A live new directory
+    # is identifiable by a consumed stage or a retained previous backup.
+    for destination, stage, backup, existed, _archive in reversed(resources):
+        if backup.exists():
+            if destination.exists():
+                shutil.rmtree(destination)
+            os.replace(backup, destination)
+        elif not existed and not stage.exists() and destination.exists():
+            shutil.rmtree(destination)
+        if stage.exists():
+            shutil.rmtree(stage)
+
+
+@contextlib.contextmanager
+def _staged_external_publication(output, figure_directory, *, archive_previous=False):
+    output, figure_directory = reject_symlinks(output), reject_symlinks(figure_directory)
+    if figure_directory.is_relative_to(output) or output.is_relative_to(figure_directory):
+        raise TheoryError("Scientific and publication directories must be separate")
+    marker = output.parent / ("." + output.name + ".transaction.json")
+    pending = _external_pending_owner(figure_directory, output)
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(pending, {"schema_version": 1, "directory": str(figure_directory),
+                                "bundle": str(output), "transaction_marker": str(marker)})
+    receipts = []
+    for destination in (output, figure_directory):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix="." + destination.name + ".stage-", dir=destination.parent))
+        receipts.append({"stage": stage.name,
+                         "backup": "." + destination.name + ".backup-" + uuid.uuid4().hex,
+                         "had_output": destination.exists()})
+    state = {"schema_version": 2, "phase": "staging", **receipts[0],
+             "archive_previous": archive_previous,
+             "publication": {"directory": str(figure_directory), **receipts[1]}}
+    resources = _external_resources(output, state, figure_directory)
+    try:
+        atomic_write_json(marker, state)
+        for destination, stage, _backup, _existed, _archive in resources:
+            if destination.exists():
+                shutil.copytree(destination, stage, dirs_exist_ok=True,
+                                copy_function=_copy_to_stage, symlinks=True)
+        yield resources[0][1], resources[1][1]
+        state["phase"] = "installing"
+        atomic_write_json(marker, state)
+        # PDFs install first. Failure while installing scalar metadata restores
+        # the prior PDF tree as well, so the old manifest never describes new PDFs.
+        for destination, stage, backup, _existed, _archive in reversed(resources):
+            if destination.exists():
+                os.replace(destination, backup)
+            os.replace(stage, destination)
+        committed = {**state, "phase": "committed"}
+        atomic_write_json(marker, committed)
+        state = committed
+    except BaseException:
+        _recover_external_publication(output, state, figure_directory)
+        marker.unlink(missing_ok=True)
+        pending.unlink(missing_ok=True)
+        raise
+    else:
+        _recover_external_publication(output, state, figure_directory)
+        marker.unlink(missing_ok=True)
+        pending.unlink(missing_ok=True)
+
+
 def _finish_backup(output, backup, archive_previous):
     if not archive_previous:
         shutil.rmtree(backup)
@@ -587,6 +759,8 @@ def retire_obsolete_figures(stage, previous):
         raise TheoryError("Cannot retire figures before replacement publication completes")
     owned = {**previous.get("preserved_files", {}), **previous.get("files", {})}
     active = current.get("files", {})
+    from .paper_plotting import _export_formats
+    formats = _export_formats(current.get("export_formats", ("png", "pdf")))
     ledger_path = contained_path(stage, "figure_retirement.json")
     prior = read_object(ledger_path) if ledger_path.is_file() else {}
     if ledger_path.exists() and (
@@ -598,7 +772,12 @@ def retire_obsolete_figures(stage, previous):
     ):
         raise TheoryError("Refusing to replace unrecognized figure_retirement.json; existing file preserved")
     prior_records = {row["old_path"]: row for row in prior.get("records", [])}
-    records, completed = {}, set()
+    # A partial export neither acts on nor forgets prior receipts for the
+    # other image format. Its files and ownership remain available for later
+    # paired publication.
+    records = {name: row for name, row in prior_records.items()
+               if Path(name).suffix.lstrip(".") not in formats}
+    completed = set()
 
     def regular_image(relative):
         path = contained_path(stage, relative)
@@ -637,9 +816,11 @@ def retire_obsolete_figures(stage, previous):
         return None
 
     def replacement_ready(specification):
-        if specification["replacement"] and set(specification["replacement"]) != {"png", "pdf"}:
+        if specification["replacement"] and not set(formats).issubset(specification["replacement"]):
             return False
-        for name in specification["replacement"].values():
+        for extension, name in specification["replacement"].items():
+            if extension not in formats:
+                continue
             try:
                 _path, digest = regular_image(name)
             except (OSError, TheoryError):
@@ -657,7 +838,8 @@ def retire_obsolete_figures(stage, previous):
             historical_paths.update(name for name in entry["outputs"].values() if isinstance(name, str))
     candidates = historical_paths | set(owned) | set(prior_records)
     allowed = {name: spec for name in sorted(candidates)
-               if name not in active and (spec := specification_for(name)) is not None}
+               if name not in active and Path(name).suffix.lstrip(".") in formats
+               and (spec := specification_for(name)) is not None}
     removed_parents = set()
     for name, specification in allowed.items():
         destination = specification["replacement"].get(Path(name).suffix.lstrip("."))
@@ -742,12 +924,23 @@ def _validate_presentation_registry(bundle):
         raise TheoryError("Refusing to replace unrecognized registry.json; existing file preserved")
 
 
-def render_saved_paper(bundle, *, expected_config=None, diagnostics=False):
-    from .paper_plotting import render_paper
+def render_saved_paper(bundle, *, expected_config=None, diagnostics=False, formats=("pdf",), figure_directory=None):
+    from .paper_plotting import _export_formats, render_paper
     from .progress import StageProgress
 
+    formats = _export_formats(formats)
     bundle = reject_symlinks(bundle)
-    with publication_lock(bundle):
+    if figure_directory is None:
+        from utils.experiments.figure_paths import publication_directory
+        try:
+            figure_directory = publication_directory(bundle)
+        except ValueError:
+            # Explicit noncanonical test/legacy callers can still use local
+            # publication. Portable CLI bundles always pass a canonical target.
+            figure_directory = None
+    if figure_directory is not None:
+        figure_directory = reject_symlinks(figure_directory)
+    with publication_lock(bundle, figure_directory=figure_directory):
         load_paper_inputs(
             bundle, expected_config=expected_config, diagnostics=diagnostics
         )
@@ -757,10 +950,18 @@ def render_saved_paper(bundle, *, expected_config=None, diagnostics=False):
             if (bundle / "figure_manifest.json").exists()
             else {}
         )
-        with StageProgress("Publishing saved paper bundle"), staged_publication(bundle) as stage:
-            render_paper(stage, diagnostics=diagnostics)
-            with StageProgress("Applying verified figure placement and retirement"):
-                retire_obsolete_figures(stage, previous)
+        with StageProgress("Publishing saved paper bundle"), staged_publication(bundle, figure_directory=figure_directory) as stages:
+            if figure_directory is None:
+                stage = stages
+                render_paper(stage, diagnostics=diagnostics, formats=formats)
+                with StageProgress("Applying verified figure placement and retirement"):
+                    retire_obsolete_figures(stage, previous)
+            else:
+                stage, figure_stage = stages
+                render_paper(stage, diagnostics=diagnostics, formats=formats,
+                             figure_directory=figure_stage, publication_directory=figure_directory)
+                # Old cached images are preserved. External publication is a new
+                # output route, not authorization for a historical-image cleanup.
             # registry.json is presentation metadata; immutable scientific
             # run_config/summary and plot_data remain byte-for-byte unchanged.
             from .paper_registry import REGISTRY_VERSION, measurement_registry, paper_registry

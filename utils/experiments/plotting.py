@@ -19,12 +19,15 @@ from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Ellipse  # noqa: E402
+from matplotlib.transforms import BboxBase  # noqa: E402
+from matplotlib.ticker import FixedLocator  # noqa: E402
 from mpl_toolkits.axes_grid1 import make_axes_locatable  # noqa: E402
 import numpy as np
 import pandas as pd
 
 from utils.common.io import atomic_write_frame_csv
 from utils.data.proximity_gmm import COMPONENT_NAMES
+from . import proximity_style
 
 __all__ = [
     "AnalysisStatistics",
@@ -32,6 +35,9 @@ __all__ = [
     "PlottingError",
     "PROXIMITY_FIGURE_FILENAMES",
     "PROXIMITY_FIGURES",
+    "PROXIMITY_PDF_FIGURES",
+    "PROXIMITY_PDF_FILENAMES",
+    "SELECTION_PDF_FILENAMES",
     "SELECTION_FIGURE_FILENAMES",
     "SELECTION_GMM_FIGURES",
     "add_prompt_curves",
@@ -56,9 +62,10 @@ _KIND_COLORS = {
 FIGURE_SIZE = (4.0, 4.0)
 FIGURE_DPI = 150
 TEXT_FONT_SIZE = 15
-AXIS_NUMBER_FONT_SIZE = 12
-LEGEND_FONT_SIZE = 10
-SUMMARY_FONT_SIZE = 10
+AXIS_LABEL_FONT_SIZE = 18
+AXIS_NUMBER_FONT_SIZE = 15
+LEGEND_FONT_SIZE = 12
+SUMMARY_FONT_SIZE = 12
 CATEGORY_LINESTYLES = (
     "solid",
     "dashed",
@@ -99,6 +106,13 @@ SELECTION_GMM_FIGURES = {
 SELECTION_FIGURE_FILENAMES = PROXIMITY_FIGURE_FILENAMES + tuple(
     SELECTION_GMM_FIGURES[file_format] for file_format in _FIGURE_FORMATS
 )
+# Retain the paired catalog above as historical configuration metadata and for
+# generic publisher clients. Active proximity entrypoints publish PDFs only.
+PROXIMITY_PDF_FIGURES = {
+    view: {"pdf": formats["pdf"]} for view, formats in PROXIMITY_FIGURES.items()
+}
+PROXIMITY_PDF_FILENAMES = tuple(formats["pdf"] for formats in PROXIMITY_PDF_FIGURES.values())
+SELECTION_PDF_FILENAMES = (*PROXIMITY_PDF_FILENAMES, SELECTION_GMM_FIGURES["pdf"])
 _GMM_COMPONENT_COLORS = {
     "low_sscd_mode": "#7B3294",
     "high_sscd_mode": "#008837",
@@ -111,7 +125,7 @@ PLOT_STYLE = {
     "font.family": "STIXGeneral",
     "font.size": TEXT_FONT_SIZE,
     "mathtext.fontset": "stix",
-    "axes.labelsize": TEXT_FONT_SIZE,
+    "axes.labelsize": AXIS_LABEL_FONT_SIZE,
     "axes.titlesize": TEXT_FONT_SIZE,
     "figure.titlesize": TEXT_FONT_SIZE,
     "xtick.labelsize": AXIS_NUMBER_FONT_SIZE,
@@ -156,8 +170,9 @@ def write_analysis_outputs(
     output_directory: str | Path,
     *,
     analysis: pd.DataFrame,
+    figure_directory: str | Path | None = None,
 ) -> AnalysisStatistics:
-    """Publish one seed-level CSV and comparable all/selected PNG/PDF scatter plots.
+    """Publish one seed-level CSV and comparable all/selected PDF scatter plots.
 
     Each seed row receives its prompt's experiment-seed Spearman value before
     publication. The saved CSV is then reloaded and validated; both figure
@@ -170,11 +185,13 @@ def write_analysis_outputs(
     csv_path = output / "proximity.csv"
     atomic_write_frame_csv(annotated, csv_path)
 
-    return write_saved_analysis_figures(output)
+    return write_saved_analysis_figures(output, figure_directory=figure_directory)
 
 
 def write_saved_analysis_figures(
     output_directory: str | Path,
+    *,
+    figure_directory: str | Path | None = None,
 ) -> AnalysisStatistics:
     """Rebuild experiment proximity figures without rewriting their saved CSV."""
 
@@ -204,7 +221,7 @@ def write_saved_analysis_figures(
     selected = saved_analysis.loc[saved_analysis["include_prompt"].astype(bool)].copy()
     with matplotlib.rc_context(PLOT_STYLE):
         return _write_scatter_views(
-            output,
+            Path(figure_directory) if figure_directory is not None else output,
             all_prompts=all_prompts,
             selected=selected,
             spearman_column=EXPERIMENT_SPEARMAN_COLUMN,
@@ -215,6 +232,7 @@ def write_selection_figure(
     selection_directory: str | Path,
     *,
     output_directory: str | Path,
+    figure_directory: str | Path | None = None,
 ) -> AnalysisStatistics:
     """Rebuild reference scatter plots from frozen ``selection.csv``.
 
@@ -251,7 +269,7 @@ def write_selection_figure(
     _validate_prompt_spearman(selected, column="prompt_spearman")
     with matplotlib.rc_context(PLOT_STYLE):
         return _write_scatter_views(
-            output,
+            Path(figure_directory) if figure_directory is not None else output,
             all_prompts=all_prompts,
             selected=selected,
             spearman_column="prompt_spearman",
@@ -263,14 +281,19 @@ def write_gmm_fit_figure(
     *,
     frame: pd.DataFrame,
     configuration: Mapping[str, object],
+    figure_directory: str | Path | None = None,
 ) -> None:
-    """Plot the stored full-covariance GMM without fitting it again."""
+    """Publish the stored GMM as a PDF without fitting it again."""
 
-    output = Path(selection_directory)
-    with matplotlib.rc_context(PLOT_STYLE):
+    output = Path(figure_directory) if figure_directory is not None else Path(selection_directory)
+    with proximity_style.style_context(PLOT_STYLE):
         figure = _gmm_fit_figure(frame, configuration)
         try:
-            _publish_figures(output, ((figure, SELECTION_GMM_FIGURES),))
+            _publish_figures(
+                output, ((figure, {"pdf": SELECTION_GMM_FIGURES["pdf"]}),),
+                formats=("pdf",),
+                export_options={SELECTION_GMM_FIGURES["pdf"]: {"dpi": proximity_style.PDF_DPI}},
+            )
         finally:
             plt.close(figure)
 
@@ -302,29 +325,43 @@ def _write_scatter_views(
     selected: pd.DataFrame,
     spearman_column: str,
 ) -> AnalysisStatistics:
-    """Render both views with all-prompt limits, then publish their artifacts."""
+    """Render paired views with identical all-prompt axes and local styling."""
 
     all_statistics = _prompt_statistics(all_prompts, column=spearman_column)
     selected_statistics = _prompt_statistics(selected, column=spearman_column)
     figures: list[Figure] = []
     try:
-        all_figure = _scatter_figure(all_prompts, all_statistics)
-        figures.append(all_figure)
-        selected_figure = _scatter_figure(selected, selected_statistics)
-        figures.append(selected_figure)
-        all_axes, selected_axes = all_figure.axes[0], selected_figure.axes[0]
-        selected_axes.set_xlim(all_axes.get_xlim())
-        selected_axes.set_ylim(all_axes.get_ylim())
-        _publish_figures(
-            output,
-            (
-                (selected_figure, PROXIMITY_FIGURES["selected"]),
-                (all_figure, PROXIMITY_FIGURES["all_prompts"]),
-            ),
-        )
+        with proximity_style.style_context(PLOT_STYLE):
+            all_figure = _scatter_figure(all_prompts, all_statistics)
+            figures.append(all_figure)
+            selected_figure = _scatter_figure(selected, selected_statistics)
+            figures.append(selected_figure)
+            all_axes, selected_axes = all_figure.axes[0], selected_figure.axes[0]
+            # Use the all-prompt autoscale, including its existing margins and
+            # negative SSCD observations. The retained view cannot rescale it.
+            limits = (all_axes.get_xlim(), all_axes.get_ylim())
+            ticks = (all_axes.get_xticks(), all_axes.get_yticks())
+            for axes in (all_axes, selected_axes):
+                axes.set_xlim(limits[0])
+                axes.set_ylim(limits[1])
+                axes.xaxis.set_major_locator(FixedLocator(ticks[0]))
+                axes.yaxis.set_major_locator(FixedLocator(ticks[1]))
+            _publish_figures(
+                output,
+                (
+                    (selected_figure, PROXIMITY_PDF_FIGURES["selected"]),
+                    (all_figure, PROXIMITY_PDF_FIGURES["all_prompts"]),
+                ),
+                formats=("pdf",),
+                export_options={
+                    PROXIMITY_PDF_FIGURES[view]["pdf"]: {"dpi": proximity_style.PDF_DPI}
+                    for view in ("selected", "all_prompts")
+                },
+            )
     finally:
         for figure in figures:
             plt.close(figure)
+    print(f"[Proximity] Saved PDFs: {output}", flush=True)
     return selected_statistics
 
 
@@ -459,62 +496,39 @@ def _scatter_figure(
     frame: pd.DataFrame,
     statistics: AnalysisStatistics,
 ) -> Figure:
-    figure, axes = plt.subplots(figsize=FIGURE_SIZE)
-    kinds = frame.get("kind", pd.Series(index=frame.index, dtype=object)).map(
-        _plot_kind
-    )
-    handles = []
-    for kind in _KIND_ORDER:
-        group = frame.loc[kinds.eq(kind)]
-        if group.empty:
-            continue
-        color = _KIND_COLORS[kind]
-        axes.scatter(
-            group["l2_norm"].to_numpy(dtype=np.float64),
-            group["sscd"].to_numpy(dtype=np.float64),
-            s=SCATTER_SIZE,
-            color=color,
-            alpha=SCATTER_ALPHA,
-            edgecolors="none",
-            rasterized=True,
-            zorder=2,
-        )
-        handles.append(
-            Line2D(
-                [],
-                [],
-                linestyle="none",
-                marker="o",
-                markersize=math.sqrt(SCATTER_SIZE),
-                markerfacecolor=color,
-                markeredgecolor="none",
-                alpha=1.0,
-                label=category_legend_label(kind),
-            )
-        )
-    if handles:
-        axes.legend(handles=handles, fontsize=LEGEND_FONT_SIZE)
-    axes.set_xlabel(X_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
-    axes.set_ylabel(Y_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
-    axes.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
-    axes.text(
-        0.02,
-        0.02,
-        _summary_text(statistics),
-        transform=axes.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=SUMMARY_FONT_SIZE,
-        bbox={
-            "boxstyle": "round,pad=0.3",
-            "facecolor": "white",
-            "edgecolor": "0.75",
-            "alpha": 0.85,
-        },
-    )
-    axes.grid(True, which="both", linewidth=0.6, alpha=0.18)
-    figure.tight_layout()
-    return figure
+    """Render saved category observations; only display order may change."""
+    with proximity_style.style_context(PLOT_STYLE):
+        figure, axes = plt.subplots(figsize=proximity_style.CANVAS_SIZE_INCHES)
+        try:
+            proximity_style.apply_layout(figure, axes)
+            order = proximity_style.display_order(frame)
+            displayed = frame.iloc[order]
+            kinds = displayed.get("kind", pd.Series(index=displayed.index, dtype=object)).map(_plot_kind)
+            if not displayed.empty:
+                axes.scatter(
+                    displayed["l2_norm"].to_numpy(dtype=np.float64),
+                    displayed["sscd"].to_numpy(dtype=np.float64),
+                    s=proximity_style.SCATTER_SIZE,
+                    color=[proximity_style.COLORS[kind] for kind in kinds],
+                    alpha=proximity_style.SCATTER_ALPHA,
+                    marker="o", edgecolors="none", rasterized=True, zorder=2,
+                )
+            categories = [kind for kind in _KIND_ORDER if kinds.eq(kind).any()]
+            handles = [Line2D(
+                [], [], linestyle="none", marker="o",
+                markersize=math.sqrt(proximity_style.SCATTER_SIZE),
+                markerfacecolor=proximity_style.COLORS[kind], markeredgecolor="none",
+                alpha=1., label=category_legend_label(kind),
+            ) for kind in categories]
+            proximity_style.add_legend(axes, handles, categories)
+            axes.set_xlabel(X_AXIS_LABEL, fontsize=proximity_style.AXIS_LABEL_FONT_SIZE)
+            axes.set_ylabel(Y_AXIS_LABEL, fontsize=proximity_style.AXIS_LABEL_FONT_SIZE)
+            proximity_style.add_summary_box(axes, _summary_text(statistics))
+            figure._proximity_style_version = proximity_style.STYLE_VERSION
+            return figure
+        except BaseException:
+            plt.close(figure)
+            raise
 
 
 def covariance_ellipse(
@@ -638,65 +652,59 @@ def _gmm_fit_figure(
     frame: pd.DataFrame,
     configuration: Mapping[str, object],
 ) -> Figure:
+    """Style the saved two-component fit without changing its rows or geometry."""
     plotted, means, covariances = _gmm_fit_plot_data(frame, configuration)
-    figure, axes = plt.subplots(figsize=FIGURE_SIZE)
-    handles: list[Line2D] = []
-    for component_index, component in enumerate(COMPONENT_NAMES):
-        color = _GMM_COMPONENT_COLORS[component]
-        group = plotted.loc[plotted["gmm_component"].eq(component)]
-        axes.scatter(
-            group["l2_norm"].to_numpy(dtype=np.float64),
-            group["sscd"].to_numpy(dtype=np.float64),
-            s=SCATTER_SIZE,
-            color=color,
-            alpha=SCATTER_ALPHA,
-            edgecolors="none",
-            rasterized=True,
-            zorder=2,
-        )
-        for standard_deviations in _GMM_ELLIPSE_STANDARD_DEVIATIONS:
-            axes.add_patch(
-                covariance_ellipse(
-                    means[component_index],
-                    covariances[component_index],
-                    standard_deviations=standard_deviations,
-                    fill=False,
-                    edgecolor=color,
-                    linewidth=1.0,
-                    alpha=0.9,
-                    zorder=3,
+    with proximity_style.style_context(PLOT_STYLE):
+        figure, axes = plt.subplots(figsize=proximity_style.CANVAS_SIZE_INCHES)
+        try:
+            proximity_style.apply_layout(figure, axes)
+            displayed = plotted.iloc[proximity_style.display_order(plotted)]
+            axes.scatter(
+                displayed["l2_norm"].to_numpy(dtype=np.float64),
+                displayed["sscd"].to_numpy(dtype=np.float64),
+                s=proximity_style.SCATTER_SIZE,
+                color=[proximity_style.GMM_COMPONENT_COLORS[component]
+                       for component in displayed["gmm_component"]],
+                alpha=proximity_style.SCATTER_ALPHA,
+                edgecolors="none", rasterized=True, zorder=2,
+            )
+            handles: list[Line2D] = []
+            for component_index, component in enumerate(COMPONENT_NAMES):
+                color = proximity_style.GMM_COMPONENT_COLORS[component]
+                for standard_deviations in _GMM_ELLIPSE_STANDARD_DEVIATIONS:
+                    axes.add_patch(
+                        covariance_ellipse(
+                            means[component_index], covariances[component_index],
+                            standard_deviations=standard_deviations,
+                            fill=False, edgecolor=color, linewidth=1.0,
+                            alpha=0.9, zorder=3,
+                        )
+                    )
+                axes.plot(
+                    means[component_index, 0], means[component_index, 1],
+                    linestyle="none", marker="x", markersize=6,
+                    markeredgewidth=1.25, color=color, zorder=4,
                 )
+                label = "Low SSCD" if component == "low_sscd_mode" else "High SSCD"
+                handles.append(
+                    Line2D(
+                        [], [], color=color, marker="o", linestyle="-",
+                        markersize=math.sqrt(proximity_style.SCATTER_SIZE),
+                        linewidth=1.0, label=label,
+                    )
+                )
+            axes.set_xlabel(X_AXIS_LABEL)
+            axes.set_ylabel(Y_AXIS_LABEL)
+            proximity_style.add_legend(
+                axes, handles, COMPONENT_NAMES,
+                category_colors=proximity_style.GMM_COMPONENT_COLORS,
             )
-        axes.plot(
-            means[component_index, 0],
-            means[component_index, 1],
-            linestyle="none",
-            marker="x",
-            markersize=6,
-            markeredgewidth=1.25,
-            color=color,
-            zorder=4,
-        )
-        handles.append(
-            Line2D(
-                [],
-                [],
-                color=color,
-                marker="o",
-                linestyle="-",
-                markersize=math.sqrt(SCATTER_SIZE),
-                linewidth=1.0,
-                label=component.replace("_sscd_mode", " SSCD mode"),
-            )
-        )
-    axes.set_xlabel(X_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
-    axes.set_ylabel(Y_AXIS_LABEL, fontsize=TEXT_FONT_SIZE)
-    axes.tick_params(axis="both", which="both", labelsize=AXIS_NUMBER_FONT_SIZE)
-    axes.grid(True, which="both", linewidth=0.6, alpha=0.18)
-    axes.legend(handles=handles, frameon=False, fontsize=LEGEND_FONT_SIZE)
-    axes.autoscale_view()
-    figure.tight_layout()
-    return figure
+            axes.autoscale_view()
+            figure._proximity_style_version = proximity_style.GMM_STYLE_VERSION
+            return figure
+        except BaseException:
+            plt.close(figure)
+            raise
 
 
 def add_prompt_curves(
@@ -775,23 +783,30 @@ def add_sscd_colorbar(
     figure: Figure,
     axis: object,
     values: pd.Series | np.ndarray,
+    *,
+    cmap="viridis", norm=None, ticks=None, cax=None, size="5%", pad=0.1,
+    labelsize=None, ticksize=None, rasterized=None,
 ) -> object:
-    """Add an opaque [0, 1] SSCD colorbar aligned to the drawn plot height."""
+    """Add an opaque SSCD colorbar; optional styling preserves legacy defaults."""
 
-    norm = Normalize(vmin=SSCD_COLOR_RANGE[0], vmax=SSCD_COLOR_RANGE[1], clip=True)
-    mappable = ScalarMappable(norm=norm, cmap="viridis")
+    if norm is None:
+        norm = Normalize(vmin=SSCD_COLOR_RANGE[0], vmax=SSCD_COLOR_RANGE[1], clip=True)
+    mappable = ScalarMappable(norm=norm, cmap=cmap)
     mappable.set_array(np.asarray(values, dtype=np.float64))
     # A regular figure colorbar follows the allocated subplot rectangle, which
     # can be taller than an equal-aspect scatter. Share the axes divider so the
     # colorbar tracks the actual plot box in both raster and vector exports.
-    divider = make_axes_locatable(axis)
-    colorbar_axis = divider.append_axes("right", size="5%", pad=0.1)
-    colorbar_axis.set_label("<colorbar>")
-    colorbar = figure.colorbar(mappable, cax=colorbar_axis)
+    if cax is None:
+        divider = make_axes_locatable(axis)
+        cax = divider.append_axes("right", size=size, pad=pad)
+    cax.set_label("<colorbar>")
+    colorbar = figure.colorbar(mappable, cax=cax, ticks=ticks)
     if colorbar.solids is not None:
         colorbar.solids.set_alpha(COLORBAR_ALPHA)
-    colorbar.set_label("SSCD", fontsize=TEXT_FONT_SIZE)
-    colorbar.ax.tick_params(labelsize=AXIS_NUMBER_FONT_SIZE)
+        if rasterized is not None:
+            colorbar.solids.set_rasterized(rasterized)
+    colorbar.set_label("SSCD", fontsize=AXIS_LABEL_FONT_SIZE if labelsize is None else labelsize)
+    colorbar.ax.tick_params(labelsize=AXIS_NUMBER_FONT_SIZE if ticksize is None else ticksize)
     return colorbar
 
 
@@ -807,37 +822,68 @@ def _summary_text(statistics: AnalysisStatistics) -> str:
         if statistics.median_spearman is None
         else f"{statistics.median_spearman:.3f}"
     )
+    evaluable_note = " evaluable" if denominator != statistics.total_selected_prompts else ""
     return (
-        f"#prompts: {statistics.total_selected_prompts}\n"
-        rf"$\rho < 0$: {statistics.negative_spearman_prompts}/{denominator} "
-        f"({fraction})\n"
-        rf"Median $\rho$: {median}"
+        f"#Prompts: {statistics.total_selected_prompts}\n"
+        + rf"Median $\rho$: {median}" + "\n"
+        + rf"$\rho < 0$: {statistics.negative_spearman_prompts}/{denominator} "
+        + f"({fraction}){evaluable_note}"
     )
 
 
-def publish_figures(
-    output: Path,
-    figures: Sequence[tuple[Figure, Mapping[str, str]]],
-    *,
-    progress: Callable[[str, str], None] | None = None,
-) -> None:
-    """Publish PNG/PDF pairs through the existing recoverable transaction.
 
-    Nested output names must be safe relative same-stem PNG/PDF pairs. The
-    established proximity entry points keep their original private publisher
-    and behavior. Callers own figure lifetime and must close figures in finally.
-    Optional progress receives (relative filename, "saving" or "saved") around
-    each export; it does not change the paired rollback/install transaction.
-    """
-    output = Path(output).absolute()
+def _export_options(figures, supplied):
+    """Validate optional per-artifact presentation settings before any writes."""
+    if supplied is None:
+        return {}
+    if not isinstance(supplied, Mapping):
+        raise PlottingError("figure export options must map relative filenames to settings")
+    known = {name for _figure, filenames in figures for name in filenames.values()}
+    if set(supplied) - known:
+        raise PlottingError("figure export options reference unknown output filenames")
+    result = {}
+    for name, settings in supplied.items():
+        if not isinstance(settings, Mapping) or set(settings) - {"dpi", "bbox_inches"}:
+            raise PlottingError("only dpi and bbox_inches may be overridden per figure artifact")
+        options = dict(settings)
+        if "dpi" in options and (isinstance(options["dpi"], bool)
+                or not isinstance(options["dpi"], (int, float))
+                or not math.isfinite(options["dpi"]) or options["dpi"] <= 0):
+            raise PlottingError("figure export dpi must be finite and positive")
+        if "bbox_inches" in options:
+            box = options["bbox_inches"]
+            if not (isinstance(box, str) and box == "tight") and not (
+                isinstance(box, BboxBase) and np.isfinite(box.extents).all()
+                and box.width > 0 and box.height > 0
+            ):
+                raise PlottingError("figure export bounds require tight or a finite positive inch Bbox")
+        result[name] = options
+    return result
+
+
+def _publication_formats(formats):
+    """Normalize a nonempty, duplicate-free PNG/PDF subset to export order."""
+    if (not isinstance(formats, Sequence) or isinstance(formats, (str, bytes))
+            or not formats or any(not isinstance(value, str) for value in formats)
+            or len(set(formats)) != len(formats)
+            or not set(formats).issubset(_FIGURE_FORMATS)):
+        raise PlottingError("figure formats must be a nonempty, unique subset of png and pdf")
+    return tuple(value for value in _FIGURE_FORMATS if value in formats)
+
+
+def _publication_parents(output, figures, formats):
+    """Validate only requested destinations before any directories or files exist."""
     destinations: set[Path] = set()
     parents: set[Path] = {output}
     for _figure, filenames in figures:
-        if set(filenames) != set(_FIGURE_FORMATS):
-            raise PlottingError("figure publication requires one PNG and one PDF")
+        if not isinstance(filenames, Mapping) or set(filenames) != set(formats):
+            raise PlottingError("figure publication filenames must exactly match requested formats: " + ", ".join(formats))
         paths = {}
-        for file_format in _FIGURE_FORMATS:
-            relative = Path(filenames[file_format])
+        for file_format in formats:
+            try:
+                relative = Path(filenames[file_format])
+            except (TypeError, ValueError) as error:
+                raise PlottingError("figure destination must be a relative filename") from error
             if (
                 relative.is_absolute()
                 or ".." in relative.parts
@@ -855,7 +901,7 @@ def publish_figures(
             destinations.add(destination)
             parents.add(destination.parent)
             paths[file_format] = relative.with_suffix("")
-        if paths["png"] != paths["pdf"]:
+        if len(set(paths.values())) != 1:
             raise PlottingError("PNG and PDF figure destinations must share a stem")
     for parent in parents:
         for ancestor in (parent, *parent.parents):
@@ -863,12 +909,45 @@ def publish_figures(
                 raise PlottingError(f"symlink figure parent: {ancestor}")
             if ancestor.exists() and not ancestor.is_dir():
                 raise PlottingError(f"figure parent is not a directory: {ancestor}")
+    return parents
+
+
+def publish_figures(
+    output: Path,
+    figures: Sequence[tuple[Figure, Mapping[str, str]]],
+    *,
+    progress: Callable[[str, str], None] | None = None,
+    export_options: Mapping[str, Mapping[str, object]] | None = None,
+    formats: Sequence[str] = _FIGURE_FORMATS,
+) -> None:
+    """Publish requested artifacts through the existing recoverable transaction.
+
+    By default filenames must provide same-stem PNG/PDF pairs. An explicit
+    formats=("pdf",) or formats=("png",) selects one format, and each filename
+    map must contain exactly those requested keys. Unrequested files are never
+    read, replaced or removed. Nested names must be safe relative paths. The
+    proximity entry points explicitly select PDF-only output through the private
+    publisher. Callers own figure lifetime and must close figures in finally.
+    Optional progress receives (relative filename, "saving" or "saved") around
+    each export; it does not change the paired rollback/install transaction.
+    Per-filename export_options may override only dpi and bbox_inches; callers
+    must supply padding inside an explicit inch Bbox. Unspecified exports retain
+    the existing 150 DPI, tight bounding box and configured padding.
+    """
+    formats = _publication_formats(formats)
+    output = Path(output).absolute()
+    parents = _publication_parents(output, figures, formats)
+    overrides = _export_options(figures, export_options)
     for parent in sorted(parents, key=lambda path: len(path.parts)):
         parent.mkdir(parents=True, exist_ok=True)
-    if progress is None:
-        _publish_figures(output, figures)
-    else:
-        _publish_figures(output, figures, progress=progress)
+    options = {}
+    if progress is not None:
+        options["progress"] = progress
+    if export_options is not None:
+        options["export_options"] = overrides
+    if formats != _FIGURE_FORMATS:
+        options["formats"] = formats
+    _publish_figures(output, figures, **options)
 
 
 def _publish_figures(
@@ -876,28 +955,32 @@ def _publish_figures(
     figures: Sequence[tuple[Figure, Mapping[str, str]]],
     *,
     progress: Callable[[str, str], None] | None = None,
+    export_options: Mapping[str, Mapping[str, object]] | None = None,
+    formats: Sequence[str] = _FIGURE_FORMATS,
 ) -> None:
     """Render every artifact, then install all files as one recoverable set."""
 
-    output.mkdir(parents=True, exist_ok=True)
+    formats = _publication_formats(formats)
+    output = Path(output).absolute()
+    parents = _publication_parents(output, figures, formats)
+    overrides = _export_options(figures, export_options)
+    for parent in sorted(parents, key=lambda path: len(path.parts)):
+        parent.mkdir(parents=True, exist_ok=True)
     staged: list[tuple[Path, Path]] = []
     backups: list[tuple[Path | None, Path]] = []
     committed = False
     try:
         for figure, filenames in figures:
-            for file_format in _FIGURE_FORMATS:
+            for file_format in formats:
                 destination = output / filenames[file_format]
                 temporary = _temporary_sibling(destination)
                 staged.append((temporary, destination))
                 if progress is not None:
                     progress(filenames[file_format], "saving")
-                figure.savefig(
-                    temporary,
-                    format=file_format,
-                    dpi=FIGURE_DPI,
-                    bbox_inches="tight",
-                    pad_inches=FIGURE_PAD_INCHES,
-                )
+                options = {"format": file_format, "dpi": FIGURE_DPI,
+                           "bbox_inches": "tight", "pad_inches": FIGURE_PAD_INCHES}
+                options.update(overrides.get(filenames[file_format], {}))
+                figure.savefig(temporary, **options)
                 with temporary.open("rb") as handle:
                     os.fsync(handle.fileno())
                 if progress is not None:

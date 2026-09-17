@@ -99,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plot", action="store_true", help="render saved scalars only")
+    parser.add_argument("--pdf-only", action="store_true",
+                        help="compatibility flag: publication already exports PDFs only and preserves cached images")
     mode.add_argument("--estimate-mean-only", action="store_true",
                       help="estimate/cache the independent initial unconditional mean only; no theory reduction or figures")
     mode.add_argument(
@@ -184,12 +186,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_saved_proximity(project_root: Path, config: dict) -> None:
-    """Reuse protected validators, without invoking any write or tensor loader."""
+    """Validate saved scalars and cached example images without writes or tensor reads."""
     from utils.common.cli import generation_run_name
-    from utils.data.selection import load_target_pair_selection
+    from utils.data.selection import load_target_pair_selection, target_pair_selection_directory
     from utils.experiments.cache import generation_log_relative_path
     from utils.experiments.proximity import (
         ProximityPaths,
+        _reference_output_paths,
+        _write_examples,
         _load_saved_analysis,
         _load_saved_analysis_configuration,
         _validate_saved_analysis,
@@ -252,6 +256,17 @@ def validate_saved_proximity(project_root: Path, config: dict) -> None:
     )
     _validate_prompt_spearman(frame, column=EXPERIMENT_SPEARMAN_COLUMN)
 
+    reference_generation = project_root / generation_log_relative_path(
+        **identity, seed_start=config["num_seeds"])
+    reference_paths = _reference_output_paths(
+        project_root, reference_generation, **identity, selection_strategy="gmm")
+    selection_directory = target_pair_selection_directory(
+        project_root, **identity, selection_strategy="gmm")
+    _write_examples(reference_paths, table_path=selection_directory / "selection.csv",
+                    num_seeds=config["num_seeds"], validate_only=True)
+    _write_examples(paths, table_path=paths.output_directory / "proximity.csv",
+                    num_seeds=config["num_seeds"], validate_only=True)
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
@@ -269,6 +284,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             "--target-error-tolerance must be nonnegative in raw latent L2 units"
         )
+    if args.pdf_only and not args.plot:
+        parser.error("--pdf-only requires --plot")
     if args.bundle and not (args.plot or args.validate_only):
         parser.error("--bundle requires --plot or --validate-only")
     if args.validate_proximity and (not args.validate_only or args.bundle):
@@ -440,11 +457,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     return 1
             if args.plot:
+                from utils.experiments.figure_paths import publication_directory
+                destination = publication_directory(PaperPaths.build(PROJECT_ROOT, **config).output_directory)
                 render_saved_paper(
-                    bundle,
-                    expected_config=config,
-                    diagnostics=args.diagnostics,
+                    bundle, expected_config=config, diagnostics=args.diagnostics,
+                    formats=("pdf",), figure_directory=destination,
                 )
+                print(f"Paper PDFs: {destination}")
         else:
             from utils.experiments.theory.paper_reduce import run_paper
 

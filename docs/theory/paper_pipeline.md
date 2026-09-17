@@ -1,4 +1,4 @@
-> Current publication uses six selected figure pairs directly under `figures/`; see [figure_curation.md](figure_curation.md). The broader layouts and diagnostic export commands below describe historical workflows. All measurements remain retained, but `--diagnostics` and per-timestep views no longer add published figures.
+> Current publication uses six selected PDFs under project-root `figures/<experiment>/theory/experiment_S0_N<N>/`; see [figure_curation.md](figure_curation.md). The broader layouts and diagnostic export commands below describe historical workflows. All measurements remain retained, but `--diagnostics` and per-timestep views no longer add published figures.
 
 > The active figure organization is now [four_stage_experiments.md](four_stage_experiments.md). Seven-primary filenames and roles below describe the preceding design; compatible mathematical measurements and numerical contracts remain reusable. Matching LaTeX is unavailable; historical label strings are author-supplied, not verified source labels.
 

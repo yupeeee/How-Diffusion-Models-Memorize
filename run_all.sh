@@ -54,12 +54,14 @@ no matching pair fail before any stage. --scheduler ddpm selects sdv1 only.
 Protected generation, SSCD, and GMM proximity retain their existing defaults.
 Theory resumes shared denoiser probes and one analytical trajectory pass per
 model/scheduler, then renders six selected theory figures from saved scalar inputs
-directly under figures/. Probe workers use all visible GPUs.
+under project-root figures/<experiment>/theory/<seed-role>/. Proximity PDFs use
+figures/<experiment>/proximity/<seed-role>/. Only PDFs are exported; scalar tables
+and metadata stay under outputs/. Probe workers use all visible GPUs.
 The reference-only SNR extension and terminal bounds use separate reusable caches.
 
 Options:
   --download            Run/resume shared Webster preparation once first
-  --plot                Render saved proximity and theory scalar outputs only
+  --plot                Render saved proximity/theory PDFs and cached-image examples
   --figure-suite paper  Optional alias for the default fixed paper suite
   --diagnostics         Compatibility flag; exports the same six theory figures
                         Diagnostic scalar measurements remain available
@@ -132,7 +134,8 @@ All selected experiment seeds remain in the analysis, including failed recovery.
 
 --plot validates every requested scalar bundle and saved proximity metadata
 before writing figures. It never reads raw trajectory tensors, evaluates models,
-fits selection, decodes images, or modifies numerical logs. Copied scalar bundles
+fits selection, runs VAE decoding, or modifies numerical logs. Proximity examples
+read their existing cached PNGs and completion metadata. Copied scalar bundles
 can also be plotted using theory_validation.sh --bundle PATH --plot.
 --plot cannot be combined with --download, --overwrite, or --recompute-experiments.
 --recompute-experiments cannot be combined with --download or --overwrite.

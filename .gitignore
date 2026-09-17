@@ -6,12 +6,10 @@ __pycache__/
 .DS_Store
 __MACOSX/
 /data/
+/figures/
 /logs/
 /outputs/
 /checkpoints/
 *.tmp
 /tmp/
 /_*/
-plan.md
-plan.pdf
-revised.pdf

@@ -65,6 +65,7 @@ def _small_exports(monkeypatch, *, fail_pdf=False):
                 raise RuntimeError("injected second-format export failure")
     monkeypatch.setattr(paper_plotting, "_draw", lambda entry, *args: (SavedFigure(entry["stem"]), {}))
     monkeypatch.setattr(paper_plotting.plt, "close", lambda figure: None)
+    monkeypatch.setattr(paper_plotting, "_finalize_presentations", lambda *args: {})
 
 
 def test_saved_twenty_figure_bundle_migrates_to_six_without_touching_science_and_is_idempotent(tmp_path, monkeypatch):
@@ -80,7 +81,7 @@ def test_saved_twenty_figure_bundle_migrates_to_six_without_touching_science_and
     protected = {name: value for name, value in _snapshot(bundle).items()
                  if name not in {"registry.json", "figure_manifest.json", "figure_captions.md"}
                  and not name.startswith(("main/", "appendix/", "diagnostics/"))}
-    manifest = contracts.render_saved_paper(bundle)
+    manifest = contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     images = {name for name in manifest["files"] if Path(name).suffix in {".png", ".pdf"}}
     expected = {name for entry in paper_registry() for name in entry["outputs"].values()}
     assert images == expected and len(images) == 12
@@ -104,7 +105,7 @@ def test_saved_twenty_figure_bundle_migrates_to_six_without_touching_science_and
     assert {"branch_gap_per_prompt", "reference_variation_per_prompt"}.issubset(
         entry["stem"] for entry in registry["measurement_inventory"])
     first = _snapshot(bundle)
-    contracts.render_saved_paper(bundle)
+    contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert _snapshot(bundle) == first
     assert not (bundle / "archive").exists()
     assert not (bundle.parent / ".archives").exists()
@@ -133,7 +134,7 @@ def test_retirement_preserves_and_reports_unowned_modified_links_outside_and_unr
     (bundle / "user_link").symlink_to(tmp_path / "nonexistent")
     atomic_write_json(bundle / "figure_manifest.json", previous)
     before = {name: _snapshot(bundle)[name] for name in (modified, unowned, link, unrelated, "user_link")}
-    contracts.render_saved_paper(bundle)
+    contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert {name: _snapshot(bundle)[name] for name in before} == before
     assert outside.read_bytes() == b"outside the active bundle"
     rows = {row["old_path"]: row for row in read_json(bundle / "figure_retirement.json")["records"]}
@@ -143,7 +144,7 @@ def test_retirement_preserves_and_reports_unowned_modified_links_outside_and_unr
     assert unrelated in read_json(bundle / "figure_manifest.json")["preserved_files"]
     assert "Figure migration conflict" in capsys.readouterr().out
     ledger_before = (bundle / "figure_retirement.json").read_bytes()
-    contracts.render_saved_paper(bundle)
+    contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert (bundle / "figure_retirement.json").read_bytes() == ledger_before
 
 
@@ -161,7 +162,7 @@ def test_migration_rollback_preserves_previous_images_and_publication_metadata(t
             return replace(source, destination)
         monkeypatch.setattr(contracts.os, "replace", fail_install)
     with pytest.raises(RuntimeError, match="injected"):
-        contracts.render_saved_paper(bundle)
+        contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert _snapshot(bundle) == before
     assert not list(bundle.parent.glob(".paper.backup-*"))
     assert not list(bundle.parent.glob(".paper.stage-*"))
@@ -195,7 +196,7 @@ def test_unrecognized_presentation_metadata_is_preserved_and_rolls_back(tmp_path
     atomic_write_json(bundle / name, {"user_notes": "preserve this file"})
     before = _snapshot(bundle)
     with pytest.raises(TheoryError, match="unrecognized " + name):
-        contracts.render_saved_paper(bundle)
+        contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert _snapshot(bundle) == before
 
 
@@ -208,12 +209,12 @@ def test_unselected_owned_diagnostics_retire_even_when_diagnostics_requested(tmp
     previous_images = {name for entry in entries for name in entry["outputs"].values()}
     scientific_before = {name: digest for name, digest in _snapshot(bundle).items()
                          if name.startswith(("plot_data/", "audit_data/"))}
-    first = contracts.render_saved_paper(bundle, diagnostics=True)
+    first = contracts.render_saved_paper(bundle, diagnostics=True, formats=("png", "pdf"))
     assert len(first["figures"]) == 6
     assert all(not (bundle / name).exists() for name in previous_images)
     assert previous_images.isdisjoint(first["preserved_files"])
     assert {name: _snapshot(bundle)[name] for name in scientific_before} == scientific_before
-    second = contracts.render_saved_paper(bundle, diagnostics=True)
+    second = contracts.render_saved_paper(bundle, diagnostics=True, formats=("png", "pdf"))
     assert set(second["files"]) == set(first["files"])
     assert not any(name.startswith("diagnostics/") for name in second["files"])
 
@@ -272,7 +273,7 @@ def test_copied_nondefault_bundle_migrates_without_devices_models_raw_reads_or_r
                          if name.startswith("plot_data/") or name in {"run_config.json", "summary.json", "audit.json"}}
     inherited = contracts.saved_plot_configuration(bundle, requested={}, portable=True)
     assert inherited["num_loss_seeds"] == 128
-    contracts.render_saved_paper(bundle, expected_config=inherited)
+    contracts.render_saved_paper(bundle, expected_config=inherited, formats=("png", "pdf"))
     assert {name: _snapshot(bundle)[name] for name in scientific_before} == scientific_before
     with pytest.raises(TheoryError, match="Explicit plot settings conflict"):
         contracts.saved_plot_configuration(bundle, requested={"num_loss_seeds": 64},
@@ -289,9 +290,9 @@ def test_required_missing_scalar_is_distinct_from_mathematical_inapplicability(t
     atomic_write_json(bundle / "summary.json", summary)
     if status == "unavailable":
         with pytest.raises(TheoryError, match=r"terminal_bound_coverage.*explicit saved scope reason.*--recompute-experiments"):
-            contracts.render_saved_paper(bundle)
+            contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     else:
-        manifest = contracts.render_saved_paper(bundle)
+        manifest = contracts.render_saved_paper(bundle, formats=("png", "pdf"))
         entry = next(row for row in manifest["figures"] if row["stem"] == "terminal_bound_coverage")
         assert entry["status"] == "not_applicable" and entry["outputs"] == {}
         assert (bundle / "main/terminal_bound_coverage.png").exists()
@@ -355,7 +356,7 @@ def test_previous_curated_registry_migrates_without_drawing_unselected_prompt_cu
     bundle = compact_fixture(tmp_path / "curated")
     atomic_write_json(bundle / "registry.json", {"version": "four-stage-paper-curation-19", "figures": measurement_registry()})
     _small_exports(monkeypatch)
-    manifest = contracts.render_saved_paper(bundle)
+    manifest = contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert manifest["requested_counts"] == {"main": 6, "appendix": 0, "diagnostics": 0, "timestep_figures": 0}
     assert "appendix/branch_gap_per_prompt.png" not in manifest["files"]
     assert "branch_gap_per_prompt" in read_json(bundle / "summary.json")["plot_data"]
@@ -408,7 +409,7 @@ def test_legacy_pooled_terminal_coverage_cannot_masquerade_as_grouped_saved_inpu
     monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", forbidden)
     monkeypatch.setattr(contracts, "staged_publication", forbidden)
     with pytest.raises(TheoryError, match="Missing required paper columns for terminal_bound_coverage") as captured:
-        contracts.render_saved_paper(bundle)
+        contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     message = str(captured.value)
     for field in ("group", "denominator_weight", "eligible_count", "prompt_count"):
         assert field in message
@@ -433,7 +434,7 @@ def test_missing_retired_zero_measurements_do_not_block_saved_plotting(tmp_path,
     def forbidden(*args, **kwargs):
         raise AssertionError("Missing retired zero norms triggered scientific recomputation")
     monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", forbidden)
-    manifest = contracts.render_saved_paper(bundle)
+    manifest = contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert manifest["requested_counts"] == {"main": 6, "appendix": 0, "diagnostics": 0, "timestep_figures": 0}
     assert zero_stems.isdisjoint(entry["stem"] for entry in manifest["figures"])
     assert {name: _snapshot(bundle)[name] for name in before} == before
@@ -496,7 +497,7 @@ def test_retired_zero_exports_preserve_unowned_or_modified_files_and_all_saved_s
                  if name.startswith(("plot_data/", "audit_data/"))
                  or name in {"run_config.json", "summary.json", "audit.json"}}
     _small_exports(monkeypatch)
-    manifest = contracts.render_saved_paper(bundle)
+    manifest = contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert (bundle / relative).read_bytes() == image_before
     assert not (bundle / f"appendix/{stem}.pdf").exists()
     assert {name: _snapshot(bundle)[name] for name in protected} == protected
@@ -523,7 +524,7 @@ def test_missing_guidance_fit_requires_analysis_and_never_reuses_injection_plot(
     monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", forbidden)
     monkeypatch.setattr(contracts, "staged_publication", forbidden)
     with pytest.raises(TheoryError, match="corollary3_guidance_scale_vs_loss") as captured:
-        contracts.render_saved_paper(bundle)
+        contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert str(captured.value).endswith("Run " + expected_command)
     assert "--recompute-experiments" in expected_command
     assert _snapshot(bundle) == before
@@ -550,7 +551,7 @@ def _assert_unselected_inputs_remain_unneeded(bundle, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("Unselected compact inputs triggered scientific reduction")
     monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", forbidden)
-    manifest = contracts.render_saved_paper(bundle)
+    manifest = contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert len(manifest["figures"]) == 6
     assert not manifest.get("timestep_figures", [])
     assert {name: _snapshot(bundle)[name] for name in protected} == protected
@@ -570,7 +571,7 @@ def test_old_timestep_exports_retire_only_with_matching_ownership(tmp_path, monk
     unknown = bundle / "appendix/posterior_feedback_condition_margin/notes.png"
     unknown.write_bytes(b"user image in a historical timestep folder")
     _small_exports(monkeypatch)
-    manifest = contracts.render_saved_paper(bundle)
+    manifest = contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert (bundle / relative).read_bytes() == protected
     assert unknown.read_bytes() == b"user image in a historical timestep folder"
     assert not (bundle / "appendix/posterior_feedback_condition_margin/step_000.pdf").exists()
@@ -580,5 +581,58 @@ def test_old_timestep_exports_retire_only_with_matching_ownership(tmp_path, monk
     assert rows[relative]["decision"] == "preserved_" + disposition
     assert unknown.relative_to(bundle).as_posix() not in rows
     first = _snapshot(bundle)
-    contracts.render_saved_paper(bundle)
+    contracts.render_saved_paper(bundle, formats=("png", "pdf"))
     assert _snapshot(bundle) == first
+
+
+def test_pdf_only_publication_preserves_all_pngs_and_scientific_inputs(tmp_path, monkeypatch):
+    bundle = tmp_path / "paper"
+    previous = _old_bundle(bundle)
+    # Include both an owned current PNG and an unowned current PNG. Neither is
+    # an output or retirement candidate during the PDF-only publication.
+    for index, entry in enumerate(paper_registry()[:2]):
+        name = entry["outputs"]["png"]
+        path = bundle / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"preserved current PNG")
+        if index == 0:
+            previous["files"][name] = file_sha256(path)
+    atomic_write_json(bundle / "figure_manifest.json", previous)
+    pngs = {path.relative_to(bundle).as_posix(): (file_sha256(path), path.stat().st_mtime_ns)
+            for path in bundle.rglob("*.png")}
+    immutable = {name: value for name, value in _snapshot(bundle).items()
+                 if name not in {"registry.json", "figure_manifest.json", "figure_captions.md"}
+                 and not name.endswith((".png", ".pdf"))}
+    _small_exports(monkeypatch)
+    manifest = contracts.render_saved_paper(bundle, formats=("pdf",))
+    assert manifest["export_formats"] == ["pdf"]
+    assert len(manifest["figures"]) == 6 and len(manifest["files"]) == 7
+    expected = {entry["outputs"]["pdf"] for entry in paper_registry()}
+    assert set(manifest["files"]) == expected | {"figure_captions.md"}
+    for entry in manifest["figures"]:
+        assert set(entry["outputs"]) == set(entry["requested_outputs"]) == {"pdf"}
+        assert entry["output_hashes"] == {"pdf": file_sha256(bundle / entry["outputs"]["pdf"])}
+        assert paper_plotting.paper_style.is_selected(entry)
+    assert {path.relative_to(bundle).as_posix(): (file_sha256(path), path.stat().st_mtime_ns)
+            for path in bundle.rglob("*.png")} == pngs
+    assert {name: _snapshot(bundle)[name] for name in immutable} == immutable
+    assert {name for name in previous["files"] if name.endswith(".png")} <= set(manifest["preserved_files"])
+    ledger = read_json(bundle / "figure_retirement.json")
+    assert all(not row["old_path"].endswith(".png") for row in ledger["records"])
+    old_pdfs = {name for name in previous["files"] if name.endswith(".pdf")}
+    assert all(not (bundle / name).exists() for name in old_pdfs)
+    before = _snapshot(bundle)
+    contracts.render_saved_paper(bundle, formats=("pdf",))
+    assert _snapshot(bundle) == before
+
+
+def test_pdf_only_export_failure_preserves_previous_bundle(tmp_path, monkeypatch):
+    bundle = tmp_path / "paper"
+    _old_bundle(bundle)
+    before = _snapshot(bundle)
+    _small_exports(monkeypatch, fail_pdf=True)
+    with pytest.raises(RuntimeError, match="injected second-format"):
+        contracts.render_saved_paper(bundle, formats=("pdf",))
+    assert _snapshot(bundle) == before
+    assert not list(bundle.parent.glob(".paper.stage-*"))
+    assert not list(bundle.parent.glob(".paper.backup-*"))

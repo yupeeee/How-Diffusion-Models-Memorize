@@ -42,7 +42,10 @@ def test_render_serializes_captions_before_export_and_reports_each_file(tmp_path
         captioned.append(entry["stem"])
         return result
     monkeypatch.setattr(plotting, "_caption", caption)
-    def publish(output, figures, *, progress):
+    monkeypatch.setattr(plotting, "_finalize_presentations", lambda *args: {})
+    def publish(output, figures, *, progress, export_options, formats=("png", "pdf")):
+        assert formats == ("png", "pdf")
+        assert export_options == {}
         assert len(captioned) == len(paper_registry())
         for _figure, names in figures:
             for relative in names.values():
@@ -53,7 +56,7 @@ def test_render_serializes_captions_before_export_and_reports_each_file(tmp_path
                 progress(relative, "saved")
                 exports.append(relative)
     monkeypatch.setattr(plotting, "publish_figures", publish)
-    manifest = plotting.render_paper(root)
+    manifest = plotting.render_paper(root, formats=("png", "pdf"))
     saved = read_json(root / "figure_manifest.json")
     assert len(exports) == 12 and len(closed) == 6
     for entry in manifest["figures"]:
@@ -78,7 +81,7 @@ def test_unknown_audit_type_fails_before_export_and_closes_figure(tmp_path, monk
         raise AssertionError("Invalid metadata reached PNG/PDF export")
     monkeypatch.setattr(plotting, "publish_figures", forbidden)
     with pytest.raises(TypeError, match="cannot convert"):
-        plotting.render_paper(root)
+        plotting.render_paper(root, formats=("png", "pdf"))
     assert closed == [figure]
     assert not (root / "figure_manifest.json").exists()
 

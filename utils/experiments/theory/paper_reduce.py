@@ -19,8 +19,6 @@ from .paper_contracts import (
     measurement_sources,
     publication_lock,
     reject_symlinks,
-    retire_obsolete_figures,
-    retire_legacy_figures,
     staged_publication,
     saved_scientific_configuration,
     write_plot_table,
@@ -229,7 +227,9 @@ def run_paper(
     _resolve_theory_devices(device)  # Fail before publication or any model/probe work.
     root = Path(project_root).absolute()
     output = PaperPaths.build(root, **config).output_directory
-    with publication_lock(output):
+    from utils.experiments.figure_paths import publication_directory
+    figure_directory = publication_directory(output)
+    with publication_lock(output, figure_directory=figure_directory):
         previous_config = (read_object(output / "run_config.json")
                            if (output / "run_config.json").exists() else None)
         if (previous_config and previous_config.get("schema_version") == BUNDLE_SCHEMA_VERSION
@@ -330,8 +330,6 @@ def run_paper(
                 f"||mu||/sqrt(d)={theory_mean['mean_norm_rmse']:.6g}; "
                 f"Monte Carlo RMS standard error={theory_mean['mean_mc_standard_error_rmse']:.6g}"
             )
-        previous = (read_object(output / "figure_manifest.json")
-                    if (output / "figure_manifest.json").exists() else {})
         run_config = _clean({
             "schema_version": BUNDLE_SCHEMA_VERSION,
             "metric_schema_version": METRIC_SCHEMA_VERSION,
@@ -345,7 +343,9 @@ def run_paper(
             "provenance": provenance,
         })
         archive_previous = previous_config is not None and previous_config.get("scientific_hash") != scientific_hash
-        with StageProgress("Publishing paper bundle"), staged_publication(output, archive_previous=archive_previous) as stage:
+        with StageProgress("Publishing paper bundle"), staged_publication(
+                output, archive_previous=archive_previous, figure_directory=figure_directory) as stages:
+            stage, figure_stage = stages
             # Preserve every compact measurement even though publication selects six images.
             registry = measurement_registry(diagnostics=True, **registry_options)
             plot_names = [entry["stem"] for entry in registry] + sorted(RETIRED_RENDER_STEMS)
@@ -437,8 +437,8 @@ def run_paper(
                 progress.update(1)
             with StageProgress("Validating saved scalar publication"):
                 load_paper_inputs(stage, expected_config=config, diagnostics=diagnostics)
-            render_paper(stage, diagnostics=diagnostics)
-            with StageProgress("Retiring verified obsolete figures"):
-                retire_obsolete_figures(stage, previous)
-        print(f"Paper outputs: {output}", flush=True)
+            render_paper(stage, diagnostics=diagnostics, formats=("pdf",),
+                         figure_directory=figure_stage, publication_directory=figure_directory)
+        print(f"Paper measurements and figure metadata: {output}", flush=True)
+        print(f"Paper PDFs: {figure_directory}", flush=True)
     return output

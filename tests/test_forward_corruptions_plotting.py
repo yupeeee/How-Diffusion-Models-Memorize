@@ -189,14 +189,14 @@ def test_each_panel_is_an_independent_styled_single_axis_figure(
         assert axis.get_ylim() == pytest.approx((0.0, upper_limit))
         assert axis.get_xlabel() == r"$t$"
         assert axis.get_ylabel() == r"$\|\mathbf{x}_t-\mathbf{x}^{\star}\|$"
-        assert axis.xaxis.label.get_fontsize() == pytest.approx(15)
-        assert axis.yaxis.label.get_fontsize() == pytest.approx(15)
+        assert axis.xaxis.label.get_fontsize() == pytest.approx(18)
+        assert axis.yaxis.label.get_fontsize() == pytest.approx(18)
         assert all(
-            label.get_fontsize() == pytest.approx(12)
+            label.get_fontsize() == pytest.approx(15)
             for label in axis.get_xticklabels()
         )
         assert all(
-            label.get_fontsize() == pytest.approx(12)
+            label.get_fontsize() == pytest.approx(15)
             for label in axis.get_yticklabels()
         )
         legend = axis.get_legend()
@@ -207,7 +207,7 @@ def test_each_panel_is_an_independent_styled_single_axis_figure(
             "Generated state",
         ]
         assert all(
-            text.get_fontsize() == pytest.approx(10) for text in legend.get_texts()
+            text.get_fontsize() == pytest.approx(12) for text in legend.get_texts()
         )
         assert all(
             handle.get_alpha() in (None, 1.0) for handle in legend.legend_handles
@@ -357,11 +357,11 @@ def test_decoded_gallery_has_matched_rows_and_fixed_scale_difference(panel):
                 if row == 2:
                     remaining = 50 - raw["step_indices"][column]
                     assert axis.get_xlabel() == f"$t={remaining}$"
-                    assert axis.xaxis.label.get_fontsize() == 12
+                    assert axis.xaxis.label.get_fontsize() == 15
         assert [figure.axes[row * 10].get_ylabel() for row in range(3)] == [
             "Forward", "Generated", "Absolute\ndifference"
         ]
-        assert figure.axes[20].yaxis.label.get_fontsize() == 15
+        assert figure.axes[20].yaxis.label.get_fontsize() == 18
         assert figure.axes[20].yaxis.label.get_fontfamily() == ["STIXGeneral"]
     finally:
         matplotlib.pyplot.close(figure)

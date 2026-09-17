@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--plot",
         action="store_true",
-        help="regenerate figures only from the frozen selection and saved CSV",
+        help="save PDFs under project-root figures/<experiment>/proximity/<seed-role>/ from saved scalars and cached retained/discarded images",
     )
     return parser
 

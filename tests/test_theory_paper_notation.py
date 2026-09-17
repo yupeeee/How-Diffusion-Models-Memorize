@@ -88,14 +88,14 @@ def test_comprehensive_measurement_inventory_retains_all_twenty_notation_contrac
     assert initial["x"] == r"$\sqrt{L_T(c)/(d\,\mathrm{SNR}_T)}$"
     assert initial["y"] == r"$\sqrt{\mathbb{E}_{\mathbf{x}_T}[\|\hat{\mathbf{x}}_T(b)-\mathbf{x}^{\star}\|^2]/d}$"
     margin = by_stem["posterior_feedback_condition_margin"]["axes"]
-    assert all(term in margin["x"] for term in (r"\boldsymbol{\Delta}_t", r"-e_t^{\parallel}(\boldsymbol{\Delta})", r"-\mathcal{V}_t"))
+    assert all(term in margin["x"] for term in (r"\boldsymbol{\Delta}_t", r"-\mathcal{E}_t", r"-\mathcal{V}_t"))
     assert r"\log[p_{t-1}(\mathbf{x}_{t-1})/p_{t-1}(\mathbf{x}_{t-1}^{\mathrm{cf}})]" in margin["y"]
     assert "e_t(c)" not in margin["x"] and r"e_t(\varnothing)" not in margin["x"]
     margin_entry = by_stem["posterior_feedback_condition_margin"]
     assert "step_index" in margin_entry["required_columns"]
     assert margin_entry["display_policy"] == "finite_saved_values"
     assert margin_entry["per_timestep_exports"]["directory"] == "appendix/posterior_feedback_condition_margin"
-    assert notation.TERMINAL_EXPRESSIONS["reference"] == r"e_1(c)+(g-1)[e_1^{\parallel}(\boldsymbol{\Delta})+R(1-p_1)]"
+    assert notation.TERMINAL_EXPRESSIONS["reference"] == r"e_1(c)+(g-1)[\mathcal{E}_1+R(1-p_1)]"
     assert by_stem["conditional_reference_error_per_prompt"]["axes"]["y"] == r"$e_t(c)/\sqrt{d}$"
     assert by_stem["unconditional_reference_error_per_prompt"]["axes"]["y"] == r"$e_t(\varnothing)/\sqrt{d}$"
     for stem in ("terminal_observable_bound", "final_reproduction_bound"):
@@ -139,7 +139,7 @@ def test_sync_legends_compare_only_branch_gap_and_lemma6_bound(tmp_path):
     try:
         text = _legend_texts(fig.axes[0])
         assert r"$\|\boldsymbol{\Delta}_t\|$" in text
-        assert r"$e_t^{\parallel}(\boldsymbol{\Delta})+R(1-p_t)$" in text
+        assert r"$\mathcal{E}_t+R(1-p_t)$" in text
         assert not any(r"\max" in label for label in text)
         assert audit["displayed_metrics"] == ["gap", "bound"]
         assert audit["quantity_styles"] == {"gap": "-", "bound": "--"}
@@ -420,5 +420,5 @@ def test_selected_publication_has_six_pairs_under_figures_without_scientific_ali
         for key in ("source_table", "formula_version", "formula_id", "plot_data_key", "axes", "required_columns"):
             assert entry[key] == inventory[stem][key]
     margin = next(entry for entry in entries if entry["stem"] == "posterior_feedback_condition_margin")
-    assert margin["pooled_scatter_alpha"] == .01
+    assert margin["pooled_scatter_alpha"] == .1
     assert "pooled_scatter_alpha_scale" not in margin

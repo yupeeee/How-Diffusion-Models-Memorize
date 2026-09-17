@@ -4,6 +4,8 @@ from copy import deepcopy
 
 import matplotlib.pyplot as plt
 from matplotlib.legend import Legend
+from matplotlib.collections import LineCollection, PathCollection
+from matplotlib.colors import to_rgba
 import numpy as np
 import pandas as pd
 import pytest
@@ -49,6 +51,8 @@ def test_pair_loss_has_distinct_mean_sscd_and_control_without_equality(tmp_path)
             np.testing.assert_allclose(segment[:, 1], sorted([row.y, row.control_y]))
         assert len(ax.collections[1].get_offsets()) == 4
         assert len(ax.collections[2].get_offsets()) == 4
+        assert ax.collections[2].cmap.name == "viridis"
+        assert not audit["selected_sparse_style"]
         assert len(ax.collections[1].get_facecolors()) == 0
         assert ax.get_ylabel() == "Initial target error (RMS)"
         assert all(line.get_label() != "Equality" for line in ax.lines)
@@ -435,3 +439,68 @@ def test_caption_preserves_scope_links_resolution_and_looseness_metadata():
             assert "appendix/lemma2_native_gaussian_sweep.png" in caption
         if stem == "proposition5_posterior_feedback":
             assert "appendix/proposition5_numerical_resolution.png" in caption
+
+
+def test_selected_pair_loss_style_preserves_points_controls_connectors_and_intervals(tmp_path):
+    from utils.experiments.theory import paper_style
+    from utils.experiments.theory.paper_registry import paper_registry as selected_registry
+    from utils.experiments.theory.paper_notation import INITIAL_BRANCH_LABELS
+
+    config, summary, frames, _ = inputs(tmp_path)
+    entry = next(item for item in selected_registry() if item["stem"] == "initial_loss_recovery")
+    frame = frames[entry["stem"]].copy()
+    frame.loc[0, "control_y"] = .1  # Retain the unfavorable conditional/control pairing.
+    frame.loc[1, "mean_terminal_sscd"] = np.nan  # Color absence does not remove a finite point.
+    missing = frame.iloc[[0]].copy()
+    missing["record_id"], missing["x"] = "missing-coordinate", np.nan
+    frame = pd.concat([frame, missing], ignore_index=True)
+    before = frame.copy(deep=True)
+    metadata = deepcopy(summary["figures"][entry["stem"]])
+    metadata["counts"]["pairs"] = len(frame)
+    fig, audit = plotting._draw(entry, frame, metadata, config)
+    try:
+        ax = fig.axes[0]
+        valid = np.isfinite(frame.x) & np.isfinite(frame.y) & np.isfinite(frame.control_y)
+        colored = valid & np.isfinite(frame.mean_terminal_sscd)
+        missing_color = valid & ~colored
+        scatters = [artist for artist in ax.collections if isinstance(artist, PathCollection)]
+        controls, conditional, unavailable_color = scatters
+        np.testing.assert_array_equal(controls.get_offsets(), np.column_stack([frame.loc[valid, "x"], frame.loc[valid, "control_y"]]))
+        np.testing.assert_array_equal(conditional.get_offsets(), np.column_stack([frame.loc[colored, "x"], frame.loc[colored, "y"]]))
+        np.testing.assert_array_equal(conditional.get_array(), frame.loc[colored, "mean_terminal_sscd"])
+        np.testing.assert_array_equal(unavailable_color.get_offsets(), np.column_stack([frame.loc[missing_color, "x"], frame.loc[missing_color, "y"]]))
+        assert len(controls.get_facecolors()) == 0
+        np.testing.assert_allclose(controls.get_edgecolors()[0], to_rgba(paper_style.CONTROL_COLOR, paper_style.SPARSE_ALPHA))
+        for artist in scatters:
+            assert artist.get_sizes().tolist() == [paper_style.SPARSE_SIZE]
+            assert artist.get_alpha() == paper_style.SPARSE_ALPHA
+            assert not artist.get_rasterized()
+        assert conditional.cmap is paper_style.SSCD_CMAP
+        assert conditional.norm.vmin == 0. and conditional.norm.vmax == 1. and conditional.norm.clip
+        segments = [artist for artist in ax.collections if isinstance(artist, LineCollection)]
+        connector, horizontal_ci, vertical_ci = segments
+        for saved, segment in zip(frame.loc[valid].itertuples(), connector.get_segments()):
+            np.testing.assert_allclose(segment, [[saved.x, min(saved.y, saved.control_y)], [saved.x, max(saved.y, saved.control_y)]])
+        ci = valid & np.isfinite(frame.x_low) & np.isfinite(frame.x_high) & np.isfinite(frame.y_low) & np.isfinite(frame.y_high)
+        for saved, horizontal, vertical in zip(frame.loc[ci].itertuples(), horizontal_ci.get_segments(), vertical_ci.get_segments()):
+            np.testing.assert_allclose(horizontal, [[saved.x_low, saved.y], [saved.x_high, saved.y]])
+            np.testing.assert_allclose(vertical, [[saved.x, saved.y_low], [saved.x, saved.y_high]])
+        assert connector.get_zorder() < controls.get_zorder() <= conditional.get_zorder()
+        assert horizontal_ci.get_zorder() < conditional.get_zorder()
+        labels = [text.get_text() for text in ax.get_legend().get_texts()]
+        assert list(INITIAL_BRANCH_LABELS) == labels[:2]
+        handles = ax.get_legend().legend_handles
+        assert handles[0].get_color() == paper_style.TEXT_COLOR
+        assert handles[1].get_markerfacecolor() == "none" and handles[1].get_color() == paper_style.CONTROL_COLOR
+        colorbar = fig.axes[1]._colorbar
+        assert colorbar.mappable.cmap is paper_style.SSCD_CMAP
+        np.testing.assert_allclose(colorbar.get_ticks(), np.linspace(0., 1., 6))
+        assert colorbar.solids.get_alpha() == 1.
+        assert audit["finite_pair_summaries"] == int(valid.sum())
+        assert audit["excluded_nonfinite_pairs"] == 1
+        assert audit["conditional_missing_sscd_count"] == 1
+        assert audit["selected_sparse_style"] and audit["paired_connector_count"] == int(valid.sum())
+        assert not ax.texts and not audit["equality_guide"]
+        pd.testing.assert_frame_equal(frame, before)
+    finally:
+        plt.close(fig)

@@ -93,6 +93,11 @@ def test_primary_preparation_precedes_integration_and_optional_stage_is_separate
     monkeypatch.setattr(four_stage_reduce, "run_four_stage_analysis", supplement)
     monkeypatch.setattr(counterfactual_probes, "run_counterfactual_analysis", optional)
     def publish(stage, **options):
+        from utils.experiments.figure_paths import publication_directory
+        from utils.experiments.theory.paper_contracts import PaperPaths
+        assert options["formats"] == ("pdf",)
+        assert not options["figure_directory"].is_relative_to(stage)
+        assert options["publication_directory"] == publication_directory(PaperPaths.build(tmp_path, **settings).output_directory)
         atomic_write_json(stage / "figure_manifest.json", {"files": {}, "figures": [], "complete": True})
     monkeypatch.setattr(paper_plotting, "render_paper", publish)
     output = paper_reduce.run_paper(tmp_path, **settings)

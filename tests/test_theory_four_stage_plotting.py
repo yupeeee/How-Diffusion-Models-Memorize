@@ -143,10 +143,12 @@ def test_retained_measurement_artists_have_no_small_free_annotations_and_readabl
         try:
             ax = fig.axes[0]
             assert not ax.get_title()
-            assert all(text.get_gid() == "curation-required-label" and text.get_fontsize() == 10 for text in ax.texts)
+            assert all(text.get_gid() == "curation-required-label" and
+                       text.get_fontsize() == (10 if text.get_text() == "Analytical reference only" else 12)
+                       for text in ax.texts)
             for legend in (artist for artist in ax.get_children() if isinstance(artist, Legend)):
-                assert all(label.get_fontsize() == 10 for label in legend.get_texts())
-                assert legend.get_title().get_fontsize() == 10
+                assert all(label.get_fontsize() == 12 for label in legend.get_texts())
+                assert legend.get_title().get_fontsize() == 12
         finally:
             plt.close(fig)
 
@@ -534,7 +536,7 @@ def test_prompt_probability_renderer_rejects_out_of_range_and_wrong_quantity(tmp
 
 def test_guidance_fit_sqrt_displays_saved_squared_loss_without_changing_fit_or_cache(tmp_path):
     from matplotlib.backends.backend_agg import FigureCanvasAgg
-    from utils.experiments.plotting import SCATTER_SIZE
+    from utils.experiments.plotting import SCATTER_ALPHA, SCATTER_SIZE
 
     data = inputs(tmp_path)
     stem = "corollary3_guidance_scale_vs_loss"
@@ -556,7 +558,7 @@ def test_guidance_fit_sqrt_displays_saved_squared_loss_without_changing_fit_or_c
         np.testing.assert_array_equal(scatter.get_offsets(), np.column_stack([np.sqrt(frame.x), frame.y]))
         np.testing.assert_array_equal(scatter.get_array(), frame.mean_terminal_sscd)
         assert np.all(scatter.get_sizes() == SCATTER_SIZE)
-        assert scatter.get_alpha() == .8
+        assert scatter.get_alpha() == SCATTER_ALPHA
         assert scatter.cmap.name == "viridis" and (scatter.norm.vmin, scatter.norm.vmax) == (0., 1.)
         assert ax.get_xscale() == ax.get_yscale() == "linear"
         assert ax.get_xlim()[0] == 0. and 3. < ax.get_xlim()[1] < 9.
@@ -702,3 +704,254 @@ def test_margin_draws_every_finite_saved_pair_as_circle_without_status_legend(tm
         assert frame.equals(before)
     finally:
         plt.close(fig)
+
+
+# The historical inventory above remains an explicit renderer reference. These
+# tests opt into the six selected publication routes without changing tables.
+def _styled_data(data):
+    from utils.experiments.theory.paper_registry import paper_registry
+    entries = dict(data[3])
+    entries.update({entry["stem"]: entry for entry in paper_registry()})
+    return (*data[:3], entries)
+
+
+def _assert_same_line_and_band_arrays(before, after):
+    assert len(before.lines) == len(after.lines)
+    for old, new in zip(before.lines, after.lines, strict=True):
+        np.testing.assert_array_equal(old.get_xdata(), new.get_xdata())
+        np.testing.assert_array_equal(old.get_ydata(), new.get_ydata())
+    assert len(before.collections) == len(after.collections)
+    for old, new in zip(before.collections, after.collections, strict=True):
+        assert len(old.get_paths()) == len(new.get_paths())
+        for old_path, new_path in zip(old.get_paths(), new.get_paths(), strict=True):
+            np.testing.assert_array_equal(old_path.vertices, new_path.vertices)
+    assert before.get_xscale() == after.get_xscale()
+    assert before.get_yscale() == after.get_yscale()
+    np.testing.assert_array_equal(before.get_xlim(), after.get_xlim())
+    np.testing.assert_array_equal(before.get_ylim(), after.get_ylim())
+
+
+def test_selected_reference_theme_preserves_every_curve_band_and_native_cutoff(tmp_path):
+    from utils.experiments.theory import paper_style as theme
+    data = inputs(tmp_path)
+    stem = "unconditional_reference_convergence"
+    before = data[2][stem].copy(deep=True)
+    old, old_audit = draw(data, stem)
+    styled, audit = draw(_styled_data(data), stem)
+    try:
+        ax = styled.axes[0]
+        _assert_same_line_and_band_arrays(old.axes[0], ax)
+        colors = [line.get_color() for line in ax.lines]
+        assert theme.ANALYTICAL_COLOR in colors and theme.LEARNED_COLOR in colors and theme.ERROR_COLOR in colors
+        reference_lines = [line for line in ax.lines if line.get_color() == theme.ANALYTICAL_COLOR]
+        assert {line.get_linestyle() for line in reference_lines} == {"-", ":"}
+        for color in (theme.LEARNED_COLOR, theme.ERROR_COLOR):
+            for line in ax.lines:
+                if line.get_color() == color:
+                    assert np.asarray(line.get_xdata()).min() >= audit["analytical_only_range"][1]
+        assert all(band.get_alpha() == theme.BAND_ALPHA for band in ax.collections)
+        note = next(text for text in ax.texts if text.get_text() == "Analytical reference only")
+        assert note.get_ha() == "left" and note.get_fontsize() == theme.ANNOTATION_FONT_SIZE
+        low, high = audit["analytical_only_range"]
+        assert low < note.get_position()[0] < np.sqrt(low * high)
+        assert len(styled.axes) == 1 and audit["band_coordinates_unchanged"]
+        assert data[2][stem].equals(before)
+        assert audit["horizontal_reference_value"] == old_audit["horizontal_reference_value"]
+    finally:
+        plt.close(old)
+        plt.close(styled)
+
+
+def test_selected_guidance_matches_sparse_palette_and_anchors_saved_g_legend(tmp_path):
+    from utils.experiments.theory import paper_style as theme
+    data = inputs(tmp_path)
+    stem = "corollary3_guidance_scale_vs_loss"
+    frame = data[2][stem].copy(deep=True)
+    frame["x"], frame["y"] = [0., 1., 4., 9.], [-8., 0., 5., 25.]
+    frame["mean_terminal_sscd"] = [-.1, .3, .8, 1.1]
+    frame["guidance_scale"] = 2.25
+    data[0]["scientific_config"]["guidance_scale"] = 2.25
+    metadata = deepcopy(data[1]["figures"][stem])
+    metadata["guidance_scale"] = 2.25
+    before = frame.copy(deep=True)
+    fig, audit = draw(_styled_data(data), stem, frame=frame, metadata=metadata)
+    try:
+        ax = fig.axes[0]
+        points = ax.collections[0]
+        np.testing.assert_array_equal(points.get_offsets(), np.column_stack([np.sqrt(frame.x), frame.y]))
+        np.testing.assert_array_equal(points.get_array(), frame.mean_terminal_sscd)
+        assert points.cmap.name == theme.SSCD_CMAP.name
+        assert (points.norm.vmin, points.norm.vmax) == (0., 1.)
+        assert np.all(points.get_sizes() == theme.SPARSE_SIZE) and points.get_alpha() == theme.SPARSE_ALPHA
+        assert not points.get_rasterized()
+        legend = ax.get_legend()
+        assert legend is not None and legend._ncols == 1 and legend._loc == 1
+        assert not legend.get_frame_on() and not ax.texts
+        assert [text.get_text() for text in legend.get_texts()] == [r"$g=2.25$"]
+        guide = next(line for line in ax.lines if line.get_label() == r"$g=2.25$")
+        assert len(legend.legend_handles) == 1
+        handle = legend.legend_handles[0]
+        assert handle.get_linestyle() == guide.get_linestyle() == "--"
+        np.testing.assert_allclose(to_rgba(handle.get_color()), to_rgba(guide.get_color()))
+        np.testing.assert_array_equal(guide.get_ydata(), [2.25, 2.25])
+        assert audit["legend_placement"] == "right edge below reference line"
+        assert audit["guidance_label_placement"] == "right edge below reference line with point offset"
+
+        def assert_mixed_transform_offset():
+            # Transform evaluation needs no canvas draw: x follows the axes'
+            # right edge, y follows the saved guidance in data coordinates.
+            baseline = ax.get_yaxis_transform().transform((1., 2.25))
+            anchor = legend.get_bbox_to_anchor().p0
+            np.testing.assert_allclose((anchor - baseline) * 72. / fig.dpi, [-4., -5.], atol=1e-10)
+
+        assert_mixed_transform_offset()
+        assert ax.get_ylim()[0] < -8. and ax.get_ylim()[1] > 25.
+        assert fig.axes[1].get_ylabel() == "SSCD" and audit["guidance_reference_value"] == 2.25
+        np.testing.assert_allclose(fig.axes[1].get_yticks(), np.linspace(0., 1., 6))
+        assert audit["out_of_color_range_pairs"] == 2 and frame.equals(before)
+        ax.set_xlim(0., 12.)
+        ax.set_ylim(-20., 100.)
+        assert_mixed_transform_offset()
+        np.testing.assert_array_equal(points.get_offsets(), np.column_stack([np.sqrt(frame.x), frame.y]))
+        assert frame.equals(before)
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("stem,expected_count", [("synchronization_bound", 4), ("terminal_bound_coverage", 6)])
+def test_selected_grouped_themes_preserve_all_arrays_and_two_column_semantic_legend(tmp_path, stem, expected_count):
+    from matplotlib.legend import Legend
+    from utils.experiments.theory import paper_style as theme
+    from utils.experiments.theory.paper_registry import GROUPS, GROUP_LABELS
+    from utils.experiments.theory.paper_notation import CHRONOLOGICAL_LABELS, TERMINAL_EXPRESSIONS, TERMINAL_LABELS
+    data = inputs(tmp_path)
+    frame = data[2][stem].copy(deep=True)
+    if stem == "terminal_bound_coverage":
+        # The conservative reference tail must remain in the shared display.
+        frame.loc[frame.distribution.eq("reference"), "value"] *= 100.
+    else:
+        frame.loc[frame.metric.eq("bound"), ["median", "q25", "q75"]] *= 100.
+    before = frame.copy(deep=True)
+    old, _ = draw(data, stem, frame=frame)
+    styled, audit = draw(_styled_data(data), stem, frame=frame)
+    try:
+        ax = styled.axes[0]
+        if stem == "terminal_bound_coverage":
+            _assert_same_line_and_band_arrays(old.axes[0], ax)
+            assert not ax.collections  # Saved CDFs have no confidence-band inputs.
+        else:
+            # Newly displayed saved IQRs can expand y limits but never change medians.
+            assert len(old.axes[0].lines) == len(ax.lines)
+            for old_line, new_line in zip(old.axes[0].lines, ax.lines, strict=True):
+                np.testing.assert_array_equal(old_line.get_xdata(), new_line.get_xdata())
+                np.testing.assert_array_equal(old_line.get_ydata(), new_line.get_ydata())
+            assert old.axes[0].get_xlim() == ax.get_xlim()
+            assert old.axes[0].get_yscale() == ax.get_yscale()
+            assert not old.axes[0].collections and len(ax.collections) == 4
+        assert len(ax.lines) == expected_count
+        assert all(line.get_linewidth() == theme.CURVE_WIDTH and line.get_alpha() == theme.CURVE_ALPHA for line in ax.lines)
+        width = expected_count // 2
+        for index, group in enumerate(GROUPS):
+            for line in ax.lines[index * width:(index + 1) * width]:
+                np.testing.assert_allclose(to_rgba(line.get_color()), to_rgba(theme.GROUP_COLORS[group]))
+        legends = [artist for artist in ax.get_children() if isinstance(artist, Legend)]
+        assert len(legends) == 1
+        legend = legends[0]
+        assert legend is ax.get_legend() and legend._ncols == 2
+        group_labels = [GROUP_LABELS[group] for group in GROUPS]
+        assert group_labels == [r"SSCD $> 0.75$", r"SSCD $\leq 0.75$"]
+        mathematical_key = ([TERMINAL_LABELS[name] for name in ("actual", "observable", "reference")]
+                            if stem == "terminal_bound_coverage" else
+                            [CHRONOLOGICAL_LABELS[metric] for metric in ("gap", "bound")])
+        rows_per_column = len(mathematical_key)
+        first_column = group_labels + [""] * (rows_per_column - len(group_labels))
+        labels = [text.get_text() for text in legend.get_texts()]
+        # Matplotlib fills each column from top to bottom: the blank terminal
+        # handle must remain after both groups, never amongst quantity labels.
+        assert labels == first_column + mathematical_key
+        assert labels[:rows_per_column] == first_column
+        assert labels[rows_per_column:] == mathematical_key
+        handles = legend.legend_handles
+        for index, group in enumerate(GROUPS):
+            np.testing.assert_allclose(to_rgba(handles[index].get_color()), to_rgba(theme.GROUP_COLORS[group]))
+        if rows_per_column > len(group_labels):
+            assert handles[len(group_labels)].get_alpha() == 0.
+        for handle in handles[rows_per_column:]:
+            np.testing.assert_allclose(to_rgba(handle.get_color()), to_rgba(theme.TEXT_COLOR))
+        anchor = ax.transAxes.inverted().transform(legend.get_bbox_to_anchor().p0)
+        assert anchor[1] > 1.  # The sole legend remains above the data axes.
+        if stem == "terminal_bound_coverage":
+            assert audit["legend_quantity_expressions"] == TERMINAL_EXPRESSIONS
+            assert audit["quantity_styles"]["reference"] == theme.LINE_STYLES["reference"]
+            assert ax.get_xlim()[1] >= frame.loc[np.isfinite(frame.value), "value"].max()
+        else:
+            assert audit["quantity_styles"] == {"gap": theme.LINE_STYLES["observed"], "bound": theme.LINE_STYLES["observable"]}
+            assert ax.get_ylim()[1] > frame.loc[frame.metric.isin(["gap", "bound"]), "q75"].max()
+        assert frame.equals(before) and audit["legend_placement"] == "outside top"
+        assert audit["legend_columns"] == "SSCD groups; manuscript quantities"
+    finally:
+        plt.close(old)
+        plt.close(styled)
+
+
+def test_selected_theme_does_not_change_later_historical_renderer_or_rcparams(tmp_path):
+    from utils.experiments.theory.paper_registry import GROUP_COLORS
+    data = inputs(tmp_path)
+    before = dict(plt.rcParams)
+    styled, _ = draw(_styled_data(data), "synchronization_bound")
+    legacy, _ = draw(data, "synchronization_bound")
+    try:
+        assert dict(plt.rcParams) == before
+        assert all(line.get_color() in GROUP_COLORS.values() for line in legacy.axes[0].lines)
+    finally:
+        plt.close(styled)
+        plt.close(legacy)
+
+
+
+def test_selected_synchronization_bands_use_exact_saved_quartiles_and_segments(tmp_path):
+    from utils.experiments.theory import paper_style as theme
+    from utils.experiments.theory.paper_registry import GROUPS
+    data = inputs(tmp_path)
+    stem = "synchronization_bound"
+    frame = data[2][stem].copy(deep=True)
+    frame["segment_id"] = np.where(frame.step_index < 2, "early", "last")
+    frame["q25"] = frame["median"] * .4
+    frame["q75"] = frame["median"] + 20. + frame["step_index"]
+    before = frame.copy(deep=True)
+    metadata = deepcopy(data[1]["figures"][stem])
+    metadata_before = deepcopy(metadata)
+    fig, audit = draw(_styled_data(data), stem, frame=frame, metadata=metadata)
+    legacy, _ = draw(data, stem, frame=frame, metadata=metadata)
+    try:
+        ax = fig.axes[0]
+        expected = []
+        for group in GROUPS:
+            for metric in ("gap", "bound"):
+                rows = frame.loc[frame.group.eq(group) & frame.metric.eq(metric)].sort_values("step_index")
+                expected.extend((group, part) for _, part in rows.groupby("segment_id", sort=False))
+        assert len(ax.collections) == len(ax.lines) == len(expected)
+        assert len(expected) == 8 and not legacy.axes[0].collections
+        assert audit["band_metrics"] == ["gap", "bound"]
+        assert audit["band_endpoints_recomputed"] is False
+        assert "not a confidence interval" in audit["distribution_band"]
+        for band, line, (group, rows) in zip(ax.collections, ax.lines, expected, strict=True):
+            assert band.get_alpha() == theme.BAND_ALPHA
+            assert band.get_zorder() == 1 < line.get_zorder()
+            np.testing.assert_allclose(band.get_facecolors()[0, :3], to_rgba(theme.GROUP_COLORS[group])[:3])
+            np.testing.assert_array_equal(line.get_xdata(), rows.step_index)
+            np.testing.assert_array_equal(line.get_ydata(), rows["median"])
+            assert len(band.get_paths()) == 1
+            vertices = band.get_paths()[0].vertices
+            np.testing.assert_array_equal(np.unique(vertices[:, 0]), np.sort(rows.step_index.to_numpy()))
+            for row in rows.itertuples():
+                ordinates = vertices[vertices[:, 0] == row.step_index, 1]
+                assert ordinates.min() == row.q25
+                assert ordinates.max() == row.q75
+        displayed = frame.loc[frame.metric.isin(["gap", "bound"])]
+        assert ax.get_ylim()[0] <= displayed.q25.min()
+        assert ax.get_ylim()[1] > displayed.q75.max()
+        assert frame.equals(before) and metadata == metadata_before
+    finally:
+        plt.close(fig)
+        plt.close(legacy)

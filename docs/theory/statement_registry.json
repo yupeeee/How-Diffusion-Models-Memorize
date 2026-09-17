@@ -74,15 +74,15 @@
     "mathematical_revision": {
       "version": "projected-gap-error-1",
       "reference_gap": "bar{Delta}_t=bar{x}_t(c)-bar{x}_t(empty)",
-      "branch_gap_error": "e_t^parallel(Delta)=u_t^T(Delta_t-bar{Delta}_t)=u_t^T(r_c-r_u); u_t=Delta_t/||Delta_t||, retaining the signed result",
-      "condition_margin": "M=||Delta||-e_t^parallel(Delta)-mathcal{V}",
-      "synchronization_bound": "S=e_t^parallel(Delta)+R*(1-p)",
-      "terminal_reference_bound": "B_ref=e_c+(g-1)*(e_t^parallel(Delta)+R*(1-p))",
+      "branch_gap_error": "mathcal{E}_t=u_t^T(Delta_t-bar{Delta}_t)=u_t^T(r_c-r_u); u_t=Delta_t/||Delta_t||, retaining the signed result",
+      "condition_margin": "M=||Delta||-mathcal{E}_t-mathcal{V}",
+      "synchronization_bound": "S=mathcal{E}_t+R*(1-p)",
+      "terminal_reference_bound": "B_ref=e_c+(g-1)*(mathcal{E}_t+R*(1-p))",
       "terminal_observable_bound": "B_obs=e_c+(g-1)*||Delta||",
       "scope": "Derived sharper sufficient condition and D/terminal bounds under the same endpoint qualifications, exact gap-projection identity/Cauchy, posterior concentration, endpoint and correction prerequisites. Q is descriptive; Q<=S does not follow. Individual errors and A14 reference-gap norms unchanged.",
       "variation": "mathcal{V}=[integral_0^1 <Delta/||Delta||,bar{x}_next(x_cf+s*g*kappa*Delta)-bar{x}_current> ds]_+",
       "variation_positive_part": "After the signed integral; never nodewise clipping, norm or absolute-projection substitution",
-      "zero_gap": "u=0, e^parallel=0 and mathcal{V}=0 computational extension when Delta is exactly zero; no unit direction",
+      "zero_gap": "u=0, mathcal{E}_t=0 and mathcal{V}=0 computational extension when Delta is exactly zero; no unit direction",
       "branch_gap_error_definition": "signed_projected_branch_gap_reference_error",
       "branch_gap_identity": "D=E_parallel+u^T bar{Delta}; Cauchy gives D<=E_parallel+||bar{Delta}||<=E_parallel+R(1-p)"
     },
@@ -91,7 +91,7 @@
     "per_timestep_figure_slots": "None; per-timestep and diagnostic image exports are disabled",
     "measurement_figure_count": 20,
     "scatter_alpha": 0.8,
-    "posterior_feedback_condition_margin_alpha": 0.01
+    "posterior_feedback_condition_margin_alpha": 0.1
   },
   "statements": [
     {
@@ -358,7 +358,7 @@
       "historical_pdf_statement": "||Delta_t||>=e_t(c)+e_t^K(empty)+V_t^K implies p_next^K(x_next)>=p_next^K(x_cf), with strict implication for the strict premise.",
       "statement_scope": "Historical PDF statement retained for attribution; active variation explicitly revises the Equation-15 norm integral and keeps the learned-minus-reference branch-gap error.",
       "measurement_contract": "projected-gap-error-1",
-      "active_evaluated_quantities": "M=||Delta||-e_t^parallel(Delta)-mathcal{V}, mathcal{V}=[W]_+, W=integral signed unit-gap projection of next reference minus current reference. H remains the matched-endpoint log-probability gain."
+      "active_evaluated_quantities": "M=||Delta||-mathcal{E}_t-mathcal{V}, mathcal{V}=[W]_+, W=integral signed unit-gap projection of next reference minus current reference. H remains the matched-endpoint log-probability gain."
     },
     {
       "result_number": 6,
@@ -374,7 +374,7 @@
       "proof_equations": [
         "77-80"
       ],
-      "interpretation": "Learned gap D has the refined S bound. Q remains separately descriptive because shared branch errors cancel in e_t^parallel(Delta); no Q<=S assertion.",
+      "interpretation": "Learned gap D has the refined S bound. Q remains separately descriptive because shared branch errors cancel in mathcal{E}_t; no Q<=S assertion.",
       "statistical_unit": "Retained pair/seed identities; common prompt-balanced weights for compared populations; pair-only bootstrap where specified",
       "supporting_figures": [
         "branch_target_errors",
@@ -426,7 +426,7 @@
       "historical_pdf_statement": "||Delta_t||<=e_t(c)+e_t^K(empty)+R_K(1-p_t^K).",
       "statement_scope": "Unchanged PDF statement retained for attribution; active quantities use the signed projected gap error and the exact D=E_parallel+u^T bar{Delta} identity followed by Cauchy/posterior concentration, under the same recorded prerequisites.",
       "measurement_contract": "projected-gap-error-1",
-      "active_evaluated_quantities": "S=e_t^parallel(Delta)+R*(1-p); D=||Delta||; Q=max(target branch errors) separately descriptive; each raw norm normalized once for display."
+      "active_evaluated_quantities": "S=mathcal{E}_t+R*(1-p); D=||Delta||; Q=max(target branch errors) separately descriptive; each raw norm normalized once for display."
     },
     {
       "result_number": 7,
@@ -460,14 +460,14 @@
       "finite_terminal_update_extension": {
         "new_derivation_not_existing_theorem": true,
         "predictor_defect": "A*z+(kappa-1)*m_g, plus independently supplied additive innovation or declared Gaussian norm bound",
-        "clean_bounds": "||m_g-x_star||<=B_obs=e_c+(g-1)||Delta||<=B_ref=e_c+(g-1)*(e_t^parallel(Delta)+R*(1-p))",
+        "clean_bounds": "||m_g-x_star||<=B_obs=e_c+(g-1)||Delta||<=B_ref=e_c+(g-1)*(mathcal{E}_t+R*(1-p))",
         "corrected_bounds": "E_end<=B_obs+delta_sched<=B_ref+delta_sched under the recorded correction prerequisites",
         "gaussian_scope": "eta=.05 per scientific run; eta_i=eta/m; q_i=sqrt(chi2.isf(eta_i,d)); simultaneous union bound without trajectory independence",
         "observed_endpoint_policy": "Observed endpoint used only as response and separate QA, never predictor-side correction",
         "manuscript_extension_required": true,
         "looseness_identity": "B_ref-B_obs=(g-1)*(S-D)=(g-1)*(radius_slack+slack_projection_alignment); shared scheduler correction cancels",
         "slack_radius": "R_K*(1-p_K)-||bar_x_K-x_star||",
-        "slack_projection_alignment": "e_t^parallel(Delta)+||bar{Delta}||-D=||bar{Delta}||-u^T bar{Delta}; nonnegative by Cauchy, although e^parallel may be negative"
+        "slack_projection_alignment": "mathcal{E}_t+||bar{Delta}||-D=||bar{Delta}||-u^T bar{Delta}; nonnegative by Cauchy, although mathcal{E}_t may be negative"
       },
       "preceding_main_figure": {
         "id": "theorem7_final_reproduction",
@@ -496,7 +496,7 @@
         "group_sscd_exclusion_table": "audit_data/terminal_grouped_sscd_exclusions.csv",
         "pooled_cdf_audit_table": "audit_data/terminal_pooled_cdf.csv",
         "pooled_metadata_audit_table": "audit_data/terminal_pooled_cdf_metadata.csv",
-        "legend": "Gold/purple group colors; solid/dashed/dash-dot actual/observable/reference; outside top, manuscript expressions; corrections and zero/infinite masses in captions"
+        "legend": "Sampled coral/indigo group colors; solid/dashed/long dash-dot actual/observable/reference; one two-column legend above with SSCD groups on the left and current mathematical curve expressions on the right; corrections and zero/infinite masses in captions"
       },
       "measurement_role": "main_experiment",
       "author_supplied_source_equation_labels": [
@@ -513,7 +513,7 @@
       "historical_pdf_statement": "||x_0-x_star||<=g e_1(c)+(g-1)[e_1^K(empty)+R_K(1-p_1^K)] under the clean final-update prerequisite.",
       "statement_scope": "Unchanged PDF statement retained for attribution; active quantities use the signed projected gap error and the exact D=E_parallel+u^T bar{Delta} identity followed by Cauchy/posterior concentration, under the same recorded prerequisites.",
       "measurement_contract": "projected-gap-error-1",
-      "active_evaluated_quantities": "B_ref=e_c+(g-1)*(e_t^parallel(Delta)+R*(1-p)); B_obs=e_c+(g-1)*||Delta|| unchanged; same independent correction for both."
+      "active_evaluated_quantities": "B_ref=e_c+(g-1)*(mathcal{E}_t+R*(1-p)); B_obs=e_c+(g-1)*||Delta|| unchanged; same independent correction for both."
     }
   ],
   "default_figure_ids": [
@@ -739,12 +739,12 @@
     "idempotence": "No duplicate active pairs, resurrected motion renders or accumulating retirement archives",
     "scientific_artifacts": "Unchanged; plot-data CSVs and hashes preserved"
   },
-  "plot_recipe_version": "four-stage-manuscript-notation-16",
+  "plot_recipe_version": "four-stage-manuscript-notation-17",
   "display_notation": {
     "source": "utils/experiments/theory/paper_notation.py",
     "documentation": "docs/theory/figure_notation.md",
     "manuscript": "revised.pdf Appendix A, Equations 2, 7-9, 12-15, 66-69",
-    "scope": "Existing bold manuscript notation and signed projected-error formulas remain. Six selected figures publish under figures/; scatter alpha=.8 and pooled margin alpha=.01. No appendix, per-step or diagnostic exports."
+    "scope": "Existing bold manuscript notation and signed projected-error formulas remain. Six selected figures publish under figures/; scatter alpha=.8 and pooled margin alpha=.1. No appendix, per-step or diagnostic exports."
   },
   "retired_figure_contracts": {
     "initial_unconditional_mean_concentration_zero": {
@@ -1225,7 +1225,7 @@
       "source_table": "plot_data/posterior_feedback_condition_margin.csv",
       "renderer": "scatter",
       "formula_version": "projected-gap-error-1",
-      "x": "[||Delta_t||-e_t^parallel(Delta)-mathcal{V}_t]/sqrt(d)",
+      "x": "[||Delta_t||-mathcal{E}_t-mathcal{V}_t]/sqrt(d)",
       "y": "saved matched-endpoint log-posterior-probability gain",
       "display_policy": "finite_saved_values",
       "required_columns": [
@@ -1245,16 +1245,16 @@
       "audits": "Numerical sign, uncertainty, endpoint-transfer, implication and QA classifications remain unchanged in retained scalar audits.",
       "migration": "Presentation only; --plot reuses compatible compact inputs without interval work, model calls or scalar reduction.",
       "marker_alpha": {
-        "combined": 0.01,
+        "combined": 0.1,
         "scope": "Presentation only; values, finite-row inclusion and SSCD colors unchanged"
       },
-      "alpha_audit": "display_audit records actual scatter_alpha=.01; shared scatter alpha=.8.",
+      "alpha_audit": "Selected dense-layer scatter_alpha=.1; selected sparse-scatter alpha=.8; no value/status-dependent opacity.",
       "publication_scope": "selected",
       "outputs": [
         "figures/posterior_feedback_condition_margin.png",
         "figures/posterior_feedback_condition_margin.pdf"
       ],
-      "pooled_scatter_alpha": 0.01
+      "pooled_scatter_alpha": 0.1
     }
   },
   "unselected_measurement_stems": [
@@ -1273,5 +1273,33 @@
     "reference_branch_gap_per_prompt",
     "reference_variation_per_prompt"
   ],
-  "per_timestep_retirement": "Known exact prior-manifest appendix/posterior_feedback_condition_margin/step_NNN.png/pdf paths only, with regular-file and previous-hash ownership checks; no glob purge."
+  "per_timestep_retirement": "Known exact prior-manifest appendix/posterior_feedback_condition_margin/step_NNN.png/pdf paths only, with regular-file and previous-hash ownership checks; no glob purge.",
+  "appearance": {
+    "version": "six-theory-visual-6",
+    "scope": "Selected six figures/ output families only; separate from scientific schemas and fingerprints",
+    "helper": "utils/experiments/theory/paper_style.py",
+    "sscd_colormap": "magma sampled over [0.20,0.70] with fixed normalization [0,1]",
+    "group_colors": "Higher/lower SSCD use sampled coral/indigo endpoints",
+    "sparse_marker_area": 24,
+    "sparse_alpha": 0.8,
+    "dense_alpha": 0.1,
+    "dense_pdf_dpi": 150,
+    "export_dpi": 150,
+    "colorbar_rendering": "Opaque seamless raster strip; vector label, ticks and outline",
+    "pdf_only_option": "theory_validation.sh --bundle PATH --plot --pdf-only; existing PNGs preserved",
+    "font_sizes": {
+      "axis_labels": 18,
+      "ticks": 15,
+      "legends": 12,
+      "analytical_only_annotation": 10
+    },
+    "final_manuscript_size_checked": false,
+    "grayscale_and_color_vision_preview_checked": false,
+    "scientific_values_changed": false,
+    "terminal_legend": "Two columns above the axes: SSCD groups left, current mathematical curve expressions right",
+    "synchronization_legend": "Two columns above the axes: SSCD > 0.75 and SSCD <= 0.75 left, mathematical gap and bound labels right",
+    "guidance_annotation": "One-entry legend with matching dashed handle; configured g; four points inside the right edge and five points below the reference line",
+    "synchronization_bands": "Saved weighted q25/q75 per group, quantity and timestep; descriptive spread, not confidence intervals; no endpoint recomputation",
+    "terminal_bands": "None; exact saved CDFs already show distributions and no confidence-interval endpoints are saved"
+  }
 }

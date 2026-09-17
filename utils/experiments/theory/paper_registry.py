@@ -15,23 +15,23 @@ PLOT_RECIPE_VERSION = NOTATION_VERSION
 
 BRANCH_GAP_ERROR_CONTRACT = "projected-gap-error-1"
 _BRANCH_GAP_ERROR_SCOPE = (
-    "Requested signed projected-gap-error refinement: e_t^parallel(Delta)=u_t^T(Delta_t-bar{Delta}_t), "
+    "Requested signed projected-gap-error refinement: mathcal{E}_t=u_t^T(Delta_t-bar{Delta}_t), "
     "u_t=Delta_t/||Delta_t|| and bar{Delta}_t=bar{x}_t(c)-bar{x}_t(empty). "
     "The actual vector projection may be negative; it is not a norm, absolute value, or clipped scalar. "
-    "The exact identity ||Delta||=e^parallel+u^T bar{Delta}, Cauchy and posterior concentration "
+    "The exact identity ||Delta||=mathcal{E}_t+u^T bar{Delta}, Cauchy and posterior concentration "
     "give D<=S and the qualified terminal bound. The directional condition retains matched-endpoint "
     "and applicability prerequisites. These are derived refinements requested by the author, not unchanged PDF expressions. "
     "mathcal{V}=[integral signed unit-gap projection of next reference minus current reference]_+ "
     "retains its positive part after integration. Exactly zero Delta uses the computational extension "
-    "u=0, e^parallel=0 and mathcal{V}=0 without claiming a unit direction. "
+    "u=0, mathcal{E}_t=0 and mathcal{V}=0 without claiming a unit direction. "
     "Q<=S is not asserted; common-mode errors can make Q large."
 )
 _BRANCH_GAP_ERROR_FORMULAS = {
-    "posterior_feedback_over_time": "Resolved gain H>0 and refined margin M=||Delta||-e_t^parallel(Delta)-mathcal{V}>0 on the same structural population and prompt weights; unresolved mass remains explicit. The sufficient implication retains the matched-endpoint and applicability qualifications.",
-    "posterior_feedback_condition_margin": "x=[||Delta||-e_t^parallel(Delta)-mathcal{V}]/sqrt(d), y=saved matched-endpoint log-probability gain. e_t^parallel(Delta)=u_t^T(Delta-bar{Delta}) is formed from vectors and retains its sign. All finite saved x/y pairs are ordinary dots in the combined and per-timestep views, without sign-based filtering or marker classes. Numerical signs and refined sufficient-condition/endpoint-transfer checks remain separate audit data.",
-    "synchronization_bound": "D=||Delta||/sqrt(d) and S=[e_t^parallel(Delta)+R(1-p)]/sqrt(d) are formed per sample before shared-population aggregation. The refined Lemma 6 bound D<=S follows from the exact gap-projection identity, Cauchy and posterior concentration.",
-    "final_reproduction_bound": "x=[B_ref+delta_sched]/sqrt(d), y=E_end/sqrt(d), with B_ref=e_c+(g-1)*(e_t^parallel(Delta)+R(1-p)). The refined gap bound implies B_obs<=B_ref for g>1; endpoint and independent correction qualifications remain unchanged.",
-    "terminal_bound_coverage": "Common-population prompt-balanced ECDFs of E_end/sqrt(d), [B_obs+delta_sched]/sqrt(d), and [B_ref+delta_sched]/sqrt(d), separately by same-seed terminal SSCD. B_obs=e_c+(g-1)||Delta||; B_ref=e_c+(g-1)*(e_t^parallel(Delta)+R(1-p)). The refined ordering uses the same applicability and independent-correction scope; curve ordering does not replace row-level checks.",
+    "posterior_feedback_over_time": "Resolved gain H>0 and refined margin M=||Delta||-mathcal{E}_t-mathcal{V}>0 on the same structural population and prompt weights; unresolved mass remains explicit. The sufficient implication retains the matched-endpoint and applicability qualifications.",
+    "posterior_feedback_condition_margin": "x=[||Delta||-mathcal{E}_t-mathcal{V}]/sqrt(d), y=saved matched-endpoint log-probability gain. mathcal{E}_t=u_t^T(Delta-bar{Delta}) is formed from vectors and retains its sign. All finite saved x/y pairs are ordinary dots in the combined and per-timestep views, without sign-based filtering or marker classes. Numerical signs and refined sufficient-condition/endpoint-transfer checks remain separate audit data.",
+    "synchronization_bound": "D=||Delta||/sqrt(d) and S=[mathcal{E}_t+R(1-p)]/sqrt(d) are formed per sample before shared-population aggregation. The refined Lemma 6 bound D<=S follows from the exact gap-projection identity, Cauchy and posterior concentration.",
+    "final_reproduction_bound": "x=[B_ref+delta_sched]/sqrt(d), y=E_end/sqrt(d), with B_ref=e_c+(g-1)*(mathcal{E}_t+R(1-p)). The refined gap bound implies B_obs<=B_ref for g>1; endpoint and independent correction qualifications remain unchanged.",
+    "terminal_bound_coverage": "Common-population prompt-balanced ECDFs of E_end/sqrt(d), [B_obs+delta_sched]/sqrt(d), and [B_ref+delta_sched]/sqrt(d), separately by same-seed terminal SSCD. B_obs=e_c+(g-1)||Delta||; B_ref=e_c+(g-1)*(mathcal{E}_t+R(1-p)). The refined ordering uses the same applicability and independent-correction scope; curve ordering does not replace row-level checks.",
 }
 
 _BRANCH_GAP_ERROR_ALIASES = {
@@ -60,9 +60,9 @@ def _apply_branch_gap_error_contract(entry):
         source = "final_reproduction_bound"
     formula = _BRANCH_GAP_ERROR_FORMULAS[source]
     if entry["stem"] == "posterior_feedback_coverage_audit":
-        formula = "Revised M0=M1=D-e_t^parallel(Delta)-[W]_+, M2=D+S_projection-V_norm, M3=D+S_projection-V_abs, A=D+S_projection-W. With E_parallel=-S_projection, M2<=M3<=M0=M1<=A; the projection remains signed. W is the signed projected integral. Resolved/estimated strict-positive coverage uses one shared structural population; endpoint/application qualifications remain explicit."
+        formula = "Revised M0=M1=D-mathcal{E}_t-[W]_+, M2=D+S_projection-V_norm, M3=D+S_projection-V_abs, A=D+S_projection-W. With E_parallel=-S_projection, M2<=M3<=M0=M1<=A; the projection remains signed. W is the signed projected integral. Resolved/estimated strict-positive coverage uses one shared structural population; endpoint/application qualifications remain explicit."
     elif entry["stem"] == "terminal_bound_tightness":
-        formula = "B_obs=[e_c+(g-1)||Delta||]/sqrt(d); B_ref=[e_c+(g-1)(e_t^parallel(Delta)+R(1-p))]/sqrt(d). Ratios divide each by the observed endpoint RMSE only when nonzero; zero-error statuses remain explicit."
+        formula = "B_obs=[e_c+(g-1)||Delta||]/sqrt(d); B_ref=[e_c+(g-1)(mathcal{E}_t+R(1-p))]/sqrt(d). Ratios divide each by the observed endpoint RMSE only when nonzero; zero-error statuses remain explicit."
     entry.update(formula=formula, interpretation=formula + " " + _BRANCH_GAP_ERROR_SCOPE,
                  formula_version=BRANCH_GAP_ERROR_CONTRACT, measurement_contract=BRANCH_GAP_ERROR_CONTRACT,
                  direct_statement=False, evidence_classification="Derived signed projected-gap-error refinement",
@@ -72,15 +72,15 @@ def _apply_branch_gap_error_contract(entry):
                  presentation_note=_BRANCH_GAP_ERROR_SCOPE,
                  semantic_question="How does the refined branch-gap-error comparison relate to the saved measured outcome?")
     if entry["stem"] in {"theorem7_uncorrected_bound_audit", "theorem7_final_reproduction"} and entry["kind"] == "scatter":
-        entry["formula"] = "x=[e_1(c)+(g-1)(e_1^parallel(Delta)+R(1-p_1))]/sqrt(d), y=actual saved endpoint error/sqrt(d), under the original verified clean-update prerequisite; no finite-step correction is silently inserted."
+        entry["formula"] = "x=[e_1(c)+(g-1)(mathcal{E}_1+R(1-p_1))]/sqrt(d), y=actual saved endpoint error/sqrt(d), under the original verified clean-update prerequisite; no finite-step correction is silently inserted."
         entry["interpretation"] = entry["formula"] + " " + _BRANCH_GAP_ERROR_SCOPE
     if source in {"posterior_feedback_over_time", "posterior_feedback_condition_margin"}:
-        entry["normalization"] = ("Saved margin [||Delta||-e_t^parallel(Delta)-mathcal{V}]/sqrt(d) and matched log-probability gain, or weighted fractions of their assessed signs. mathcal{V} takes its positive part after signed unit-gap projection integration; dimensional normalization is applied once.")
+        entry["normalization"] = ("Saved margin [||Delta||-mathcal{E}_t-mathcal{V}]/sqrt(d) and matched log-probability gain, or weighted fractions of their assessed signs. mathcal{V} takes its positive part after signed unit-gap projection integration; dimensional normalization is applied once.")
     entry["reference"] = "Equality of compared quantities"
     if entry["stem"] in _BRANCH_GAP_ERROR_FORMULAS or source == "posterior_feedback_condition_margin":
         entry["axes"] = copy.deepcopy(PAPER_AXES.get(source, entry["axes"]))
     elif source == "synchronization_bound" and entry["kind"] == "scatter":
-        entry["axes"] = {"x": r"$[e_t^{\parallel}(\boldsymbol{\Delta})+R(1-p_t)]/\sqrt{d}$",
+        entry["axes"] = {"x": r"$[\mathcal{E}_t+R(1-p_t)]/\sqrt{d}$",
                          "y": r"$\|\boldsymbol{\Delta}_t\|/\sqrt{d}$"}
     elif source == "final_reproduction_bound" and entry["kind"] == "scatter":
         entry["axes"] = copy.deepcopy(PAPER_AXES["final_reproduction_bound"])
@@ -1411,10 +1411,10 @@ def paper_registry(diagnostics=False, *, counterfactual=False):
         entry.pop("per_timestep_exports", None)
         entry.pop("pooled_scatter_alpha_scale", None)
         if stem == "posterior_feedback_condition_margin":
-            entry["pooled_scatter_alpha"] = 0.01
+            entry["pooled_scatter_alpha"] = 0.1
             entry["presentation_note"] = (
                 "One pooled plot contains every finite saved margin/gain pair across all saved timesteps, "
-                "with circular points, terminal-SSCD color where available, and opacity 0.01. "
+                "with circular points, terminal-SSCD color where available, and fixed opacity 0.1. "
                 "There are no status marker classes or per-timestep exports. Numerical classifications, "
                 "zero guides and endpoint qualifications remain recorded. " + _BRANCH_GAP_ERROR_SCOPE)
             entry["formula"] = entry["formula"].replace("combined and per-timestep views", "pooled view")
@@ -1424,7 +1424,15 @@ def paper_registry(diagnostics=False, *, counterfactual=False):
                 "Monte Carlo intervals, initial SNR and draw/seed counts retain their saved definitions. "
                 "Color is mean terminal SSCD; the selected-mean comparison is reported by unconditional_reference_convergence.")
         elif stem == "terminal_bound_coverage":
-            entry["presentation_note"] = _PRESENTATION_NOTES[stem].replace("; see paired comparisons A8 and A9", "") + " " + _BRANCH_GAP_ERROR_SCOPE
+            entry["presentation_note"] = _PRESENTATION_NOTES[stem].replace("; see paired comparisons A8 and A9", "").replace("Gold/purple", "Coral/indigo") + " " + _BRANCH_GAP_ERROR_SCOPE
+        elif stem == "synchronization_bound":
+            entry["display_band_definition"] = (
+                "Saved weighted 25th–75th percentiles for the branch gap and Lemma 6 right-hand side "
+                "within each SSCD group and timestep; descriptive spread, not a confidence interval. "
+                "Saved endpoints and segment boundaries are used without recomputation.")
+            entry["presentation_note"] += (
+                " Each displayed median has its saved interquartile band. The vertical range includes "
+                "these endpoints under the existing full-display-range policy.")
         elif stem == "corollary3_guidance_scale_vs_loss":
             entry["presentation_note"] = _PRESENTATION_NOTES[stem].replace("A15 plots", "The figure plots")
         entries.append(entry)

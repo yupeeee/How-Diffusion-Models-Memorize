@@ -660,15 +660,19 @@ def test_root_saved_baseline_alias_never_runs_baseline_inference(tmp_path):
 def test_normal_cli_runs_paper_and_plot_reuses_compact_inputs(tmp_path, monkeypatch):
     from scripts import theory_validation
     from tests.test_theory_paper_plotting import compact_fixture
-    from utils.experiments.theory.paper_contracts import render_saved_paper
+    from utils.experiments.theory.paper_contracts import PaperPaths, render_saved_paper
+    from utils.experiments.figure_paths import publication_directory
     import types
 
     paper = compact_fixture(tmp_path / "paper")
+    science = json.loads((paper / "run_config.json").read_text())["scientific_config"]
+    destination = publication_directory(PaperPaths.build(tmp_path, **science).output_directory)
+    monkeypatch.setattr(theory_validation, "PROJECT_ROOT", tmp_path)
     called = []
 
     def run_paper(root, **kwargs):
         called.append(kwargs)
-        render_saved_paper(paper)
+        render_saved_paper(paper, figure_directory=destination)
         return paper
 
     monkeypatch.setitem(
@@ -678,15 +682,17 @@ def test_normal_cli_runs_paper_and_plot_reuses_compact_inputs(tmp_path, monkeypa
     )
     before = _paper_numerical_snapshot(paper)
     assert theory_validation.main(["--N", "2"]) == 0
-    pngs = {p.relative_to(paper).as_posix(): _hash(p) for p in paper.rglob("*.png")}
-    assert pngs
+    pdfs = {p.name: _hash(p) for p in destination.glob("*.pdf")}
+    assert len(pdfs) == 6 and not list(destination.glob("*.png"))
+    assert not list(paper.rglob("*.pdf")) and not list(paper.rglob("*.png"))
     assert called[0]["recompute"] is False
     assert called[0]["device"] == "auto"
     assert theory_validation.main(["--bundle", str(paper), "--plot"]) == 0
     assert before == _paper_numerical_snapshot(paper)
-    assert pngs == {
-        p.relative_to(paper).as_posix(): _hash(p) for p in paper.rglob("*.png")
-    }
+    # PDF creation metadata may differ between renders; scientific inputs and
+    # the exact publication inventory are the stable contracts.
+    assert set(pdfs) == {p.name for p in destination.glob("*.pdf")}
+    assert not list(paper.rglob("*.pdf")) and not list(paper.rglob("*.png"))
 
 
 @pytest.fixture
@@ -1206,3 +1212,133 @@ def test_plot_skips_cuda_preflight(tmp_path):
     result, calls = _run_all_stub(tmp_path, ["--plot"], CUDA_PREFLIGHT_EXIT_CODE="1")
     assert result.returncode == 0, result.stderr
     assert calls and all("--plot" in call or "--validate-only" in call for call in calls)
+
+
+def test_pdf_only_plot_forwards_format_without_changing_saved_science(saved_initial_mean_cli, monkeypatch):
+    from utils.experiments.theory import paper_contracts
+    case = saved_initial_mean_cli
+    before = (case.paper / "run_config.json").read_bytes()
+    exports = []
+    monkeypatch.setattr(paper_contracts, "render_saved_paper", lambda bundle, **options: exports.append((bundle, options)))
+    assert case.main(["--plot", "--pdf-only", "--bundle", str(case.paper)]) == 0
+    assert [name for name, _ in case.calls] == ["validate"]
+    from utils.experiments.figure_paths import publication_directory
+    assert exports == [(case.paper, {"expected_config": case.science,
+                                    "diagnostics": False, "formats": ("pdf",),
+                                    "figure_directory": publication_directory(case.paper)})]
+    assert (case.paper / "run_config.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", [[], ["--validate-only"], ["--recompute-experiments"], ["--refine-numerics"]])
+def test_pdf_only_requires_plot_mode(mode, capsys):
+    from scripts import theory_validation
+    with pytest.raises(SystemExit) as error:
+        theory_validation.main([*mode, "--pdf-only"])
+    assert error.value.code == 2
+    assert "--pdf-only requires --plot" in capsys.readouterr().err
+
+
+@pytest.fixture
+def cached_proximity_preflight(tmp_path, monkeypatch):
+    """Saved CSV validation remains real; isolate the cached-image helper boundary."""
+    from types import SimpleNamespace
+    from scripts import theory_validation
+    from utils.data import selection as selection_module
+    from utils.experiments import proximity, cache
+    from utils.experiments.plotting import EXPERIMENT_SPEARMAN_COLUMN
+
+    config = {"model_name": "sdv1", "scheduler_name": "ddim", "guidance_scale": 7.5,
+              "num_inference_steps": 50, "num_seeds": 2}
+    frame = pd.DataFrame([
+        {"original_index": index, "seed": seed, "include_prompt": include,
+         "l2_norm": float(seed + 1), "sscd": .8 - .2 * seed,
+         "observation_status": "complete", "prompt_spearman": -1.}
+        for index, include in (("0001", True), ("0002", False))
+        for seed in (0, 1)
+    ])
+    selection = SimpleNamespace(frame=frame)
+    experiment = frame.assign(**{EXPERIMENT_SPEARMAN_COLUMN: -1.})
+    validation_calls = []
+    monkeypatch.setattr(selection_module, "load_target_pair_selection", lambda *args, **kwargs: selection)
+    monkeypatch.setattr(proximity, "_load_saved_analysis_configuration", lambda path: {"saved": True})
+    monkeypatch.setattr(proximity, "_validate_saved_analysis_configuration",
+                        lambda *args, **kwargs: validation_calls.append(("configuration", kwargs)))
+    monkeypatch.setattr(proximity, "_load_saved_analysis", lambda path: experiment.copy())
+    monkeypatch.setattr(proximity, "_validate_saved_analysis",
+                        lambda *args, **kwargs: validation_calls.append(("analysis", kwargs)))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Preflight must delegate cached-image validation without loading models or tensors")
+    monkeypatch.setattr(cache, "require_generation_run", forbidden)
+    monkeypatch.setattr(cache, "validate_generation_record", forbidden)
+    # These names are imported aliases in proximity; the example helper is
+    # replaced below so no unrelated generation cache is needed by this fixture.
+    monkeypatch.setattr(proximity, "require_generation_run", forbidden)
+    monkeypatch.setattr(proximity, "validate_generation_record", forbidden)
+    calls = []
+    def check_examples(paths, *, table_path, num_seeds, validate_only=False):
+        assert validate_only is True
+        calls.append((paths, Path(table_path), num_seeds))
+    monkeypatch.setattr(proximity, "_write_examples", check_examples)
+    return SimpleNamespace(project=tmp_path, config=config, calls=calls,
+                           validation_calls=validation_calls, main=theory_validation.validate_saved_proximity,
+                           proximity=proximity, frame=frame, experiment=experiment)
+
+
+def test_saved_proximity_preflight_validates_cached_examples_for_both_seed_roles(cached_proximity_preflight):
+    from utils.data.selection import target_pair_selection_directory
+    from utils.experiments.cache import generation_log_relative_path
+    case = cached_proximity_preflight
+    before_reference, before_experiment = case.frame.copy(deep=True), case.experiment.copy(deep=True)
+
+    case.main(case.project, case.config)
+
+    assert [kind for kind, _kwargs in case.validation_calls] == ["configuration", "analysis"]
+    assert [paths.output_directory.name for paths, _table, _count in case.calls] == [
+        "reference_S2_N2", "experiment_S0_N2"]
+    reference, experiment = case.calls
+    assert reference[0].generation_run == case.project / generation_log_relative_path(**case.config, seed_start=2)
+    assert experiment[0].generation_run == case.project / generation_log_relative_path(**case.config, seed_start=0)
+    assert reference[1] == target_pair_selection_directory(case.project, **case.config, selection_strategy="gmm") / "selection.csv"
+    assert experiment[1] == experiment[0].output_directory / "proximity.csv"
+    assert reference[2] == experiment[2] == case.config["num_seeds"]
+    pd.testing.assert_frame_equal(case.frame, before_reference)
+    pd.testing.assert_frame_equal(case.experiment, before_experiment)
+    assert not list(case.project.rglob("*"))
+
+
+@pytest.mark.parametrize("missing_role", ["reference", "experiment"])
+def test_saved_proximity_preflight_stops_on_missing_cached_example(cached_proximity_preflight, monkeypatch, missing_role):
+    case = cached_proximity_preflight
+    attempted = []
+    def missing_example(paths, *, table_path, num_seeds, validate_only=False):
+        assert validate_only and num_seeds == 2
+        role = paths.output_directory.name.split("_", 1)[0]
+        attempted.append(role)
+        if role == missing_role:
+            raise case.proximity.ProximityError("cached example image is missing")
+    monkeypatch.setattr(case.proximity, "_write_examples", missing_example)
+
+    with pytest.raises(case.proximity.ProximityError, match="cached example image is missing"):
+        case.main(case.project, case.config)
+
+    assert attempted == (["reference"] if missing_role == "reference" else ["reference", "experiment"])
+    assert not list(case.project.rglob("*"))
+
+
+def test_cli_proximity_preflight_reports_missing_examples_before_publication(saved_initial_mean_cli, monkeypatch, capsys):
+    from scripts import theory_validation
+    from utils.experiments.proximity import ProximityError
+    case = saved_initial_mean_cli
+    before = (case.paper / "run_config.json").read_bytes()
+    def missing_examples(*args, **kwargs):
+        raise ProximityError("cached example target PNG is missing")
+    monkeypatch.setattr(theory_validation, "validate_saved_proximity", missing_examples)
+
+    assert case.main(["--validate-only", "--validate-proximity"]) == 1
+
+    assert [name for name, _options in case.calls] == ["validate"]
+    error = capsys.readouterr().err
+    assert "Saved proximity preflight failed" in error
+    assert "cached example target PNG is missing" in error
+    assert "Run the normal pipeline" in error
+    assert (case.paper / "run_config.json").read_bytes() == before

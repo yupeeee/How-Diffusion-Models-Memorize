@@ -1,8 +1,8 @@
 # How Diffusion Models Memorize
 
-The active contract `projected-gap-error-1` uses the signed error $e_t^{\parallel}(\boldsymbol{\Delta})=\mathbf{u}_t^\top(\boldsymbol{\Delta}_t-\bar{\boldsymbol{\Delta}}_t)$, where $\mathbf{u}_t=\boldsymbol{\Delta}_t/\|\boldsymbol{\Delta}_t\|$ is computed from the actual learned gap. It may be negative and is never replaced by a norm, absolute value or clipped scalar. The margin is $\|\boldsymbol{\Delta}_t\|-e_t^{\parallel}(\boldsymbol{\Delta})-\mathcal{V}_t$. The variation remains $\mathcal{V}_t=[\int_0^1 \mathbf{u}_t^\top(\bar{\mathbf{x}}_{t-1}(\mathbf{x}^{\mathrm{cf}}_{t-1}+sg\kappa_t\boldsymbol{\Delta}_t,\varnothing)-\bar{\mathbf{x}}_t(\mathbf{x}_t,\varnothing))\,ds]_+$ for $t=2,\ldots,T$, with positive part after the signed integral. Exactly zero gap uses the explicit computational extension $\mathbf{u}_t=\mathbf{0}$, $e_t^{\parallel}=0$ and $\mathcal{V}_t=0$, without claiming a unit direction. Older bundles without this scientific contract require `bash run_all.sh --recompute-experiments`; historical gap-error norms cannot be relabeled by `--plot`. The six-figure placement and opacity update alone uses `--plot` on compatible current bundles. Compatible independent model probes and protected generation/SSCD/proximity data remain reusable.
+The active contract `projected-gap-error-1` uses the signed error $\mathcal{E}_t=\mathbf{u}_t^\top(\boldsymbol{\Delta}_t-\bar{\boldsymbol{\Delta}}_t)$, where $\mathbf{u}_t=\boldsymbol{\Delta}_t/\|\boldsymbol{\Delta}_t\|$ is computed from the actual learned gap. It may be negative and is never replaced by a norm, absolute value or clipped scalar. The margin is $\|\boldsymbol{\Delta}_t\|-\mathcal{E}_t-\mathcal{V}_t$. The variation remains $\mathcal{V}_t=[\int_0^1 \mathbf{u}_t^\top(\bar{\mathbf{x}}_{t-1}(\mathbf{x}^{\mathrm{cf}}_{t-1}+sg\kappa_t\boldsymbol{\Delta}_t,\varnothing)-\bar{\mathbf{x}}_t(\mathbf{x}_t,\varnothing))\,ds]_+$ for $t=2,\ldots,T$, with positive part after the signed integral. Exactly zero gap uses the explicit computational extension $\mathbf{u}_t=\mathbf{0}$, $\mathcal{E}_t=0$ and $\mathcal{V}_t=0$, without claiming a unit direction. Older bundles without this scientific contract require `bash run_all.sh --recompute-experiments`; historical gap-error norms cannot be relabeled by `--plot`. The six-figure placement and opacity update alone uses `--plot` on compatible current bundles. Compatible independent model probes and protected generation/SSCD/proximity data remain reusable.
 
-Diffusion memorization experiments with preserved generation, SSCD and proximity caches. The theory stage retains the full measurement suite and publishes **six selected figures** directly under each bundle’s `figures/` directory. Analysis may run missing learned denoiser probes; plotting uses saved compact scalars only.
+Diffusion memorization experiments with preserved generation, SSCD and proximity caches. The theory stage retains the full measurement suite and publishes **six selected PDFs** under the project-root `figures/<experiment>/theory/experiment_S0_N<N>/` directory. Analysis may run missing learned denoiser probes; plotting uses saved compact scalars only.
 
 ## Run
 
@@ -77,7 +77,7 @@ PYTHON=/path/to/python ./run_all.sh --plot
 
 Numerical policy `fixed-cache-numerics-cuda-8` displays ordinary float64 estimates by default. Condition signs use the saved margin `M=D-E-mathcal{V}`, assessed against the saved signed-integral embedded quadrature error, projection roundoff and float64 subtraction allowance. Clear positive or negative assessments contribute to figure fractions. Near-zero, invalid or missing assessments remain unresolved or unavailable in their audit classifications. The condition-margin scatter displays every finite saved pair as an ordinary dot regardless of that classification. These assessments are numerical estimates, not interval certificates, and do not enable certified implication claims. Turning off interval work does not remove the directional measurements or their quadrature uncertainty.
 
-Optional interval certification (`--refine-numerics`, or an explicit positive `--numerical-max-products`) encloses the current posterior for each saved seed batch once on the GPU. If `D_upper-E_lower<0`, with `E=e_t^parallel(Delta)` and `V>=0`, it certifies a negative condition before constructing endpoint intervals or evaluating their rigorous gains. Independently flagged gains and requested source-radius audits still receive refinement. Rows that continue reuse the same current-posterior/error enclosure. Exp/log enclosures use bounded series; binary64 precision or work limits can leave signs unresolved. Raw vector arithmetic, posterior/gain evaluation, interval quadrature and learned-probe error reductions stay on the selected worker GPU.
+Optional interval certification (`--refine-numerics`, or an explicit positive `--numerical-max-products`) encloses the current posterior for each saved seed batch once on the GPU. If `D_upper-E_lower<0`, with `E=mathcal{E}_t` and `V>=0`, it certifies a negative condition before constructing endpoint intervals or evaluating their rigorous gains. Independently flagged gains and requested source-radius audits still receive refinement. Rows that continue reuse the same current-posterior/error enclosure. Exp/log enclosures use bounded series; binary64 precision or work limits can leave signs unresolved. Raw vector arithmetic, posterior/gain evaluation, interval quadrature and learned-probe error reductions stay on the selected worker GPU.
 
 Host work remains necessary for file I/O, worker scheduling, small control decisions, scalar table aggregation and plotting. Original seeded CPU random streams are retained as input generation and transferred before numerical evaluation, preserving existing experimental inputs. This is not a promise of zero CPU utilization. See [GPU execution and budget controls](docs/theory/gpu_theory_computation.md).
 
@@ -93,19 +93,18 @@ Derived recomputation preserves omitted saved loss-draw settings. Plotting inher
 
 ## Paper outputs
 
-Canonical publication remains `outputs/<model>_<scheduler>_g<G>_T<T>_N<N>/theory/experiment_S0_N<N>/`:
+Numerical tables and publication metadata remain in `outputs/<model>_<scheduler>_g<G>_T<T>_N<N>/theory/experiment_S0_N<N>/`:
 
 ```text
 run_config.json, summary.json, audit.json, theory_mean.json
 registry.json, figure_manifest.json, figure_captions.md, figure_retirement.json
 initial.csv, terminal.csv, failed.csv, logical_tables.json
 plot_data/*.csv, audit_data/*.csv
-figures/<selected-basename>.png, figures/<selected-basename>.pdf
 ```
 
-The active paper publisher exports exactly six PNG/single-page-PDF pairs directly in the bundle’s `figures/` directory (12 images). There are no appendix, per-timestep or diagnostic figure exports; `--diagnostics` does not expand this selection. `measurement_registry()` retains the complete 20-measurement inventory and optional scalar audits, while `paper_registry()` selects only these six render entries. Scientific formulas, scalar tables, sample populations and cache identities are unchanged by this curation.
+The active paper publisher exports exactly six single-page PDFs under project-root `figures/<experiment>/theory/experiment_S0_N<N>/`. There are no appendix, per-timestep or diagnostic figure exports; `--diagnostics` does not expand this selection. `measurement_registry()` retains the complete 20-measurement inventory and optional scalar audits, while `paper_registry()` selects only these six render entries. Scientific formulas, scalar tables, sample populations and cache identities are unchanged by this curation.
 
-| Order | File basename in `figures/` | Saved measurement stem |
+| Order | PDF basename in the theory publication directory | Saved measurement stem |
 |---|---|---|
 | M1 | `initial_loss_recovery` | `initial_loss_recovery` |
 | M2 | `unconditional_reference_convergence` | `unconditional_reference_convergence` |
@@ -114,7 +113,7 @@ The active paper publisher exports exactly six PNG/single-page-PDF pairs directl
 | M5 | `synchronization_bound` | `synchronization_bound` |
 | M6 | `terminal_bound_coverage` | `terminal_bound_coverage` |
 
-`posterior_feedback_condition_margin` shows every finite saved margin/gain pair from all saved timesteps as an ordinary dot, with terminal SSCD colors where available. Its opacity is exactly 0.01; the shared scatter opacity is 0.8. Numerical signs do not filter points or create Observed/Unresolved markers or legends. Only the pooled PNG/PDF are exported; there are no per-timestep figures. Sign, uncertainty, endpoint-transfer and implication receipts remain unchanged in the audit tables.
+`posterior_feedback_condition_margin` shows every finite saved margin/gain pair from all saved timesteps as an ordinary dot, with terminal SSCD colors where available. Its selected dense-layer opacity is 0.1; the selected sparse-scatter opacity is 0.8. Numerical signs do not filter points or create Observed/Unresolved markers or legends. Only the pooled PDF is exported; there are no per-timestep figures. Sign, uncertainty, endpoint-transfer and implication receipts remain unchanged in the audit tables.
 
 `guidance_scale_vs_loss` changes only the published filename: its compact table and scientific ID remain `corollary3_guidance_scale_vs_loss`. It displays `sqrt(saved x)` for `saved x=L_T(c)/(d*SNR_T)` against the signed joint least-squares guidance coefficient. The square root follows averaging the forward loss over draws; the fitted coefficient and mean-terminal-SSCD color retain the same complete seed cohort. The horizontal reference remains the configured guidance scale.
 
@@ -134,18 +133,53 @@ Omit `--model` and `--scheduler` to request the full configuration matrix; every
 
 The `projected-gap-error-1` scientific contract, empirical source-record prior, numerical-policy identities and compact metric schema `four-stage-evidence-projected-gap-error-1` are unchanged by the six-figure selection. Presentation registry `four-stage-paper-curation-20` reuses the existing `plot_data/<scientific-stem>.csv` files. The earlier signed-error or prior-law changes still require analysis when their receipts are absent; the opacity and output-path changes alone do not.
 
-Theory uses one parent-owned tqdm bar for live record progress, without periodic “still running” messages. Aggregation, plot-input, and publication stages report their start and completion once, including elapsed time on completion. Saving scalar tables and publication metadata uses one progress bar that advances per completed file and shows the current filename. Figure preparation has its own progress bar; PNG/PDF export advances once per saved file and shows the current filename.
+Theory uses one parent-owned tqdm bar for live record progress, without periodic “still running” messages. Aggregation, plot-input, and publication stages report their start and completion once, including elapsed time on completion. Saving scalar tables and publication metadata uses one progress bar that advances per completed file and shows the current filename. Figure preparation has its own progress bar; PDF export advances once per saved file and shows the current filename.
 
-Role locking, staged publication and paired PNG/PDF export remain in place.
-`--plot` migrates compatible saved bundles using compact tables and metadata only.
-It stages replacement pairs before retiring enumerated old locations whose hashes
-match previous renderer ownership. Unowned, modified, symbolic-link or unrelated
-files are preserved and reported as conflicts. A failed export/publication rolls
-back both images and publication metadata. Successful migration writes the small
-`figure_retirement.json` ledger; repeated plotting creates no new retirement
-archives or duplicate pairs. Scientific tables, cache receipts and historical
-archives are unchanged. See [the curation and migration rules](docs/theory/figure_curation.md).
+The publication layout is separate from caches:
+
+```text
+figures/<experiment>/
+  proximity/experiment_S0_N<N>/*.pdf
+  proximity/reference_S<N>_N<N>/*.pdf
+  proximity/<seed-role>/examples/retained/*.pdf
+  proximity/<seed-role>/examples/discarded/*.pdf
+  theory/experiment_S0_N<N>/*.pdf
+```
+
+Here `<experiment>` is the canonical run name, for example `sdv1_ddim_g7.5_T50_N20`.
+Both normal proximity runs and `--plot` export the existing retained/discarded
+examples, including generated montages and their paired training images. Highest,
+median and lowest refer to the existing prompt-mean terminal L2 ranking; every
+seed tile remains present in the generated montage. PDFs use 150 DPI and the
+existing display downsampling. The example manifest stays at
+`outputs/<experiment>/proximity/<seed-role>/examples/manifest.json` and records the
+external PDF directory, source identities and hashes. Plotting validates cached
+montages, normalized training PNGs and completion metadata before publication;
+it never regenerates images or loads latent tensors. Missing cached images must
+be restored before replotting. Historical example PNGs remain in place.
+
+Role and selection-strategy namespaces remain distinct. The figure tree contains
+PDF exports only; captions, manifests and scalar inputs remain under `outputs/`.
+Both normal execution and `--plot` use this layout. Existing cache images are
+preserved; changing output paths does not recompute experiments or migrate old
+images. Theory role locks and coordinated staging protect PDFs and their metadata
+against partial publication. Unowned or modified theory outputs are not overwritten.
+
 Plot mode does not access backing numerical shards. Axes and legends use the mathematical notation in `revised.pdf`, with bold vectors, single-line division and named reference lines. Colorbars read `SSCD`; pair-mean aggregation stays in the initial figure caption. See [the figure notation mapping](docs/theory/figure_notation.md).
+
+## Figure appearance
+
+The six exports use plotting-only style `six-theory-visual-6`, centralized in `utils/experiments/theory/paper_style.py` and scoped to the selected `figures/` entries. SSCD uses `magma(0.20+0.50*s)` on the unchanged [0,1] scale; opaque colorbars are independent of marker transparency. Higher-/lower-SSCD groups use the sampled coral/indigo endpoints. Analytical reference, learned estimate and reference error use slate blue, teal and charcoal. The proximity extension below has its own scoped categorical style; unselected theory renderer styles remain unchanged.
+
+Initial-loss and fitted-guidance points use the same size and 0.8 opacity. The pooled feedback scatter uses smaller markers at uniform 0.1 opacity and a reproducible SSCD-independent display order; values and statuses remain paired. All raster exports for these six theory figures use 150 DPI. The dense scatter and opaque SSCD color strips are rasterized in PDFs; text, axes, guides and colorbar ticks/outlines remain vector artwork. Rasterizing each color strip avoids viewer-dependent seams between adjacent vector cells. Shared loss-axis display ranges include both selected scatters without trimming points or confidence intervals. A dashed one-entry guidance legend sits just below the guide near the right edge, and grouped legends separate colors from line meanings. All saved arrays, weights, band endpoints, scientific scales and qualifications remain unchanged.
+
+For an otherwise compatible bundle, run `./run_all.sh --model sdv1 --scheduler ddim --plot`; no analysis update is required for this appearance change. See [the appearance contract and manuscript note](docs/theory/figure_appearance.md). Final-size, grayscale and color-vision-deficiency visual checks remain for the author. The original source-only refresh did not execute tests or rendering; the subsequent PDF-only replot is explicitly author-requested. Use `./theory_validation.sh --bundle /path/to/experiment_S0_N20 --plot` to write the six PDFs from a compatible saved bundle to this project’s figure tree; `--pdf-only` remains a compatibility alias. Existing cache images are preserved.
+
+## Proximity figure appearance
+
+The existing all-prompt and retained-prompt proximity scatters use presentation style `proximity-publication-2`. Original categories retain the labels $\mathtt{MV}$, $\mathtt{RV}$, $\mathtt{TV}$ and $\mathtt{N}$, with fixed coral, indigo, teal and slate-blue colors. Color describes the original category; SSCD remains the y-coordinate. Paired views share axes and a 3.1-inch square plotting box, with size-10 markers at uniform 0.35 opacity. A single-column legend sits inside the upper-right corner. The original rounded statistics box sits inside the lower-left corner, showing #Prompts, median rho and rho < 0 with the existing evaluable denominator. Exports use `bbox_inches="tight"` and `pad_inches=0.05`.
+
+Use `bash compute_proximity.sh --model sdv1 --scheduler ddim --g 7.5 --T 50 --N 20 --seed-start 0 --plot` for saved evaluation data; use `--seed-start 20` for the matching reference block. SDv2 and RealVis use their existing model options, and SDv1/DDPM is supported. Exports are PDF-only; the proximity point collection uses 600 DPI, with labels, legend and statistics box kept as vector artwork. The six theory figures retain style 6 and 150-DPI raster layers. The reference GMM-fit diagnostic now shares the proximity typography, square plot area, grid and markers (`proximity-gmm-publication-1`). Its saved low/high SSCD components use indigo/coral with an untitled upper-right legend labeled “Low SSCD” and “High SSCD” in regular font; fitted means and covariance ellipses are unchanged. The broader `bash run_all.sh --plot` also renders this diagnostic. See [the proximity appearance contract and exact author commands](docs/proximity_figure_appearance.md). This proximity coding task ran no tests or rendering; final-size, grayscale and color-vision-deficiency reviews remain pending.
 
 ## Author validation
 

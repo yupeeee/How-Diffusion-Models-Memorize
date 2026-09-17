@@ -13,17 +13,21 @@ from matplotlib import colormaps
 from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
-from matplotlib.transforms import blended_transform_factory
+from matplotlib.transforms import blended_transform_factory, offset_copy
 
-from utils.experiments.plotting import SCATTER_ALPHA, SCATTER_SIZE, SSCD_COLOR_RANGE, add_sscd_colorbar
+from utils.experiments.plotting import (
+    LEGEND_FONT_SIZE, SCATTER_ALPHA, SCATTER_SIZE,
+    SSCD_COLOR_RANGE, add_sscd_colorbar,
+)
 from .contracts import TheoryError
+from . import paper_style as theme
 from .evidence_plotting import (
     _REFERENCE, _SCOPES, _curve, _ecdf_support, _groups, _legend, _nonnegative_limits,
     _number, _snr,
 )
 from .paper_registry import GROUPS, GROUP_COLORS, GROUP_LABELS, RETIRED_RENDER_STEMS
 from .paper_notation import (
-    CHRONOLOGICAL_LABELS, DOSE_REFERENCE_TICK_LABEL, NOTATION_VERSION, REFERENCE_LABELS, TERMINAL_LABELS, ZERO_REFERENCE_LABELS,
+    CHRONOLOGICAL_LABELS, DOSE_REFERENCE_TICK_LABEL, NOTATION_VERSION, REFERENCE_LABELS, TERMINAL_EXPRESSIONS, TERMINAL_LABELS, ZERO_REFERENCE_LABELS,
 )
 
 FOUR_STAGE_RENDERING_VERSION = NOTATION_VERSION
@@ -39,6 +43,37 @@ _QUANTITIES = {
     for metric, style in (("gap", "--"), ("joint_error", "-"),
                           ("bound", "-."), ("conditional", "-"), ("unconditional", "--"))
 }
+
+
+def _theme_legend_keys(ax, groups, quantities):
+    """Keep SSCD and mathematical quantity keys in separate legend columns."""
+    # Matplotlib fills columns first. Pad the shorter column so no quantity
+    # spills into the SSCD column, including optional reference-line keys.
+    rows = max(len(groups), len(quantities))
+    columns = []
+    for handles in (groups, quantities):
+        columns.extend(handles)
+        columns.extend(Line2D([], [], linestyle="none", alpha=0., label="")
+                       for _ in range(rows - len(handles)))
+    ax.legend(handles=columns, ncol=2, loc="lower center",
+              bbox_to_anchor=(.5, theme.LEGEND_Y), bbox_transform=ax.transAxes,
+              frameon=False, borderaxespad=0, fontsize=theme.LEGEND_FONT_SIZE,
+              handlelength=theme.LEGEND_HANDLE_LENGTH, handletextpad=.45,
+              columnspacing=1.1, labelspacing=.3)
+
+
+def _reference_curve(ax, rows, *, color, style, native=True, themed=False):
+    """Preserve the existing segmented arrays and bands, modifying artists only."""
+    previous_lines, previous_collections = len(ax.lines), len(ax.collections)
+    _curve(ax, rows, color=color, style=style, band=True, native=native)
+    if themed:
+        for line in list(ax.lines)[previous_lines:]:
+            line.set_linewidth(theme.CURVE_WIDTH)
+            line.set_alpha(theme.CURVE_ALPHA)
+            line.set_zorder(3)
+        for collection in list(ax.collections)[previous_collections:]:
+            collection.set_alpha(theme.BAND_ALPHA)
+            collection.set_zorder(1)
 
 
 def _index_axis(ax, metadata, *, motion=False):
@@ -76,6 +111,8 @@ def _common_curves(frame, metrics):
 
 
 def _chronological(ax, entry, frame, metadata):
+    themed = theme.is_selected(entry)
+    palette = theme.GROUP_COLORS if themed else GROUP_COLORS
     metrics = ("gap", "joint_error") if entry["stem"] == "branch_gap_synchronization" else (
         ("conditional", "unconditional") if entry["stem"] == "branch_target_errors" else ("gap", "joint_error", "bound"))
     styles = {metric: _QUANTITIES[metric][1] for metric in metrics}
@@ -84,14 +121,17 @@ def _chronological(ax, entry, frame, metadata):
         # Historical compact tables also retain the paired maximum target
         # distance. Omit only its artwork; keep the saved values unchanged.
         frame = frame.loc[~frame.metric.eq("joint_error")]
-        styles = {"gap": "-", "bound": "--"}
+        styles = ({"gap": theme.LINE_STYLES["observed"], "bound": theme.LINE_STYLES["observable"]}
+                  if themed else {"gap": "-", "bound": "--"})
     _common_curves(frame, metrics)
+    synchronization_bands = themed and entry["stem"] == "synchronization_bound"
     last = _index_axis(ax, metadata)
     quantities, groups, total = [], [], 0
     displayed = []
     for group in _groups(frame):
-        color = GROUP_COLORS[group]
-        groups.append(Line2D([], [], color=color, label=GROUP_LABELS[group]))
+        color = palette[group]
+        groups.append(Line2D([], [], color=color, linewidth=theme.CURVE_WIDTH if themed else 1.5,
+                             alpha=theme.CURVE_ALPHA if themed else 1., label=GROUP_LABELS[group]))
         for metric in metrics:
             rows = frame.loc[frame.group.eq(group) & frame.metric.eq(metric)].sort_values("step_index")
             x = _number(rows, "step_index")
@@ -102,34 +142,46 @@ def _chronological(ax, entry, frame, metadata):
                 x, y = _number(part, "step_index"), _number(part, "median")
                 total += int(np.isfinite(y).sum())
                 displayed.append(y)
-                ax.plot(x, y, color=color, linestyle=styles[metric], linewidth=1.5,
+                ax.plot(x, y, color=color, linestyle=styles[metric], linewidth=theme.CURVE_WIDTH if themed else 1.5,
+                        alpha=theme.CURVE_ALPHA if themed else 1., zorder=3 if themed else 2,
                         marker="." if len(part) == 1 else None, markersize=3)
-                if metric == "joint_error" or entry["stem"] == "branch_target_errors":
+                if synchronization_bands or metric == "joint_error" or entry["stem"] == "branch_target_errors":
                     lower, upper = _number(part, "q25"), _number(part, "q75")
                     if np.any(np.isfinite(y) & ((lower > y) | (upper < y))):
                         raise TheoryError("Saved IQR does not bracket the median")
-                    ax.fill_between(x, lower, upper, color=color, alpha=.10, linewidth=0)
+                    ax.fill_between(x, lower, upper, color=color,
+                                    alpha=theme.BAND_ALPHA if themed else .10, linewidth=0, zorder=1)
                     displayed.extend([lower, upper])
     for metric in metrics:
         label = _QUANTITIES[metric][0]
-        quantities.append(Line2D([], [], color=".3", linestyle=styles[metric], label=label))
+        quantities.append(Line2D([], [], color=theme.TEXT_COLOR if themed else ".3", linestyle=styles[metric],
+                                 linewidth=theme.CURVE_WIDTH if themed else 1.5, label=label))
     _nonnegative_limits(ax, displayed)
     legend_audit = {}
-    if entry["stem"] == "synchronization_bound":
+    if themed:
+        _theme_legend_keys(ax, groups, quantities)
+        legend_audit = {"legend_placement": "outside top",
+                        "legend_columns": "SSCD groups; manuscript quantities",
+                        "group_colors": dict(palette)}
+    elif entry["stem"] == "synchronization_bound":
         # Match terminal-bound coverage: one column for SSCD groups and one
         # for quantities, with the complete legend above the data axes.
         groups.extend(Line2D([], [], linestyle="none", alpha=0., label="")
                       for _ in range(len(quantities) - len(groups)))
         ax.legend(handles=[*groups, *quantities], loc="lower center", bbox_to_anchor=(.5, 1.01),
                   bbox_transform=ax.transAxes, ncol=2, frameon=False, borderaxespad=0,
-                  fontsize=10, handlelength=1.65,
+                  fontsize=LEGEND_FONT_SIZE, handlelength=1.65,
                   handletextpad=.4, columnspacing=.7, labelspacing=.3)
         legend_audit = {"legend_placement": "outside top", "legend_columns": "SSCD groups; manuscript quantities"}
     else:
-        first = _legend(ax, groups, loc="upper left", size=10)
+        first = _legend(ax, groups, loc="upper left", size=LEGEND_FONT_SIZE)
         if first is not None:
             ax.add_artist(first)
-        _legend(ax, quantities, loc="upper right", size=10)
+        _legend(ax, quantities, loc="upper right", size=LEGEND_FONT_SIZE)
+    if synchronization_bands:
+        legend_audit.update(
+            distribution_band="Saved weighted 25th–75th percentiles within each SSCD group and timestep; descriptive spread, not a confidence interval",
+            band_metrics=list(metrics), band_endpoints_recomputed=False)
     return {"finite_summary_cells": total, "chronological_prediction_range": [0, last],
             "displayed_metrics": list(metrics), "quantity_styles": styles, **legend_audit,
             "common_population_checked": True, "terminal_output_prediction": False,
@@ -211,8 +263,9 @@ def _prompt_chronological(fig, ax, frame, metadata, entry):
                                      if domain == "probability" else "All saved prompt mean curves, zero origin and fixed 6% upper padding")}
 
 
-def _guidance_fit(fig, ax, frame, metadata, config):
+def _guidance_fit(fig, ax, frame, metadata, config, *, entry=None):
     """Display sqrt(saved loss ratio) against already-fitted prompt coefficients."""
+    themed = theme.is_selected(entry or {})
     name = "Guidance-fit"
     required = set(_PROMPT_CURVE_KEYS) | {
         "x", "y", "mean_terminal_sscd", "seed_count", "seed_ids_json", "latent_dimension",
@@ -287,12 +340,27 @@ def _guidance_fit(fig, ax, frame, metadata, config):
     # Compact recipe 1 stores L_T(c)/(d*SNR_T). Apply its display square
     # root once, after validating nonnegativity, without rewriting saved inputs.
     plotted_x = np.sqrt(x)
-    ax.scatter(plotted_x, y, c=score, cmap="viridis", norm=Normalize(*SSCD_COLOR_RANGE, clip=True),
-               s=SCATTER_SIZE, edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
-    add_sscd_colorbar(fig, ax, score)
+    ax.scatter(plotted_x, y, c=score, cmap=theme.SSCD_CMAP if themed else "viridis",
+               norm=theme.SSCD_NORM if themed else Normalize(*SSCD_COLOR_RANGE, clip=True),
+               s=theme.SPARSE_SIZE if themed else SCATTER_SIZE, edgecolors="none",
+               alpha=theme.SPARSE_ALPHA if themed else SCATTER_ALPHA, rasterized=not themed,
+               zorder=3 if themed else 1)
+    (theme.add_theory_sscd_colorbar if themed else add_sscd_colorbar)(fig, ax, score)
     label = rf"$g={guidance:g}$"
-    ax.axhline(guidance, color=".4", linestyle="--", linewidth=1, label=label)
-    _legend(ax, [Line2D([], [], color=".4", linestyle="--", label=label)], loc="center right", size=10)
+    reference_line = ax.axhline(guidance, color=theme.REFERENCE_COLOR if themed else ".4",
+                                linestyle="--", linewidth=1, label=label)
+    if themed:
+        # Keep the label at the same point offset below the guide. The mixed
+        # transform follows saved g vertically and the plot's right edge even
+        # when the shared loss-axis range is finalized later.
+        anchor = offset_copy(ax.get_yaxis_transform(), fig=fig, x=-4, y=-5, units="points")
+        ax.legend(handles=[reference_line], loc="upper right", ncol=1,
+                  bbox_to_anchor=(1., guidance), bbox_transform=anchor,
+                  frameon=False, borderaxespad=0, borderpad=0,
+                  fontsize=theme.LEGEND_FONT_SIZE, labelcolor=theme.REFERENCE_COLOR,
+                  handlelength=theme.LEGEND_HANDLE_LENGTH, handletextpad=.45)
+    else:
+        _legend(ax, [Line2D([], [], color=".4", linestyle="--", label=label)], loc="center right", size=LEGEND_FONT_SIZE)
     xmax = float(plotted_x.max())
     xupper = xmax * 1.06 if xmax > 0 else 1.
     lower, upper = min(float(y.min()), guidance), max(float(y.max()), guidance)
@@ -312,7 +380,9 @@ def _guidance_fit(fig, ax, frame, metadata, config):
         "horizontal_coordinate": "sqrt(L_T(c)/(d*SNR_T)); square root of the saved forward-draw mean, not mean of draw-wise roots",
         "vertical_coordinate": "Saved signed pooled no-intercept least-squares guidance estimate",
         "guidance_reference_value": guidance, "guidance_reference_label": label,
-        "legend_placement": "inside upper left", "axis_scale": "linear",
+        "legend_placement": "right edge below reference line" if themed else "inside upper left",
+        "guidance_label_placement": "right edge below reference line with point offset" if themed else "legend",
+        "axis_scale": "linear",
         "sscd_color_range": list(SSCD_COLOR_RANGE), "colorbar_label": "SSCD",
         "out_of_color_range_pairs": int(np.count_nonzero((score < SSCD_COLOR_RANGE[0]) | (score > SSCD_COLOR_RANGE[1]))),
         "display_range_policy": "All finite saved pairs and configured guidance; nonnegative loss axis; signed fit axis with 6 percent padding",
@@ -361,7 +431,7 @@ def _response(ax, frame, metadata):
     pad = max((hi - lo) * .05, threshold)
     ax.set_ylim(lo - pad, hi + pad)
     ax.set_xlim(0, 1)
-    _legend(ax, handles, loc="lower right", size=10)
+    _legend(ax, handles, loc="lower right", size=LEGEND_FONT_SIZE)
     return {"common_cohort_across_doses": True, "dose_count": len(grid),
             "fixed_snapshot": 0, "log_odds_substitution": False,
             "legend_placement": "inside lower right",
@@ -372,9 +442,13 @@ def _response(ax, frame, metadata):
             "symlog_linthresh": threshold, "cfg_endpoint_label": metadata.get("cfg_endpoint_label")}
 
 
-def _reference(ax, frame, metadata, *, zero_baseline=False):
+def _reference(ax, frame, metadata, *, zero_baseline=False, entry=None):
+    themed = theme.is_selected(entry or {})
     labels = ZERO_REFERENCE_LABELS if zero_baseline else REFERENCE_LABELS
     boundary = _snr(ax, metadata)
+    if themed:
+        ax.lines[-1].set_color(theme.REFERENCE_COLOR)
+        ax.lines[-1].set_linestyle(theme.LINE_STYLES["boundary"])
     if set(frame.source_range.astype(str)) - {"analytical", "native"}:
         raise TheoryError("Reference comparison mixes unsupported input-law ranges")
     analytical = frame.loc[frame.source_range.eq("analytical")]
@@ -385,11 +459,16 @@ def _reference(ax, frame, metadata, *, zero_baseline=False):
     if np.any(x <= 0) or np.any(x > boundary * (1 + 1e-12)):
         raise TheoryError("Analytical reference extension has invalid saved SNR")
     lower = float(x.min())
-    ax.axvspan(lower, boundary, color=".85", alpha=.22, zorder=-1)
-    note = ax.text(math.sqrt(lower * boundary), .02, "Analytical reference only",
-                   transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=10)
+    ax.axvspan(lower, boundary, color=theme.ANALYTICAL_COLOR if themed else ".85",
+               alpha=.045 if themed else .22, zorder=-1)
+    note_x = math.exp(math.log(lower) + .04 * (math.log(boundary) - math.log(lower))) if themed else math.sqrt(lower * boundary)
+    note = ax.text(note_x, .02, "Analytical reference only",
+                   transform=ax.get_xaxis_transform(), ha="left" if themed else "center", va="bottom",
+                   fontsize=theme.ANNOTATION_FONT_SIZE if themed else 10,
+                   color=theme.TEXT_COLOR if themed else "black")
     note.set_gid("curation-required-label")
-    _curve(ax, analytical, color=_REFERENCE["reference"][1], style=":", band=True, native=False)
+    _reference_curve(ax, analytical, color=theme.ANALYTICAL_COLOR if themed else _REFERENCE["reference"][1],
+                     style=":", native=False, themed=themed)
     handles = []
     for metric, (label, color, style) in _REFERENCE.items():
         rows = native.loc[native.metric.eq(metric)]
@@ -397,8 +476,14 @@ def _reference(ax, frame, metadata, *, zero_baseline=False):
             raise TheoryError("Full native comparison is missing a required saved quantity")
         if np.any(_number(rows, "snr") < boundary * (1 - 1e-12)):
             raise TheoryError("Network/reference native curve extends into analytical-only range")
-        _curve(ax, rows, color=color, style=style, band=True)
-        handles.append(Line2D([], [], color=color, linestyle=style, label=labels[metric]))
+        if themed:
+            color = {"reference": theme.ANALYTICAL_COLOR, "learned": theme.LEARNED_COLOR,
+                     "reference_error": theme.ERROR_COLOR}[metric]
+            style = {"reference": theme.LINE_STYLES["observed"], "learned": theme.LINE_STYLES["observable"],
+                     "reference_error": ":"}[metric]
+        _reference_curve(ax, rows, color=color, style=style, themed=themed)
+        handles.append(Line2D([], [], color=color, linestyle=style,
+                              linewidth=theme.CURVE_WIDTH if themed else 1.5, label=labels[metric]))
     displayed = [_number(frame, name) for name in ("minimum", "maximum", "q25", "q75")]
     limit_field = "bank_mean_norm_rmse" if zero_baseline else "mean_offset_rmse"
     reference_limit = float(metadata.get(limit_field, math.nan))
@@ -407,13 +492,18 @@ def _reference(ax, frame, metadata, *, zero_baseline=False):
     saved_limit = metadata.get("reference_limit_rmse", reference_limit)
     if not math.isclose(float(saved_limit), reference_limit, rel_tol=1e-12, abs_tol=1e-14):
         raise TheoryError("Reference limit metadata disagrees with the selected comparison centre")
-    ax.axhline(reference_limit, color=".5", linestyle="--", linewidth=.8)
+    ax.axhline(reference_limit, color=theme.REFERENCE_COLOR if themed else ".5",
+               linestyle=theme.LINE_STYLES["boundary"] if themed else "--", linewidth=.8)
     displayed.append(np.asarray([reference_limit]))
-    handles.append(Line2D([], [], color=".45", linestyle=":", label=r"$\mathrm{SNR}_T$"))
-    _legend(ax, handles, loc="upper left", size=10)
+    handles.append(Line2D([], [], color=theme.REFERENCE_COLOR if themed else ".45",
+                          linestyle=theme.LINE_STYLES["boundary"] if themed else ":", label=r"$\mathrm{SNR}_T$"))
+    _legend(ax, handles, loc="upper left", size=theme.LEGEND_FONT_SIZE if themed else LEGEND_FONT_SIZE)
     _nonnegative_limits(ax, displayed)
     audit = {"analytical_only_range": [lower, boundary], "native_sweep_preserved": True,
-             "network_extrapolation": False}
+             "network_extrapolation": False,
+             "reference_range_styles": {"analytical_extension": "dotted", "native_reference": "solid"},
+             "analytical_annotation_placement": "lower left inside analytical-only region" if themed else "lower center",
+             "band_coordinates_unchanged": True}
     audit.update(comparison_centre="zero" if zero_baseline else "selected_mu",
                  declared_law_mean_unchanged=True,
                  horizontal_reference_value=reference_limit,
@@ -438,7 +528,7 @@ def _peak(ax, frame, metadata):
     masses = _number(frame, "fraction")
     largest = float(masses[np.isfinite(masses)].max()) if np.isfinite(masses).any() else 0.
     ax.set_ylim(0, largest * 1.06 if largest > 0 else .05)
-    _legend(ax, handles, loc="upper right", size=10)
+    _legend(ax, handles, loc="upper right", size=LEGEND_FONT_SIZE)
     return {"individual_peak_distribution": True, "flat_cases_not_assigned": True,
             "shape_group_counts": metadata.get("shape_group_counts", {}),
             "y_range_policy": "Full displayed weighted bin masses plus fixed 6% padding; all-zero display window 0..0.05"}
@@ -523,7 +613,7 @@ def _terminal(fig, ax, frame, metadata, *, counterfactual=False):
         ax.axvline(float(tolerance), color=".6", linestyle=":", linewidth=.8)
         ax.axhline(float(tolerance), color=".6", linestyle=":", linewidth=.8)
         handles.append(Line2D([], [], color=".6", linestyle=":", label=r"$\tau/\sqrt{d}$"))
-    legend = _legend(ax, handles, loc="upper left", size=10)
+    legend = _legend(ax, handles, loc="upper left", size=LEGEND_FONT_SIZE)
     if legend is not None:
         titles = {"Zero measured improvement": "Matched comparison",
                   "Probability-qualified bound": "Probabilistic extension",
@@ -539,10 +629,15 @@ def _terminal(fig, ax, frame, metadata, *, counterfactual=False):
 
 
 
-def _terminal_grouped_cdf(ax, frame, metadata):
+def _terminal_grouped_cdf(ax, frame, metadata, *, entry=None):
     """Render saved exact ECDFs; group membership and weights are never rebuilt."""
+    themed = theme.is_selected(entry or {})
+    palette = theme.GROUP_COLORS if themed else GROUP_COLORS
     names = ("actual", "observable", "reference")
-    styles = {"actual": "-", "observable": "--", "reference": "-."}
+    styles = ({"actual": theme.LINE_STYLES["observed"], "observable": theme.LINE_STYLES["observable"],
+               "reference": theme.LINE_STYLES["reference"]} if themed
+              else {"actual": "-", "observable": "--", "reference": "-."})
+    quantity_labels = TERMINAL_LABELS
     columns = {"group", "distribution", "value", "cdf", "denominator_weight", "eligible_count", "prompt_count"}
     if not columns.issubset(frame) or frame.group.isna().any():
         raise TheoryError("Grouped terminal coverage requires saved group/population columns")
@@ -620,24 +715,29 @@ def _terminal_grouped_cdf(ax, frame, metadata):
         positive = (values > 0) & np.isfinite(values)
         x = np.r_[limits[0], values[positive], limits[1]]
         y = np.r_[float(zero[group][name]), cdf[positive], 1. - float(infinite[group][name])]
-        line, = ax.step(x, y, where="post", color=GROUP_COLORS[group], linestyle=styles[name],
-                        linewidth=1.4, label=TERMINAL_LABELS[name])
+        line, = ax.step(x, y, where="post", color=palette[group], linestyle=styles[name],
+                        linewidth=theme.CURVE_WIDTH if themed else 1.4, alpha=theme.CURVE_ALPHA if themed else 1.,
+                        label=quantity_labels[name], zorder=3 if themed else 2)
         line.set_gid(group + ":" + name)
     ax.set_xscale("log")
     ax.set_xlim(limits)
     ax.set_ylim(0, 1)
-    quantities = [Line2D([], [], color=".25", linestyle=styles[name], label=TERMINAL_LABELS[name]) for name in names]
+    quantities = [Line2D([], [], color=theme.TEXT_COLOR if themed else ".25", linestyle=styles[name],
+                         linewidth=theme.CURVE_WIDTH if themed else 1.5, label=quantity_labels[name]) for name in names]
     if tolerance is not None and tolerance > 0:
-        ax.axvline(tolerance, color=".5", linestyle=":", linewidth=.8)
-        quantities.append(Line2D([], [], color=".5", linestyle=":", label=r"$\tau/\sqrt{d}$"))
-    groups = [Line2D([], [], color=GROUP_COLORS[group], label=GROUP_LABELS[group]) for group in GROUPS if group not in empty]
-    # Matplotlib fills columns first. Blank handles keep the outcome keys in
-    # one column and the three manuscript quantities in the other.
-    groups.extend(Line2D([], [], linestyle="none", alpha=0., label="") for _ in range(len(quantities) - len(groups)))
-    ax.legend(handles=[*groups, *quantities], loc="lower center", bbox_to_anchor=(.5, 1.01),
-              bbox_transform=ax.transAxes, ncol=2, frameon=False, borderaxespad=0,
-              fontsize=10, handlelength=1.65,
-              handletextpad=.4, columnspacing=.7, labelspacing=.3)
+        ax.axvline(tolerance, color=theme.REFERENCE_COLOR if themed else ".5", linestyle=":", linewidth=.8)
+        quantities.append(Line2D([], [], color=theme.REFERENCE_COLOR if themed else ".5", linestyle=":", label=r"$\tau/\sqrt{d}$"))
+    groups = [Line2D([], [], color=palette[group], label=GROUP_LABELS[group]) for group in GROUPS if group not in empty]
+    if themed:
+        _theme_legend_keys(ax, groups, quantities)
+    else:
+        # Matplotlib fills columns first. Blank handles keep the outcome keys in
+        # one column and the three manuscript quantities in the other.
+        groups.extend(Line2D([], [], linestyle="none", alpha=0., label="") for _ in range(len(quantities) - len(groups)))
+        ax.legend(handles=[*groups, *quantities], loc="lower center", bbox_to_anchor=(.5, 1.01),
+                  bbox_transform=ax.transAxes, ncol=2, frameon=False, borderaxespad=0,
+                  fontsize=LEGEND_FONT_SIZE, handlelength=1.65,
+                  handletextpad=.4, columnspacing=.7, labelspacing=.3)
     return {"terminal_scope": scope, "terminal_scope_display": "caption_only",
             "grouped_zero_mass": zero, "grouped_infinite_mass": infinite,
             "group_population": populations, "empty_groups": empty,
@@ -645,9 +745,12 @@ def _terminal_grouped_cdf(ax, frame, metadata):
             "full_positive_support": [float(positives.min()), float(positives.max())] if len(positives) else None,
             "empty_positive_domain": not len(positives), "zero_replacement": None,
             "original_clean_counts": clean, "empirical_cdf_confidence_band": False,
-            "legend_placement": "outside top", "legend_columns": "SSCD groups; manuscript quantities",
-            "legend_quantities": {name: TERMINAL_LABELS[name] for name in names},
-            "group_colors": {group: GROUP_COLORS[group] for group in GROUPS}, "quantity_styles": styles,
+            "distribution_display": "Exact saved ECDFs already show the distributions; no saved confidence intervals or new shaded bands",
+            "legend_placement": "outside top",
+            "legend_columns": "SSCD groups; manuscript quantities",
+            "legend_quantities": {name: quantity_labels[name] for name in names},
+            "legend_quantity_expressions": {name: TERMINAL_EXPRESSIONS[name] for name in names},
+            "group_colors": {group: palette[group] for group in GROUPS}, "quantity_styles": styles,
             "plotted_curve_count": len(support), "common_population_checked": True,
             "terminal_labels_abbreviated": True,
             "terminal_correction_display": "caption_only; corrected numerical values retained",
@@ -661,17 +764,17 @@ def draw_four_stage(fig, ax, entry, frame, metadata, config):
         raise TheoryError("Requested figure render is retired; its saved scientific measurements remain available")
     kind = entry["kind"]
     if kind == "four_terminal_grouped_cdf":
-        return _terminal_grouped_cdf(ax, frame, metadata)
+        return _terminal_grouped_cdf(ax, frame, metadata, entry=entry)
     if kind == "four_response":
         return _response(ax, frame, metadata)
     if kind == "four_prompt_chronological":
         return _prompt_chronological(fig, ax, frame, metadata, entry)
     if kind == "four_guidance_fit":
-        return _guidance_fit(fig, ax, frame, metadata, config)
+        return _guidance_fit(fig, ax, frame, metadata, config, entry=entry)
     if kind == "four_chronological":
         return _chronological(ax, entry, frame, metadata)
     if kind == "four_reference":
-        return _reference(ax, frame, metadata, zero_baseline=entry.get("comparison_centre") == "zero")
+        return _reference(ax, frame, metadata, zero_baseline=entry.get("comparison_centre") == "zero", entry=entry)
     if kind == "four_peak":
         return _peak(ax, frame, metadata)
     return _terminal(fig, ax, frame, metadata, counterfactual=kind == "four_counterfactual")
