@@ -247,8 +247,11 @@ def test_candidate_bound_is_distinct_and_log_complement_stable():
     assert result["candidate_terminal_concentration_term_l2"].item() == pytest.approx(
         4 * math.exp(-100)
     )
-    assert result["candidate_terminal_bound_rmse"].item() == pytest.approx(3.5)
-    assert result["candidate_terminal_clean_bound_slack_l2"].tolist() == [7.0, 6.0]
+    assert result["candidate_terminal_conditional_term_l2"].item() == 2.0
+    assert result["candidate_terminal_branch_gap_error_term_l2"].item() == 3.0
+    assert result["candidate_terminal_measurement_contract"] == "projected-gap-error-1"
+    assert result["candidate_terminal_bound_rmse"].item() == pytest.approx(2.5)
+    assert result["candidate_terminal_clean_bound_slack_l2"].tolist() == [5.0, 4.0]
     assert result["candidate_terminal_bound_applies_to_endpoint"].tolist() == [
         True,
         False,
@@ -271,3 +274,15 @@ def test_unavailable_candidate_reference_does_not_invent_a_bound():
     )
     assert result["candidate_terminal_bound_status"] == "unavailable_reference"
     assert torch.isnan(result["candidate_terminal_bound_rmse"]).all()
+
+
+def test_candidate_terminal_bound_keeps_negative_projected_error():
+    result = candidate_terminal_bound(
+        1.0, -1.0, 2.0, 0.0, guidance=2.0, dimension=4,
+        clean_error_l2=torch.tensor([1.0]), endpoint_error_l2=torch.tensor([1.0]),
+        terminal_clean_update=True,
+    )
+    assert result["candidate_terminal_bound_reference_valid"].item()
+    assert result["candidate_terminal_branch_gap_error_term_l2"].item() == -1.0
+    assert result["candidate_terminal_bound_l2"].item() == 2.0
+    assert result["candidate_terminal_bound_rmse"].item() == 1.0

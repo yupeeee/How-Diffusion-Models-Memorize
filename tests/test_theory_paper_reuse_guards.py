@@ -136,10 +136,14 @@ def test_direct_integral_recipe_is_required_without_diagnostics(tmp_path, monkey
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("category", ["main", "appendix"])
-def test_preflight_blocks_unavailable_required_figures(tmp_path, category):
+@pytest.mark.parametrize("stem", [
+    "initial_loss_recovery", "unconditional_reference_convergence",
+    "corollary3_guidance_scale_vs_loss", "posterior_feedback_condition_margin",
+    "synchronization_bound", "terminal_bound_coverage",
+])
+def test_preflight_blocks_unavailable_required_figures(tmp_path, stem):
     bundle = compact_fixture(tmp_path / "paper")
-    entry = next(e for e in paper_registry() if e["category"] == category and not e.get("allow_unavailable", False))
+    entry = next(e for e in paper_registry() if e["stem"] == stem)
     summary = read_json(bundle / "summary.json")
     summary["figures"][entry["stem"]] = {
         "status": "unavailable",
@@ -150,24 +154,26 @@ def test_preflight_blocks_unavailable_required_figures(tmp_path, category):
         paper_contracts.load_paper_inputs(bundle)
 
 
-def test_preflight_allows_named_inapplicability_and_optional_unavailable(tmp_path):
+def test_preflight_allows_named_inapplicability_and_ignores_unselected_diagnostics(tmp_path):
     bundle = compact_fixture(tmp_path / "paper", diagnostics=True)
     entries = paper_registry(diagnostics=True)
     core = next(e for e in entries if e["category"] == "main")
-    optional = next(e for e in entries if e["category"] == "diagnostics" and e.get("allow_unavailable", True))
+    optional_stem = "lemma4_matched_displacement"
+    assert len(entries) == 6 and all(entry["category"] == "main" for entry in entries)
     summary = read_json(bundle / "summary.json")
     summary["figures"][core["stem"]] = {
         "status": "not_applicable",
         "reason": "no_positive_destination_noise",
     }
-    summary["figures"][optional["stem"]] = {
+    summary["figures"][optional_stem] = {
         "status": "unavailable",
         "reason": "path_integration_not_requested",
     }
     atomic_write_json(bundle / "summary.json", summary)
     _, loaded, _, frames = paper_contracts.load_paper_inputs(bundle, diagnostics=True)
     assert core["stem"] not in frames
-    assert optional["stem"] not in frames
+    assert optional_stem not in frames
+    assert set(frames) == {entry["stem"] for entry in entries} - {core["stem"]}
     assert loaded["figures"][core["stem"]]["reason"] == "no_positive_destination_noise"
 
 
@@ -175,7 +181,7 @@ def test_preflight_requires_registry_columns_even_with_consistent_saved_schema(
     tmp_path,
 ):
     bundle = compact_fixture(tmp_path / "paper")
-    stem = "posterior_feedback_over_time"
+    stem = "terminal_bound_coverage"
     summary = read_json(bundle / "summary.json")
     spec = summary["plot_data"][stem]
     path = bundle / spec["path"]
@@ -192,7 +198,7 @@ def test_preflight_requires_registry_columns_even_with_consistent_saved_schema(
 
 def test_preflight_rejects_noncanonical_table_even_with_valid_contents(tmp_path):
     bundle = compact_fixture(tmp_path / "paper")
-    stem = "posterior_feedback_over_time"
+    stem = "terminal_bound_coverage"
     summary = read_json(bundle / "summary.json")
     spec = summary["plot_data"][stem]
     copied = "plot_data/copy.csv"

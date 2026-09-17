@@ -8,7 +8,7 @@ import pytest
 from tests.test_theory_evidence_figures import evidence_config, evidence_tables
 from utils.experiments.theory.contracts import TheoryError
 from utils.experiments.theory.four_stage_figures import build_four_stage_plot_inputs
-from utils.experiments.theory.paper_registry import GROUPS, evidence_registry, paper_registry
+from utils.experiments.theory.paper_registry import GROUPS, evidence_registry, measurement_registry, paper_registry
 
 
 def four_stage_config(**overrides):
@@ -26,6 +26,8 @@ def four_stage_tables():
     matched = tables["matched_updates"]
     matched["direct_prop5_variation_rmse"] = .25 + .5 * matched.seed + .2 * matched.step_index
     matched["direct_prop5_variation_l2"] = 2. * matched.direct_prop5_variation_rmse
+    matched["direct_prop5_variation_signed_integral_l2"] = matched.direct_prop5_variation_l2
+    matched["direct_prop5_variation_direction_status"] = "finite_nonzero_gap_projection"
     matched["direct_prop5_integral_status"] = np.where(matched.seed.eq(0), "estimated_converged", "numerically_unresolved")
     matched["direct_prop5_quadrature_budget_exhausted"] = matched.seed.eq(1)
     tables["initial_samples"] = initial.copy()
@@ -102,17 +104,46 @@ def assemble(tables=None, **config):
         {"reference_law_hash": "law", "reference_law": {"theory_mean": receipt}})
 
 
-def test_fixed_four_main_sixteen_appendix_and_legacy_diagnostics():
+
+def test_active_feedback_preserves_point_estimate_signs_and_certification_scope():
+    tables = four_stage_tables()
+    rows = tables["matched_updates"]
+    selected = rows.refinement_applicable
+    rows.loc[selected, "condition_sign_status"] = "positive"
+    rows.loc[selected, "condition_arithmetic_status"] = "float64_numerical_assessment"
+    rows.loc[selected, "numerical_original_margin_rmse"] = 1.
+    rows.loc[selected, "implication_eligible"] = False
+    frames, metadata = assemble(tables)
+    condition = frames["posterior_feedback_over_time"].query("metric == 'condition'")
+    assert condition.fraction.eq(1).all() and condition.unknown_fraction.eq(0).all()
+    assert frames["posterior_feedback_condition_margin"].marker_class.eq("observed").all()
+    for stem in ("posterior_feedback_over_time", "posterior_feedback_condition_margin"):
+        info = metadata["figures"][stem]
+        assert info["status"] == "available"
+        assert info["condition_assessment_counts"]["float64_estimated_sign"] == int(selected.sum())
+        assert info["condition_assessment_counts"]["enclosed_sign"] == 0
+        assert "not absence of interval certification" in info["condition_display_policy"]
+    audit = metadata["auxiliary_tables"]["feedback_endpoints"]
+    assert audit.loc[selected, "condition_arithmetic_status"].eq("float64_numerical_assessment").all()
+    assert not audit.loc[selected, "implication_eligible"].any()
+
+
+def test_six_publication_figures_preserve_comprehensive_measurement_inventory():
     entries = paper_registry()
-    assert [entry["stem"] for entry in entries if entry["category"] == "main"] == [
-        "initial_loss_recovery", "branch_gap_posterior_response", "branch_gap_synchronization", "terminal_bound_coverage"]
-    assert sum(entry["category"] == "appendix" for entry in entries) == 16
+    expected = ["initial_loss_recovery", "unconditional_reference_convergence",
+                "corollary3_guidance_scale_vs_loss", "posterior_feedback_condition_margin",
+                "synchronization_bound", "terminal_bound_coverage"]
+    assert [entry["stem"] for entry in entries] == expected
+    assert all(entry["category"] == "main" for entry in entries)
     assert len(evidence_registry()) == 19
-    optional = {entry["stem"]: entry for entry in paper_registry(True)}
+    assert len(measurement_registry()) == 20
+    optional = {entry["stem"]: entry for entry in measurement_registry(True)}
     assert optional["lemma4_matched_displacement"]["category"] == "diagnostics"
-    assert "counterfactual_unconditional_response" not in {entry["stem"] for entry in entries}
-    assert len(paper_registry(counterfactual=True)) == 20
     assert optional["counterfactual_unconditional_response"]["category"] == "diagnostics"
+    assert paper_registry(True, counterfactual=True) == entries
+    frames, metadata = assemble()
+    for entry in measurement_registry():
+        assert entry["stem"] in frames and entry["stem"] in metadata["figures"]
 
 
 def test_pair_rms_unique_seed_baseline_and_full_native_sweep():
@@ -302,6 +333,23 @@ def test_wrong_target_agreement_and_missing_reference_do_not_remove_main_rows():
     assert main.loc[main.step_index.eq(1), "denominator_weight"].gt(0).all()
 
 
+def test_four_stage_synchronization_retains_large_common_mode_error_with_zero_gap_bound():
+    from tests.test_theory_evidence_figures import _set_trajectory_branch_norms
+
+    tables = four_stage_tables()
+    for name in ("trajectory", "trajectory_metrics"):
+        _set_trajectory_branch_norms(tables[name], conditional=4., unconditional=4., error=0., gap=0.)
+    frames, metadata = assemble(tables)
+    main = frames["branch_gap_synchronization"]
+    assert main.loc[main.metric.eq("gap"), "median"].eq(0.).all()
+    assert main.loc[main.metric.eq("joint_error"), "median"].eq(4.).all()
+    assert metadata["figures"]["branch_gap_synchronization"]["status"] == "available"
+    assert not metadata["audit"]["blocking"]
+    audit = metadata["auxiliary_tables"]["lemma6_joint_sample_audit"]
+    assert audit.joint_target_bound_rmse.eq(4.).all()
+    assert audit.direct_lemma6_rhs_rmse.eq(0.).all()
+
+
 def test_motion_means_are_additive_and_flat_peaks_keep_unassigned_mass():
     tables = four_stage_tables()
     shapes = tables["trajectory_shapes"]
@@ -335,7 +383,7 @@ def test_terminal_grouped_cdfs_share_populations_and_preserve_pooled_audit():
     frames, metadata = assemble(target_error_tolerance=4.)
     frame = frames["terminal_bound_coverage"]
     info = metadata["figures"]["terminal_bound_coverage"]
-    assert info["formula_version"] == "terminal-coverage-by-sscd-1"
+    assert info["formula_version"] == "projected-gap-error-1"
     assert set(frame.group) == set(GROUPS)
     for group in GROUPS:
         receipt = info["group_population"][group]
@@ -954,6 +1002,7 @@ def _variation_fixture():
     rows = tables["matched_updates"].copy()
     rows["direct_prop5_applicable"] = True
     rows["direct_prop5_variation_rmse"] = 1. + 2. * rows.seed + rows.step_index
+    rows["direct_prop5_variation_signed_integral_l2"] = 2. * rows.direct_prop5_variation_rmse
     rows["condition_sign_status"] = "unresolved"
     rows["numerical_variation_lower_l2"] = 100.
     rows["numerical_variation_upper_l2"] = 200.
@@ -980,7 +1029,7 @@ def test_variation_is_saved_in_active_suite_with_original_numerical_statuses():
     assert len(curves) == 2 and curves.step_index.eq(0).all()
     np.testing.assert_allclose(curves.mean_reference_variation_rmse, .5)
     info = metadata["figures"][stem]
-    assert info["formula_version"] == "reference-variation-per-prompt-1"
+    assert info["formula_version"] == "reference-directional-variation-per-prompt-1"
     assert info["prediction_domain"] == "positive_noise_transitions"
     assert info["source_column"] == "direct_prop5_variation_rmse"
     assert info["measurement_audit_table"] == "audit_data/feedback_endpoints.csv"
@@ -988,7 +1037,7 @@ def test_variation_is_saved_in_active_suite_with_original_numerical_statuses():
     assert info["numerical_status_counts"]["direct_prop5_integral_status"]["numerically_unresolved"] == 2
 
 
-def test_variation_means_saved_seed_norm_integrals_once_and_omits_final_prediction():
+def test_variation_means_saved_seed_directional_positive_integrals_once_and_omits_final_prediction():
     rows, initial = _variation_fixture()
     before = rows.copy(deep=True)
     frame, info, audit = _reduce_variation(rows.sample(frac=1, random_state=12), initial)
@@ -1028,7 +1077,9 @@ def test_variation_excludes_entire_pair_without_changing_seed_cohort(failure):
     assert not audit.loc[audit.original_index.eq("0"), "eligible"].item()
 
 
-@pytest.mark.parametrize("field", ["direct_prop5_variation_rmse", "direct_prop5_applicable", "direct_prop5_integral_status"])
+@pytest.mark.parametrize("field", ["direct_prop5_variation_rmse", "direct_prop5_applicable", "direct_prop5_integral_status",
+                                   "direct_prop5_measurement_contract", "direct_prop5_variation_definition",
+                                   "direct_prop5_variation_signed_integral_l2"])
 def test_variation_missing_measurement_field_cannot_be_filled_from_refined_interval(field):
     rows, initial = _variation_fixture()
     frame, info, audit = _reduce_variation(rows.drop(columns=field), initial)
@@ -1048,9 +1099,51 @@ def test_variation_single_prediction_has_no_manuscript_transition():
 def test_variation_preserves_saved_zero_integrals_with_unresolved_condition_sign():
     rows, initial = _variation_fixture()
     rows["direct_prop5_variation_rmse"] = 0.
+    rows["direct_prop5_variation_signed_integral_l2"] = -2.
     frame, info, _ = _reduce_variation(rows, initial)
     assert len(frame) == 4 and frame.mean_reference_variation_rmse.eq(0).all()
     assert info["status"] == "available"
+
+
+
+def test_variation_averages_saved_positive_parts_after_each_signed_integral():
+    rows, initial = _variation_fixture()
+    rows["direct_prop5_variation_signed_integral_l2"] = np.where(rows.seed.eq(0), -4., 4.)
+    rows["direct_prop5_variation_rmse"] = np.where(rows.seed.eq(0), 0., 2.)
+    rows["direct_prop5_variation_norm_diagnostic_l2"] = 999.
+    frame, info, _ = _reduce_variation(rows, initial)
+    np.testing.assert_allclose(frame.mean_reference_variation_rmse, 1.)
+    assert not frame.mean_reference_variation_rmse.eq(0).any()  # Not positive part of seed-mean signed integral.
+    assert info["measurement_contract"] == "projected-gap-error-1"
+    assert info["variation_definition"] == "positive_part_after_integrated_unit_gap_projection"
+    assert "no unit direction" in info["zero_gap_convention"]
+
+
+@pytest.mark.parametrize("field, value", [
+    ("direct_prop5_measurement_contract", "branch-gap-error-substitution-1"),
+    ("direct_prop5_variation_definition", "integral_of_reference_difference_norm"),
+    ("direct_prop5_variation_signed_integral_l2", np.nan),
+])
+def test_variation_excludes_wrong_or_missing_directional_receipt_without_old_norm_fallback(field, value):
+    rows, initial = _variation_fixture()
+    chosen = rows.original_index.eq("0") & rows.seed.eq(1) & rows.step_index.eq(1)
+    rows.loc[chosen, field] = value
+    frame, info, audit = _reduce_variation(rows, initial)
+    assert set(frame.original_index) == {"1"}
+    assert info["counts"]["excluded_pairs"] == 1
+    assert not audit.loc[audit.original_index.eq("0"), "eligible"].item()
+
+
+
+def test_variation_rejects_relabeled_norm_values_even_with_new_receipt():
+    rows, initial = _variation_fixture()
+    chosen = rows.original_index.eq("0") & rows.seed.eq(1) & rows.step_index.eq(1)
+    rows.loc[chosen, "direct_prop5_variation_signed_integral_l2"] = -2.
+    # Canonical variation stays positive, inconsistent with max(0, signed W).
+    frame, info, audit = _reduce_variation(rows, initial)
+    assert set(frame.original_index) == {"1"}
+    assert info["numerical_status_counts"]["variation_value_identity_status"]["inconsistent_positive_part_identity"] == 1
+    assert not audit.loc[audit.original_index.eq("0"), "eligible"].item()
 
 
 def test_variation_refuses_duplicate_sample_transition_identity():

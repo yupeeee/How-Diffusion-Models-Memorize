@@ -969,7 +969,7 @@ def test_missing_variation_cannot_be_relabelled_as_new_feedback(scalar_bundle):
     )
     _rehash_scalar(scalar_bundle, relative)
     with pytest.raises(
-        TheoryError, match="Equation-15 V.*run_all.sh --recompute-experiments"
+        TheoryError, match="projected branch-gap error and directional positive-part V.*run_all.sh --recompute-experiments"
     ):
         render_bundle(scalar_bundle)
     assert not (scalar_bundle / "figures").exists()

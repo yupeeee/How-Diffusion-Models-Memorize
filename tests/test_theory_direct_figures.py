@@ -49,7 +49,9 @@ def direct_tables():
                        "direct_unconditional_reference_error_rmse": .1,
                        "direct_radius_tail_rmse": .4, "direct_reference_target_error_rmse": .3,
                        "direct_lemma6_rhs_rmse": .7, "direct_lemma6_gap_rmse": .5,
-                       "direct_lemma6_applicable": True, "direct_lemma6_status": "declared_law"}
+                       "direct_lemma6_applicable": True, "direct_lemma6_status": "declared_law",
+                       "direct_branch_gap_error_definition": "signed_projected_branch_gap_reference_error",
+                       "direct_prop5_branch_gap_error_definition": "signed_projected_branch_gap_reference_error"}
                 trajectory.append(row)
                 matched.append({**row, "direct_lemma4_predicted_rmse": 1., "direct_lemma4_displacement_rmse": 1.,
                                 "direct_lemma4_vector_residual_rmse": 1e-8,

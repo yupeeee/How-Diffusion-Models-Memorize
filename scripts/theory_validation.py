@@ -83,14 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--figure-suite",
         choices=("paper",),
         default="paper",
-        help="fixed main and appendix paper suite (default); discovery modes are retired",
+        help="six selected paper figures (default); discovery modes are retired",
     )
     parser.add_argument(
         "--diagnostics",
         "--include-diagnostics",
         dest="diagnostics",
         action="store_true",
-        help="also render saved optional diagnostic figures",
+        help="compatibility flag; exports the same six figures and retains diagnostic scalar measurements",
     )
     parser.add_argument(
         "--target-error-tolerance",
@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode.add_argument(
         "--refine-numerics", action="store_true",
-        help="refine saved posterior/condition numerics only; requires existing evidence inputs; never runs learned probes or upstream stages",
+        help="opt in to interval refinement of saved posterior/condition numerics; uses the saved positive budget or 2000000 when omitted; never runs learned probes or upstream stages",
     )
     mode.add_argument(
         "--recompute-experiments",
@@ -173,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="legacy saved-policy field; computation uses CUDA binary64 enclosures and rejects this override")
     parser.add_argument("--numerical-max-products", "--numerical-max-decimal-products",
                         dest="numerical_max_decimal_products", type=nonnegative_integer, default=None,
-                        help="per-row CUDA interval-operation budget (default: 2000000; zero disables refinement)")
+                        help="per-row CUDA interval-operation budget; positive values opt in (normal/recompute default: 0, numerical estimates only); --refine-numerics uses a saved positive budget or 2000000 when omitted")
     parser.add_argument("--numerical-max-variation-nodes", type=positive_integer, default=None,
                         help="fixed per-row variation enclosure node budget (default: 65)")
     parser.add_argument("--numerical-variation-absolute-width", type=finite_float, default=None,
@@ -293,7 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.source_logs and not args.source_analysis:
         parser.error("--source-logs requires an explicit --source-analysis")
-    from utils.experiments.theory.contracts import TheoryError, numerical_config
+    from utils.experiments.theory.contracts import TheoryError, numerical_config, OPT_IN_REFINEMENT_MAX_PRODUCTS
     from utils.experiments.theory.paper_contracts import (
         PaperPaths,
         render_saved_paper,
@@ -351,11 +351,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 portable=bool(args.bundle),
             )
             if args.refine_numerics:
-                config = numerical_config(**(config | {key: value for key, value in science.items() if key in NUMERICAL_KEYS}))
+                overrides = {key: value for key, value in science.items() if key in NUMERICAL_KEYS}
+                if args.numerical_max_decimal_products is None:
+                    saved_budget = config["numerical_max_decimal_products"]
+                    overrides["numerical_max_decimal_products"] = (
+                        saved_budget if saved_budget > 0 else OPT_IN_REFINEMENT_MAX_PRODUCTS)
+                config = numerical_config(**(config | overrides))
         else:
             # Preserve recorded draw counts/streams on derived recomputation.
             # Explicit options still replace them; absent optional counterfactual
             # flags do not opt a fresh measurement run into new inference.
+            # Interval certification is likewise opt-in on every normal or
+            # recompute invocation; a previous positive budget is not inherited.
             saved_path = bundle / "run_config.json"
             if saved_path.is_file():
                 from utils.experiments.theory.contracts import read_object, FOUR_STAGE_OPTION_KEYS
@@ -374,7 +381,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 elif args.mean_source is None and inherited.get("mean_source") == "reference-initial":
                     inherited.pop("mean_source", None)
                 science = {**{key: inherited[key] for key in science_keys
-                              if key in inherited and key not in FOUR_STAGE_OPTION_KEYS}, **science}
+                              if key in inherited and key not in FOUR_STAGE_OPTION_KEYS
+                              and key != "numerical_max_decimal_products"}, **science}
                 if args.reference_law == "cached-targets" and args.reference_manifest is None:
                     science.pop("reference_manifest", None)
                 for key, flags in (("center", {"--center", "--use-mu", "--no-mu"}),

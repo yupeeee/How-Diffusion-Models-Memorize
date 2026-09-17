@@ -93,6 +93,7 @@ def tables_fixture(steps=50):
             {
                 "candidate_atom_id": ["a0", "a1", "a2"],
                 "candidate_atom_center_distance_rmse": [1.0, 2.0, 3.0],
+                "weight": [1 / 3, 1 / 3, 1 / 3],
             }
         ),
         summaries={
@@ -634,3 +635,40 @@ def test_every_nonfeedback_figure_has_exact_units_and_population_weighting():
             "displayed metric comparison uses saved all-population curves"
             in metadata["figures"][name]["weighting"]
         )
+
+
+def test_explicit_atom_ecdf_preserves_source_record_multiplicity():
+    from utils.experiments.theory.paper_measurements import exact_weighted_ecdf
+    atoms = pd.DataFrame({"distance": [1., 2., 2.], "weight": [.5, .25, .25]})
+    curve, counts = exact_weighted_ecdf(atoms, "distance", weight_column="weight", distribution="candidate_atoms")
+    assert curve.value.tolist() == [1., 2.]
+    assert curve.cdf.tolist() == [.5, 1.]
+    assert curve.weight.tolist() == [.5, .5]
+    assert counts["structural_weight"] == 1. and counts["finite_weight"] == 1.
+
+
+@pytest.mark.parametrize("bad_mass", [0., -1., np.nan, np.inf])
+def test_explicit_atom_ecdf_rejects_invalid_saved_mass(bad_mass):
+    from utils.experiments.theory.paper_measurements import exact_weighted_ecdf
+    atoms = pd.DataFrame({"distance": [1., 2.], "weight": [.75, bad_mass]})
+    with pytest.raises(ValueError, match="masses.*finite and positive"):
+        exact_weighted_ecdf(atoms, "distance", weight_column="weight")
+
+
+def test_legacy_initial_concentration_uses_saved_atom_masses_and_equal_gaussian_seed_weights():
+    tables = tables_fixture()
+    tables["bank_geometry"]["weight"] = [.5, .25, .25]
+    frames, metadata = build_nonfeedback_plot_inputs(tables, config={"num_seeds": 2, "num_inference_steps": 50})
+    frame = frames["initial_unconditional_concentration"]
+    atoms = frame.loc[frame.distribution.eq("candidate_atoms")]
+    gaussian = frame.loc[frame.distribution.eq("initial_unconditional")]
+    assert atoms.cdf.tolist() == [.5, .75, 1.]
+    assert gaussian.cdf.tolist() == [.5, 1.]
+    assert "source-record multiplicity" in metadata["figures"]["initial_unconditional_concentration"]["weighting"]
+
+
+def test_legacy_initial_concentration_refuses_missing_atom_mass_receipt():
+    tables = tables_fixture()
+    tables["bank_geometry"] = tables["bank_geometry"].drop(columns="weight")
+    with pytest.raises(ValueError, match="weight"):
+        build_nonfeedback_plot_inputs(tables, config={"num_seeds": 2, "num_inference_steps": 50})

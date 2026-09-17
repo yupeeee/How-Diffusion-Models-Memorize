@@ -17,13 +17,13 @@ from utils.common.io import json_value
 from .contracts import TheoryError
 from .direct_figures import PAIR_KEYS, _boolean, _counts, _number, _outcomes, _pair_frame, _require, _statuses
 from .evidence_figures import (
-    BOOTSTRAP_POLICY, BOOTSTRAP_SEED, SAMPLE_KEYS, _curve_summary, _ecdf, _interval,
+    BOOTSTRAP_POLICY, BOOTSTRAP_SEED, DIRECTIONAL_VARIATION_DEFINITION, EVIDENCE_FORMULA_VERSION, SAMPLE_KEYS, _curve_summary, _ecdf, _interval,
     _quantile_description, _segments, _weights, build_evidence_plot_inputs,
 )
 from .paper_registry import GROUPS, paper_registry
 from .summaries import weighted_quantiles
 
-FOUR_STAGE_FORMULA_VERSION = "four-stage-scalar-inputs-1"
+FOUR_STAGE_FORMULA_VERSION = "four-stage-scalar-inputs-projected-gap-error-1"
 DOSE_LINEAR_THRESHOLD = 1e-3
 MOTION_FIELDS = {
     "conditional": "gap_motion_conditional", "unconditional": "gap_motion_unconditional",
@@ -88,7 +88,7 @@ def _prompt_scalar_inputs(trajectory, initial, config, save, auxiliary, *,
     trajectory, initial = trajectory.copy(), initial.copy()
     excluded_terminal_rows = 0
     if transition_domain:
-        # Equation 15 has no t=1 value, even for positive terminal sampler noise.
+        # The revised directional variation excludes t=1, even for positive terminal sampler noise.
         terminal = _number(trajectory, "step_index").eq(steps - 1)
         excluded_terminal_rows = int(terminal.sum())
         trajectory = trajectory.loc[~terminal].copy()
@@ -257,7 +257,7 @@ def _prompt_reference_inputs(trajectory, initial, config, save, auxiliary):
 
 
 def _prompt_variation_inputs(matched, initial, config, save, auxiliary):
-    """Reduce the saved original Equation-15 norm integral, never its sign or bound."""
+    """Reduce saved positive parts of signed directional integrals, never norm diagnostics."""
     stem = "reference_variation_per_prompt"
     value_column, source_column = "mean_reference_variation_rmse", "direct_prop5_variation_rmse"
     steps, seed_count = int(config["num_inference_steps"]), int(config["num_seeds"])
@@ -265,8 +265,12 @@ def _prompt_variation_inputs(matched, initial, config, save, auxiliary):
                           "seed_ids_json", "latent_dimension", "cohort_complete"]
     status_columns = ("direct_prop5_integral_status", "direct_prop5_condition_status",
                       "direct_prop5_quadrature_budget_exhausted", "condition_sign_status",
-                      "condition_value_status", "quadrature_status", "numerical_stopping_reason")
-    required = (source_column, "direct_prop5_applicable", "direct_prop5_integral_status")
+                      "condition_value_status", "quadrature_status", "numerical_stopping_reason",
+                      "direct_prop5_measurement_contract", "direct_prop5_variation_definition",
+                      "direct_prop5_variation_direction_status", "variation_value_identity_status")
+    required = (source_column, "direct_prop5_applicable", "direct_prop5_integral_status",
+                "direct_prop5_measurement_contract", "direct_prop5_variation_definition",
+                "direct_prop5_variation_signed_integral_l2")
     missing = [name for name in required if name not in matched]
     source = matched.copy()
     source["_variation_measurement_eligible"] = _boolean(source, "direct_prop5_applicable")
@@ -275,22 +279,43 @@ def _prompt_variation_inputs(matched, initial, config, save, auxiliary):
             ["estimated_converged", "converged", "numerically_unresolved", "analytic_single_atom_reference"])
     else:
         source["_variation_measurement_eligible"] = False
+    for field, expected in (("direct_prop5_measurement_contract", EVIDENCE_FORMULA_VERSION),
+                            ("direct_prop5_variation_definition", DIRECTIONAL_VARIATION_DEFINITION)):
+        source["_variation_measurement_eligible"] &= (source[field].eq(expected).fillna(False)
+                                                     if field in source else False)
+    signed = _number(source, "direct_prop5_variation_signed_integral_l2")
+    canonical, dimension = _number(source, source_column), _number(source, "latent_dimension")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        expected = signed.clip(lower=0) / np.sqrt(dimension)
+    finite_identity = np.isfinite(signed) & np.isfinite(canonical) & np.isfinite(expected) & dimension.gt(0)
+    identity_tolerance = 128 * np.finfo(float).eps * np.maximum(1., np.maximum(np.abs(canonical), np.abs(expected)))
+    identity_consistent = finite_identity & (np.abs(canonical - expected) <= identity_tolerance)
+    source["variation_value_identity_status"] = np.select(
+        [~finite_identity, ~identity_consistent],
+        ["unavailable_positive_part_identity", "inconsistent_positive_part_identity"],
+        default="consistent_with_float64_estimate")
+    source["_variation_measurement_eligible"] &= identity_consistent
     in_domain = source.loc[_number(source, "step_index").isin(range(max(0, steps - 1)))]
     status_counts = {column: {str(value): int(count) for value, count in in_domain[column].value_counts(dropna=False).items()}
                      for column in status_columns if column in in_domain}
-    scope = ("Saved original norm-integral point estimates, normalized once by sqrt(d); "
+    scope = ("Saved revised directional positive-variation point estimates: positive part after the signed "
+             "unit-gap projection integral, then normalization once by sqrt(d); "
              "finite unresolved quadrature/condition-sign estimates are retained. "
              "These curves are not certified values or uncertainty bands. Missing, negative or nonfinite estimates "
              "and unavailable measurement receipts exclude the entire prompt curve; no zero filling, "
              "interpolation, sign-based substitution or refined-interval midpoint is used.")
 
     def save_variation(frame, **info):
-        info.update(formula_version="reference-variation-per-prompt-1",
+        info.update(formula_version="reference-directional-variation-per-prompt-1",
                     prediction_domain="positive_noise_transitions", missing_measurement_fields=missing,
                     numerical_scope=scope, numerical_status_counts=status_counts,
                     measurement_audit_table="audit_data/feedback_endpoints.csv",
+                    measurement_contract=EVIDENCE_FORMULA_VERSION,
+                    variation_definition=DIRECTIONAL_VARIATION_DEFINITION,
+                    variation_identity_check="Saved V_rmse equals max(0,signed_integral_l2)/sqrt(d), within 128*eps64*max(1,abs(saved),abs(expected)); numerical consistency only, not an interval certificate",
+                    zero_gap_convention="mathcal{V}_t=0 when Delta_t is exactly zero; no unit direction is formed",
                     reference_definition="Current unconditional posterior clean reference bar{x}_t(empty), not selected global mu or the matched segment's left endpoint",
-                    manuscript_domain="Equation 15: t=2,...,T; chronological steps 0,...,T-2; t=1 is excluded")
+                    manuscript_domain="Requested directional revision: t=2,...,T; chronological steps 0,...,T-2; t=1 is excluded")
         if missing and info.get("status") != "not_applicable":
             info.update(status="unavailable", reason="Missing saved variation fields: " + ", ".join(missing)
                         + "; run --recompute-experiments to rebuild analysis scalars")
@@ -299,7 +324,7 @@ def _prompt_variation_inputs(matched, initial, config, save, auxiliary):
     if steps < 2:
         auxiliary[stem + "_cohort"] = pd.DataFrame(columns=PAIR_KEYS + ["eligible", "reason"])
         save_variation(pd.DataFrame(columns=columns), status="not_applicable",
-                       reason="Equation 15 requires t=2,...,T; this configuration has no such transition",
+                       reason="The revised directional variation requires t=2,...,T; this configuration has no such transition",
                        prediction_steps=steps, expected_seed_count=seed_count, expected_seed_ids=list(range(seed_count)),
                        value_column=value_column, value_domain="nonnegative", source_column=source_column)
         return
@@ -647,6 +672,9 @@ def build_four_stage_plot_inputs(tables, config, provenance):
             metadata[stem].update(status="not_applicable", reason="Every transition is outside the recorded manuscript/reference domain")
     for stem in ("posterior_feedback_over_time", "posterior_feedback_condition_margin"):
         metadata[stem]["numerical_resolution_table"] = "audit_data/proposition5_numerical_resolution_rows.csv"
+        # Reuse the saved numerical sign assessment and its separate scope
+        # receipt. Optional interval eligibility is not a display prerequisite.
+        metadata[stem]["condition_display_policy"] = "Saved numerical estimates and optional enclosed signs; unresolved markers/bands follow sign uncertainty, not absence of interval certification"
     auxiliary["feedback_endpoints"] = tables["matched_updates"].copy()
     _prompt_variation_inputs(tables["matched_updates"], actual, config, save, auxiliary)
 
@@ -682,6 +710,10 @@ def build_four_stage_plot_inputs(tables, config, provenance):
             save(entry["stem"], pd.DataFrame(), reason="Optional compatible measurement was not recorded; plot mode does not backfill scientific work")
     audit["blocking"] = bool(audit.get("blocking", False) or any(value["status"] == "blocked" for value in metadata.values()))
     audit["figure_blockers"] = sorted(stem for stem, info in metadata.items() if info["status"] == "blocked")
+    for stem in ("posterior_feedback_over_time", "posterior_feedback_condition_margin", "synchronization_bound",
+                 "final_reproduction_bound", "terminal_bound_coverage"):
+        metadata[stem].update(formula_version="projected-gap-error-1",
+                              measurement_contract="projected-gap-error-1")
     return frames, {"figures": metadata, "audit": audit, "auxiliary_tables": auxiliary,
                     "initial_baseline_summary": auxiliary.get("initial_baseline_summary", pd.DataFrame()).to_dict("records")}
 
@@ -1049,7 +1081,7 @@ def _terminal_grouped_coverage(terminal, frames, metadata, save, auxiliary):
     if frame.empty and status not in {"blocked", "not_applicable"}:
         status = "unavailable"
         reason = "No eligible terminal samples with finite same-seed SSCD in either fixed outcome group"
-    info.update(formula_version="terminal-coverage-by-sscd-1", source_comparison=source,
+    info.update(formula_version="projected-gap-error-1", source_comparison=source,
         counts={"total": int(len(terminal)), "common_eligible": int(len(chosen)),
                 "eligible": int(len(common)), "excluded": int(len(terminal) - len(common)),
                 "excluded_before_sscd_grouping": int(len(terminal) - len(chosen)),

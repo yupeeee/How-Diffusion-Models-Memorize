@@ -97,7 +97,7 @@ FIGURE_WEIGHTING.update(
 )
 FIGURE_WEIGHTING.update(
     {
-        "initial_unconditional_concentration": "Separate equal-weight populations: unique evaluation run/seed pairs and exact distinct candidate atoms.",
+        "initial_unconditional_concentration": "Separate populations: equal weight per unique evaluation run/seed pair; saved empirical-law mass per distinct candidate atom, including duplicate source-record multiplicity.",
         "initial_candidate_reference_discrepancy": "One unaggregated observation per unique initial evaluation run/seed pair; no duplication over prompts and no cohort aggregation.",
         "initial_reference_snr_sweep": "Equal weight over the same unique evaluation run/seed pairs at every analytical SNR.",
         "initial_recovery_within_prompt": "Center both variables over the same prompt's finite paired seeds before outcome grouping. Retain degenerate rows; the saved descriptive trend uses equal prompt mass divided over finite seeds in prompts with usable within-prompt variation. Missing and degenerate rows are excluded from that fit with saved statuses.",
@@ -202,12 +202,18 @@ def _finite_limits(*arrays):
 
 
 def exact_weighted_ecdf(
-    frame, value_column, *, weighted=True, group="all", branch=None, distribution=None
+    frame, value_column, *, weighted=True, weight_column=None, group="all", branch=None, distribution=None
 ):
     """Exact support; missing observations never change other seeds' base mass."""
     values = _numeric(frame, value_column).to_numpy()
     finite = np.isfinite(values)
-    weights = prompt_weights(frame).to_numpy() if weighted else np.ones(len(frame))
+    if weight_column is not None:
+        _require(frame, [weight_column], "explicit ECDF masses")
+        weights = _numeric(frame, weight_column).to_numpy()
+        if not (np.isfinite(weights) & (weights > 0)).all():
+            raise ValueError("Explicit ECDF masses must be finite and positive")
+    else:
+        weights = prompt_weights(frame).to_numpy() if weighted else np.ones(len(frame))
     structural_mass = float(weights.sum())
     values, weights = values[finite], weights[finite]
     order = np.argsort(values, kind="stable")
@@ -711,7 +717,7 @@ def build_nonfeedback_plot_inputs(tables, *, config, diagnostics=False):
         ["run_id", "seed", "unconditional_center_rmse"],
         "unique initial baseline",
     )
-    _require(bank, ["candidate_atom_center_distance_rmse"], "candidate bank geometry")
+    _require(bank, ["candidate_atom_center_distance_rmse", "weight"], "candidate bank geometry")
     if baseline.duplicated(["run_id", "seed"]).any():
         raise ValueError(
             "Initial unconditional baseline must have one observation per unique run/seed"
@@ -734,7 +740,7 @@ def build_nonfeedback_plot_inputs(tables, *, config, diagnostics=False):
     atom_ecdf, atom_counts = exact_weighted_ecdf(
         bank,
         "candidate_atom_center_distance_rmse",
-        weighted=False,
+        weight_column="weight",
         distribution="candidate_atoms",
     )
     center = manifest.get("center_metadata", {})

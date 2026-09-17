@@ -2,20 +2,22 @@
 from copy import deepcopy
 
 import matplotlib.pyplot as plt
+from matplotlib.collections import PathCollection
+from matplotlib.colors import to_rgba
+from matplotlib.markers import MarkerStyle
 import numpy as np
 import pytest
 
-from tests.test_theory_paper_plotting import compact_fixture
+from tests.test_theory_paper_plotting import compact_fixture, load_measurement_inputs
 from utils.experiments.theory.contracts import TheoryError
-from utils.experiments.theory.paper_contracts import load_paper_inputs
 from utils.experiments.theory.paper_plotting import _draw
-from utils.experiments.theory.paper_registry import paper_registry
+from utils.experiments.theory.paper_registry import measurement_registry
 
 
 def inputs(tmp_path):
     root = compact_fixture(tmp_path / "paper", terminal=False)
-    config, summary, _, frames = load_paper_inputs(root)
-    return config, summary, frames, {entry["stem"]: entry for entry in paper_registry()}
+    config, summary, _, frames = load_measurement_inputs(root)
+    return config, summary, frames, {entry["stem"]: entry for entry in measurement_registry()}
 
 
 def draw(data, stem, *, frame=None, metadata=None):
@@ -131,7 +133,7 @@ def test_terminal_log_zeros_use_edge_markers_without_pseudodata(tmp_path):
         plt.close(fig)
 
 
-def test_default_appendix_has_no_small_free_annotations_and_readable_legends(tmp_path):
+def test_retained_measurement_artists_have_no_small_free_annotations_and_readable_legends(tmp_path):
     from matplotlib.legend import Legend
     data = inputs(tmp_path)
     for entry in data[3].values():
@@ -290,6 +292,9 @@ def test_chronological_limits_use_all_displayed_curves_and_bands_only(tmp_path, 
     data = inputs(tmp_path)
     frame = data[2][stem].copy()
     frame["minimum"], frame["maximum"] = 0., 1e6
+    if stem == "synchronization_bound":
+        # The saved maximum-distance curve must not affect artists or limits.
+        frame.loc[frame.metric.eq("joint_error"), ["median", "q25", "q75"]] = [1e5, 1e4, 1e6]
     before = frame.copy(deep=True)
     metadata = deepcopy(data[1]["figures"][stem])
     metadata["y_limits"] = [0., 2e6]  # Old presentation limits cannot override curation.
@@ -328,7 +333,9 @@ def test_margin_keeps_signed_points_zero_guides_and_positive_empty_space(tmp_pat
         assert ax.get_yscale() == "symlog"
         assert any(np.all(np.asarray(line.get_xdata()) == 0) for line in ax.lines)
         assert any(np.all(np.asarray(line.get_ydata()) == 0) for line in ax.lines)
-        assert audit["finite_pairs"] == 4 and "external" in audit["legend_placement"]
+        assert audit["finite_pairs"] == 4 and audit["legend_placement"] == "none"
+        assert audit["display_policy"] == "finite_saved_values"
+        assert ax.get_legend() is None
         assert frame.equals(before)
     finally:
         plt.close(fig)
@@ -549,6 +556,7 @@ def test_guidance_fit_sqrt_displays_saved_squared_loss_without_changing_fit_or_c
         np.testing.assert_array_equal(scatter.get_offsets(), np.column_stack([np.sqrt(frame.x), frame.y]))
         np.testing.assert_array_equal(scatter.get_array(), frame.mean_terminal_sscd)
         assert np.all(scatter.get_sizes() == SCATTER_SIZE)
+        assert scatter.get_alpha() == .8
         assert scatter.cmap.name == "viridis" and (scatter.norm.vmin, scatter.norm.vmax) == (0., 1.)
         assert ax.get_xscale() == ax.get_yscale() == "linear"
         assert ax.get_xlim()[0] == 0. and 3. < ax.get_xlim()[1] < 9.
@@ -653,5 +661,44 @@ def test_guidance_fit_ignores_stale_limits_that_hide_saved_points_or_configured_
         assert ax.get_ylim()[0] < frame.y.min()
         assert ax.get_ylim()[1] > max(guidance, frame.y.max())
         assert audit["guidance_reference_value"] == guidance
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("with_classifications", [True, False])
+def test_margin_draws_every_finite_saved_pair_as_circle_without_status_legend(tmp_path, with_classifications):
+    data = inputs(tmp_path)
+    stem = "posterior_feedback_condition_margin"
+    frame = data[2][stem].reindex(range(6)).copy()
+    frame["x"] = [-100., -1., -.1, -.01, np.nan, np.inf]
+    frame["y"] = [-2., -.2, 0., .3, 1., -1.]
+    frame["terminal_sscd"] = [.2, np.nan, np.inf, .9, .5, .5]
+    frame["marker_class"] = ["observed", "numerically_unresolved", "unrecognized_audit_status", None, "observed", "observed"]
+    frame["condition_sign_status"] = ["positive", "unresolved", "negative", "unavailable", "positive", "negative"]
+    frame["fixed_cache_gain_sign"] = ["negative", "unresolved", "zero", "unavailable", "positive", "negative"]
+    frame["applicable"] = [True, False, False, None, True, True]
+    if not with_classifications:
+        frame = frame.drop(columns=["marker_class", "condition_sign_status", "fixed_cache_gain_sign", "applicable"])
+    before = frame.copy(deep=True)
+    fig, audit = draw(data, stem, frame=frame)
+    try:
+        ax = fig.axes[0]
+        collections = [item for item in ax.collections if isinstance(item, PathCollection)]
+        offsets = np.vstack([np.asarray(item.get_offsets()) for item in collections])
+        assert sorted(map(tuple, offsets)) == sorted(map(tuple, frame.loc[:3, ["x", "y"]].to_numpy()))
+        circle = MarkerStyle("o")
+        circle_path = circle.get_path().transformed(circle.get_transform())
+        for item in collections:
+            assert np.array_equal(item.get_paths()[0].codes, circle_path.codes)
+            assert np.allclose(item.get_paths()[0].vertices, circle_path.vertices)
+        grey = [item for item in collections if item.get_array() is None]
+        assert sum(len(item.get_offsets()) for item in grey) == 2
+        assert all(np.allclose(item.get_facecolors()[:, :3], to_rgba(".5")[:3]) for item in grey)
+        assert ax.get_legend() is None and not ax.texts
+        assert audit["display_policy"] == "finite_saved_values"
+        assert audit["legend_placement"] == "none"
+        assert audit["finite_pairs"] == 4
+        assert fig.axes[1].get_ylabel() == "SSCD"
+        assert frame.equals(before)
     finally:
         plt.close(fig)

@@ -16,6 +16,7 @@ LOG_ODDS_EDGES = np.array([-np.inf, -10.0, -5.0, -2.0, 0.0, 2.0, 5.0, 10.0, np.i
 RECOVERY_TOLERANCES = (0.1, 0.2, 0.3, 0.5, 1.0)
 STABILITY_SALT = "candidate-target-stability-v1"
 SUMMARY_POLICY = {
+    "variation_contract": "projected-gap-error-1; signed projected branch-gap reference error; positive-part signed variation with norm and absolute-projection variation diagnostics",
     "weighting": "Within each reported subset, equal total mass per complete prompt identity; equal mass per included seed within prompt; repeated observations divide that seed's mass equally.",
     "quantiles": "inverse weighted empirical CDF; IQR is descriptive dispersion, not a confidence interval",
     "outcome_groups": list(GROUPS),
@@ -56,6 +57,7 @@ TIME_METRICS = (
     "candidate_conditional_error_l2",
     "candidate_combined_reference_error_l2",
     "candidate_signed_error_projection_l2",
+    "candidate_variation_positive_signed_integral_l2",
     "candidate_variation_norm_integral_l2",
     "candidate_variation_abs_projected_integral_l2",
     "candidate_variation_signed_integral_l2",

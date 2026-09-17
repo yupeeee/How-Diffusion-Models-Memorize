@@ -14,12 +14,17 @@ import math
 
 import torch
 
+from .branch_gap import (BRANCH_GAP_ERROR_DEFINITION, BRANCH_GAP_ZERO_CONVENTION,
+                         branch_gap_norm, projected_branch_gap_error, unit_branch_gap)
 from .feedback import _logits, _posterior_fields
 
-ENDPOINT_VERSION = "candidate-endpoints-2"
+ENDPOINT_VERSION = "candidate-endpoints-projected-gap-error-5"
 CONTROL_SALT = "candidate-feedback-specificity-controls-v1"
 ENDPOINT_POLICY = {
     "version": ENDPOINT_VERSION,
+    "measurement_contract": "projected-gap-error-1",
+    "branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+    "branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
     "arithmetic": "float64; stable_logsum_difference_and_softplus_difference",
     "gain_sign": "arithmetic_resolved_log_odds_order; input_sensitivity_separate",
     "direction": "observed_D_and_h_exceed_float64_subtraction_scale_only",
@@ -141,6 +146,9 @@ _FLOAT_FIELDS = (
     "displacement_norm_l2",
     "current_reference_error_u_l2",
     "conditional_error_l2",
+    "reference_branch_gap_l2",
+    "branch_gap_error_l2",
+    "branch_gap_error_norm_diagnostic_l2",
     "combined_reference_error_l2",
     "signed_error_projection_l2",
     "current_alignment_cosine",
@@ -201,6 +209,9 @@ def unavailable_endpoint(count, *, device="cpu", reason="not_applicable", guidan
         {"candidate_" + key: ["not_applicable"] * count for key in _STATUS_FIELDS}
     )
     scalars["candidate_feedback_status"] = [reason] * count
+    scalars["candidate_measurement_contract"] = ["projected-gap-error-1"] * count
+    scalars["candidate_branch_gap_error_definition"] = [BRANCH_GAP_ERROR_DEFINITION] * count
+    scalars["candidate_branch_gap_error_zero_convention"] = [BRANCH_GAP_ZERO_CONVENTION] * count
     for key in ("feedback_eligible", "gain_saturated", "gain_underflow"):
         scalars["candidate_" + key] = torch.zeros(
             count, dtype=torch.bool, device=device
@@ -347,7 +358,7 @@ def endpoint_metrics(
         result.scalars["candidate_feedback_status"] = ["no_distinct_competitor"] * n
         return result
     delta = mc - mu
-    D = delta.norm(dim=1)
+    D = branch_gap_norm(delta)
     shift = g * kap * delta
     hnorm = shift.norm(dim=1)
     eps = torch.finfo(torch.float64).eps
@@ -361,11 +372,7 @@ def endpoint_metrics(
         D > 0, source / torch.where(D > 0, D, torch.ones_like(D)), torch.nan
     )
     zero_shift = (shift == 0).all(dim=1)
-    direction = torch.where(
-        (D > 0)[:, None],
-        delta / torch.where(D > 0, D, torch.ones_like(D))[:, None],
-        torch.zeros_like(delta),
-    )
+    direction = unit_branch_gap(delta)
     beta = an / sn**2
     differences = support.target_geometry(target)[0]
     current_logits = _logits(support, z, target, a, s)
@@ -373,8 +380,9 @@ def endpoint_metrics(
     current_reference = current_weights @ support.flat
     rc, ru = mc - support.flat[target], mu - current_reference
     ec, eu = rc.norm(dim=1), ru.norm(dim=1)
-    combined = (rc - ru).norm(dim=1)
-    S = (direction * (ru - rc)).sum(dim=1)
+    combined = projected_branch_gap_error(delta, support.flat[target] - current_reference)
+    error_norm_diagnostic = branch_gap_norm(delta - (support.flat[target] - current_reference))
+    S = -combined
     target_direction = support.flat[target] - current_reference
     target_distance = target_direction.norm(dim=1)
     alignment_ok = direction_ok & (
@@ -462,8 +470,11 @@ def endpoint_metrics(
         "displacement_norm_l2": hnorm,
         "current_reference_error_u_l2": eu,
         "conditional_error_l2": ec,
+        "reference_branch_gap_l2": target_distance,
+        "branch_gap_error_l2": combined,
+        "branch_gap_error_norm_diagnostic_l2": error_norm_diagnostic,
         "combined_reference_error_l2": combined,
-        "signed_error_projection_l2": torch.where(direction_ok, S, torch.nan),
+        "signed_error_projection_l2": S,
         "current_alignment_cosine": torch.where(alignment_ok, alignment, torch.nan),
         "next_reference_matched_target_error_rmse": distance0,
         "next_reference_guided_target_error_rmse": distance1,
@@ -687,8 +698,15 @@ def endpoint_metrics(
         "slopes": slopes,
         "current_weights": current_weights,
         "delta_norm": D,
+        "delta_exact_zero": (delta == 0).all(dim=1),
         "conditional_error": ec,
         "unconditional_reference_error": eu,
+        "reference_branch_gap": target_distance,
+        "branch_gap_error": combined,
+        "branch_gap_error_norm_diagnostic": error_norm_diagnostic,
+        "branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+        "branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+        "measurement_contract": "projected-gap-error-1",
         "combined_reference_error": combined,
         "signed_error_projection": S,
         "source_error_l2": source,

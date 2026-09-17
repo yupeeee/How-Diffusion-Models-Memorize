@@ -25,6 +25,8 @@ def test_fresh_paper_entry_uses_one_shared_direct_stage(tmp_path, monkeypatch):
     assert len(calls) == 1 and calls[0]["probe_batch_size"] == 4
     saved, summary, _, frames = load_paper_inputs(output, expected_config=direct_config())
     assert saved["source_analysis"]["mode"] == "preserved_numerical_and_evidence_measurements"
-    assert "branch_gap_posterior_response" in frames
+    assert "posterior_feedback_condition_margin" in frames
+    assert "branch_gap_posterior_response" not in frames
+    assert "branch_gap_posterior_response" in summary["plot_data"]
     assert summary["counts"]["trajectory_rows"] == len(measured_fixture(tmp_path)["tables"]["trajectory"])
     assert not list((tmp_path / "outputs").glob("*/theory_v2"))

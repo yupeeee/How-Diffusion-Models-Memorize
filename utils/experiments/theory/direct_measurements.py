@@ -1,8 +1,9 @@
 """Shared cached-vector measurements of Corollary 3 through Theorem 7.
 
 No learned component or raw-cache loader is called here. The orchestrator loads
-one record and supplies its canonical epsilon branches. Default Proposition 5
-uses the original norm variation from the existing adaptive Gram integrator.
+one record and supplies its canonical epsilon branches. The feedback penalty is
+the positive part of the integrated unit-gap projection of the cross-step
+unconditional reference displacement, with clipping only after integration.
 """
 from __future__ import annotations
 
@@ -13,19 +14,29 @@ import math
 import pandas as pd
 import torch
 
+from .branch_gap import (BRANCH_GAP_ERROR_DEFINITION, BRANCH_GAP_ZERO_CONVENTION,
+                         projected_branch_gap_error)
 from .candidate_feedback import stable_log_probability_gain, stable_logsum_difference
 from .candidate_integration import DEFAULT_INTEGRATION
 from .direct_integration import integrate_proposition5_payload
 from .feedback import _logits, _posterior_fields
 from .metrics import clean_estimates
 
-DIRECT_MEASUREMENT_VERSION = "direct-cached-vectors-1"
+DIRECT_MEASUREMENT_VERSION = "direct-cached-vectors-projected-gap-error-1"
+MEASUREMENT_CONTRACT = "projected-gap-error-1"
 DIRECT_INTEGRATION_RECIPE = {
-    "version": "direct-original-V-and-signed-integral-1",
+    "version": "direct-projected-gap-error-1",
+    "measurement_contract": MEASUREMENT_CONTRACT,
+    "branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+    "branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+    "condition": "||Delta|| - unit_Delta dot (Delta-reference_Delta) - V",
     **asdict(DEFAULT_INTEGRATION),
-    "variation": "integral_0^1 ||posterior_mean_next(cf+s*g*kappa*Delta)-posterior_mean_current(state)|| ds",
+    "variation": "max(0, integral_0^1 (Delta/||Delta||).(posterior_mean_next(cf+s*g*kappa*Delta)-posterior_mean_current(state)) ds)",
+    "positive_part_placement": "after the signed integral, before per-seed averaging",
+    "zero_gap_convention": "V=0_when_Delta_is_exactly_zero",
+    "directional_domain": "t=2,...,T; no final-output variation",
     "status_scope": "embedded_quadrature_and_source_sensitivity_estimates_not_certified_enclosures",
-    "reuse": "candidate_integration.wide_partition_and_joint_Gram_integrator; original_norm_variation_only_for_primary_condition",
+    "reuse": "candidate_integration.wide_partition_and_signed_projection_integrator; norm_integral_retained_as_separate_diagnostic",
 }
 
 
@@ -89,6 +100,9 @@ def current_reference_metrics(state, mu, mc, target, law, target_id, alpha, sigm
         nan = torch.full((len(flat),), torch.nan, dtype=torch.float64, device=flat.device)
         result = {"direct_lemma6_applicable": False,
                   "direct_lemma6_status": "unavailable_current_reference_nonpositive_noise",
+                  "direct_measurement_contract": MEASUREMENT_CONTRACT,
+                  "direct_branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+                  "direct_branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
                   "direct_target_log_probability": nan, "direct_target_log_complement": nan,
                   "direct_target_log_odds": nan, "direct_non_target_mass": nan,
                   "direct_target_radius_l2": law.radius_for(target),
@@ -96,7 +110,7 @@ def current_reference_metrics(state, mu, mc, target, law, target_id, alpha, sigm
                   "direct_radius_tail_status": "unavailable_current_reference",
                   "direct_reference_target_positive_mass": target_id is not None}
         for name in ("conditional_error", "unconditional_reference_error", "unconditional_target_error",
-                     "reference_target_error", "reference_mean_offset", "reference_to_bank_mean_error", "radius_tail", "branch_gap", "lemma6_rhs", "lemma6_gap"):
+                     "reference_target_error", "reference_branch_gap", "branch_gap_error", "branch_gap_error_norm_diagnostic", "reference_mean_offset", "reference_to_bank_mean_error", "radius_tail", "branch_gap", "lemma6_rhs", "lemma6_gap"):
             value = _norm(mc - target, ndim) if name == "conditional_error" else _norm(mu - target, ndim) if name == "unconditional_target_error" else _norm(mc - mu, ndim) if name in {"branch_gap", "lemma6_gap"} else nan
             _put_norm(result, "direct_" + name, value, d)
         return result, torch.full((len(flat), support.size), torch.nan, dtype=torch.float64, device=flat.device), torch.full_like(mu, torch.nan)
@@ -117,7 +131,9 @@ def current_reference_metrics(state, mu, mc, target, law, target_id, alpha, sigm
     ec, eu = _norm(mc - target, ndim), _norm(mu - mean, ndim)
     gap = _norm(mc - mu, ndim)
     ref_target = _norm(mean - target, ndim)
-    rhs = ec + eu + radius_tail
+    branch_gap_error = projected_branch_gap_error(mc - mu, target - mean, latent_ndim=ndim)
+    norm_diagnostic = _norm((mc - mu) - (target - mean), ndim)
+    rhs = branch_gap_error + radius_tail
     underflow = (radius > 0) & torch.isfinite(logtail) & (radius_tail == 0)
     result = {
         "direct_target_log_probability": fields["log_probability"],
@@ -128,7 +144,11 @@ def current_reference_metrics(state, mu, mc, target, law, target_id, alpha, sigm
         "direct_radius_tail_underflow": underflow,
         "direct_reference_target_positive_mass": target_id is not None,
         "direct_lemma6_applicable": torch.isfinite(rhs) & torch.isfinite(gap),
-        "direct_lemma6_status": "declared_finite_law_and_assumed_single_target_conditional",
+        "direct_lemma6_status": "branch_gap_error_refined_bound",
+        "direct_measurement_contract": MEASUREMENT_CONTRACT,
+        "direct_branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+        "direct_branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+        "direct_lemma6_comparison_scope": "signed_projected_gap_error_plus_radius_tail; projection_bound_under_single_target_reference",
         "direct_lemma6_numerical_status": ["nonzero_tail_underflow" if value else "finite_float64_estimate" for value in underflow.tolist()],
         "direct_lemma6_zero_rhs_is_exact": (rhs == 0) & ~underflow,
         "direct_lemma6_slack_l2": rhs - gap,
@@ -139,7 +159,9 @@ def current_reference_metrics(state, mu, mc, target, law, target_id, alpha, sigm
     for name, value in (
         ("conditional_error", ec), ("unconditional_reference_error", eu),
         ("unconditional_target_error", _norm(mu - target, ndim)),
-        ("reference_target_error", ref_target),
+        ("reference_target_error", ref_target), ("reference_branch_gap", ref_target),
+        ("branch_gap_error", branch_gap_error),
+        ("branch_gap_error_norm_diagnostic", norm_diagnostic),
         ("reference_mean_offset", _norm(mean - law.theory_mean_vector, ndim)),
         ("reference_to_bank_mean_error", _norm(mean - law.mean_vector, ndim)),
         ("radius_tail", radius_tail), ("branch_gap", gap),
@@ -156,6 +178,8 @@ def current_reference_metrics(state, mu, mc, target, law, target_id, alpha, sigm
 def _unavailable_prop5(count, device, reason, *, status="not_applicable"):
     names = (
         "margin_l2", "margin_rmse", "variation_l2", "variation_rmse", "variation_error_l2",
+        "variation_signed_integral_l2", "variation_signed_integral_error_l2",
+        "variation_norm_diagnostic_l2", "variation_norm_diagnostic_error_l2", "projection_roundoff_l2",
         "log_probability_gain", "log_odds_gain", "integrated_gain", "integrated_gain_error",
         "signed_integral", "lower_bound", "lower_bound_slack", "uncertainty_l2",
         "gain_arithmetic_tolerance", "integral_identity_residual", "integral_identity_allowance",
@@ -173,6 +197,13 @@ def _unavailable_prop5(count, device, reason, *, status="not_applicable"):
         "direct_prop5_strict_positive_condition": [None] * count,
         "direct_prop5_zero_displacement": [None] * count,
         "direct_prop5_certification_status": "not_certified_quadrature_estimate",
+        "direct_prop5_measurement_contract": MEASUREMENT_CONTRACT,
+        "direct_prop5_branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+        "direct_prop5_branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+        "direct_prop5_variation_definition": "positive_part_after_integrated_unit_gap_projection",
+        "direct_prop5_zero_gap_convention": "V=0_when_Delta_is_exactly_zero",
+        "direct_prop5_variation_direction_status": ["not_applicable"] * count,
+        "direct_prop5_comparison_scope": "branch_gap_error_refinement; implication_requires_original_endpoint_and_reference_contracts",
         "direct_prop5_quadrature_budget_exhausted": [None] * count,
     })
     return result
@@ -182,7 +213,7 @@ def proposition5_metrics(state, mu, mc, matched, observed, target, target_id,
                          law, coeff, current_weights, reference_mean, source_error,
                          reconstruction_valid, guidance, *, config=None, integrate=True,
                          payload_callback=None):
-    """Direct endpoint gain plus the ORIGINAL V condition; no refined substitution."""
+    """Direct endpoint gain and the branch-gap-error-minus-V condition."""
     support, g = law.support, float(guidance)
     count, d = len(state), support.dimension
     result = _unavailable_prop5(count, state.device, "inapplicable_destination_or_reference")
@@ -192,17 +223,23 @@ def proposition5_metrics(state, mu, mc, matched, observed, target, target_id,
     config = DEFAULT_INTEGRATION if config is None else config
     if support.size == 1:
         D = _norm(mc - mu, target.ndim)
-        ec, eu = _norm(mc - target, target.ndim), _norm(mu - target, target.ndim)
-        margin = D - ec - eu
+        branch_gap_error = projected_branch_gap_error(mc - mu, target - reference_mean, latent_ndim=target.ndim)
+        margin = D - branch_gap_error
         zero = torch.zeros_like(D)
         prefactor = coeff.destination_alpha * g * coeff.kappa / coeff.destination_sigma**2
-        uncertainty = source_error + 128 * torch.finfo(torch.float64).eps * (D + ec + eu)
+        uncertainty = source_error + 128 * torch.finfo(torch.float64).eps * (D + branch_gap_error.abs())
         result.update(
             direct_prop5_applicable=True,
             direct_prop5_status="analytic_single_atom_reference_probability_one",
             direct_prop5_margin_l2=margin, direct_prop5_margin_rmse=margin / math.sqrt(d),
             direct_prop5_variation_l2=zero, direct_prop5_variation_rmse=zero,
             direct_prop5_variation_error_l2=zero,
+            direct_prop5_variation_signed_integral_l2=zero,
+            direct_prop5_variation_signed_integral_error_l2=zero,
+            direct_prop5_variation_norm_diagnostic_l2=zero,
+            direct_prop5_variation_norm_diagnostic_error_l2=zero,
+            direct_prop5_projection_roundoff_l2=zero,
+            direct_prop5_variation_direction_status=["exact_zero_gap_convention" if bool(value) else "analytic_constant_reference" for value in (mc == mu).reshape(count, -1).all(dim=1).tolist()],
             direct_prop5_log_probability_gain=zero,
             direct_prop5_gain_status=["zero"] * count,
             direct_prop5_integrated_gain=zero, direct_prop5_integrated_gain_error=zero,
@@ -222,7 +259,7 @@ def proposition5_metrics(state, mu, mc, matched, observed, target, target_id,
             direct_prop5_zero_displacement=D == 0,
             direct_prop5_nonnegative_condition=margin >= 0,
             direct_prop5_strict_positive_condition=margin > 0,
-            direct_prop5_condition_status=["estimated_negative" if m < -e else "numerically_unresolved" for m, e in zip(margin.tolist(), uncertainty.tolist())],
+            direct_prop5_condition_status=["estimated_positive" if m > e else "estimated_negative" if m < -e else "numerically_unresolved" for m, e in zip(margin.tolist(), uncertainty.tolist())],
             direct_prop5_estimated_condition_sign=["positive" if m > 0 else "negative" if m < 0 else "arithmetic_zero" for m in margin.tolist()],
             direct_prop5_certification_status="analytic_constant_reference_integral; margin_source_sensitivity_not_certified",
             direct_prop5_matched_log_probability=zero,
@@ -249,7 +286,7 @@ def proposition5_metrics(state, mu, mc, matched, observed, target, target_id,
         torch.ones_like(G), torch.maximum(intercept.abs().amax(dim=1), endpoint.abs().amax(dim=1))
     )
     rc, ru = (mc - target).reshape(count, -1), (mu - reference_mean).reshape(count, -1)
-    direction = delta / torch.where(D > 0, D, torch.ones_like(D))[:, None]
+    branch_gap_error = projected_branch_gap_error(delta, (target - reference_mean).reshape(count, -1))
     direction_ok = D > 128 * torch.finfo(torch.float64).eps * (
         _norm(mc, target.ndim) + _norm(mu, target.ndim)
     )
@@ -257,10 +294,17 @@ def proposition5_metrics(state, mu, mc, matched, observed, target, target_id,
         "schema_version": 1, "bank_hash": law.law_hash, "target_atom": index,
         "dimension": d, "beta": beta, "guidance": g, "kappa": coeff.kappa,
         "intercept": intercept, "slopes": slopes, "current_weights": current_weights,
-        "delta_norm": D, "conditional_error": _norm(rc, 1),
+        "delta_norm": D, "delta_exact_zero": (delta == 0).all(dim=1),
+        "conditional_error": _norm(rc, 1),
         "unconditional_reference_error": _norm(ru, 1),
-        "combined_reference_error": _norm(rc - ru, 1),
-        "signed_error_projection": (direction * (ru - rc)).sum(dim=1),
+        "reference_branch_gap": _norm(target - reference_mean, target.ndim),
+        "branch_gap_error": branch_gap_error,
+        "branch_gap_error_norm_diagnostic": _norm(delta - (target - reference_mean).reshape(count, -1), 1),
+        "branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+        "branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+        "measurement_contract": MEASUREMENT_CONTRACT,
+        "combined_reference_error": branch_gap_error,
+        "signed_error_projection": -branch_gap_error,
         "source_error_l2": source_error, "direction_resolved": direction_ok,
         "direct_log_probability_gain": H, "gain_arithmetic_tolerance": arithmetic,
         "reconstruction_valid": reconstruction_valid,
@@ -305,9 +349,9 @@ def proposition5_metrics(state, mu, mc, matched, observed, target, target_id,
 def theorem7_metrics(mu, mc, target, observed, law, reference, terminal, guidance, tolerance=None):
     """Keep the raw endpoint comparison even when the clean-update gate fails."""
     g, d, ndim = float(guidance), target.numel(), target.ndim
-    ec, eu, tail = (reference[name] for name in (
-        "direct_conditional_error_l2", "direct_unconditional_reference_error_l2", "direct_radius_tail_l2"))
-    bound = g * ec + (g - 1) * (eu + tail)
+    ec, branch_gap_error, tail = (reference[name] for name in (
+        "direct_conditional_error_l2", "direct_branch_gap_error_l2", "direct_radius_tail_l2"))
+    bound = ec + (g - 1) * (branch_gap_error + tail)
     error = _norm(observed - target, ndim)
     structural = bool(terminal["terminal_clean_structural"])
     numerical = torch.as_tensor(terminal["terminal_clean_numeric_within_sensitivity"], dtype=torch.bool, device=error.device)
@@ -315,13 +359,14 @@ def theorem7_metrics(mu, mc, target, observed, law, reference, terminal, guidanc
     applicable = valid & numerical & structural & (g > 1)
     result = {
         "direct_theorem7_applicable": applicable,
+        "direct_theorem7_measurement_contract": MEASUREMENT_CONTRACT,
         "direct_theorem7_structural_clean": structural,
         "direct_theorem7_numeric_within_sensitivity": numerical,
         "direct_theorem7_numeric_tolerance_rmse": terminal["terminal_clean_numeric_tolerance_rmse"],
         "direct_theorem7_scheduler_residual_l2": terminal["scheduler_rho_l2"],
         "direct_theorem7_scheduler_residual_rmse": terminal["scheduler_rho_rmse"],
         "direct_theorem7_structural_reason": terminal["terminal_clean_structural_reason"],
-        "direct_theorem7_status": ["applicable_declared_law_and_single_target_assumption" if applies else
+        "direct_theorem7_status": ["applicable_branch_gap_error_refined_bound" if applies else
             "inapplicable_clean_update:" + str(terminal["terminal_clean_structural_reason"]) if not structural else
             "outside_manuscript_guidance_domain_g_gt_1" if g <= 1 else
             "missing_reference_quantity" if not finite else "numerical_clean_update_unresolved"
@@ -334,10 +379,10 @@ def theorem7_metrics(mu, mc, target, observed, law, reference, terminal, guidanc
         "direct_theorem7_radius_tail_underflow": reference["direct_radius_tail_underflow"],
         "direct_theorem7_condition_certified": [None] * len(error) if tolerance is None else applicable & ~reference["direct_radius_tail_underflow"] & (bound <= float(tolerance)),
         "direct_theorem7_actual_proximity": [None] * len(error) if tolerance is None else error <= float(tolerance),
-        "direct_theorem7_certification_scope": "theorem_sufficient_event_on_saved_scalar_estimates_given_applicability_and_assumed_reference_law_not_interval_arithmetic",
+        "direct_theorem7_certification_scope": "branch_gap_error_refined_sufficient_event_given_applicability_and_reference_law; scalar_estimate_not_interval_certificate",
     }
-    for name, value in (("bound", bound), ("endpoint_error", error), ("conditional_term", g * ec),
-                        ("unconditional_term", (g - 1) * eu), ("concentration_term", (g - 1) * tail)):
+    for name, value in (("bound", bound), ("endpoint_error", error), ("conditional_term", ec),
+                        ("branch_gap_error_term", (g - 1) * branch_gap_error), ("concentration_term", (g - 1) * tail)):
         _put_norm(result, "direct_theorem7_" + name, value, d)
     for key in ("terminal_eq16_vector_residual_rmse", "terminal_eq16_squared_l2_from_terms",
                 "terminal_cross_term_squared_l2", "terminal_cross_term_per_dimension",

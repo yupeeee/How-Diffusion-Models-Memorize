@@ -72,8 +72,9 @@ ENDPOINT_SOURCE_FILES = (
     "scheduler_adapter.py",
     "support.py",
     "feedback.py",
+    "branch_gap.py",
 )
-SHARED_ENDPOINT_VERSION = "shared-base-candidate-endpoints-1"
+SHARED_ENDPOINT_VERSION = "shared-base-candidate-endpoints-empirical-prior-2"
 SHARED_ENDPOINT_DIRECTORY = "candidate_endpoint_extension"
 
 
@@ -164,6 +165,12 @@ def _list_rows(payload, count):
     return rows
 
 
+def _support_bank_hash(metadata):
+    """Identify the complete declared atom law, including nonuniform masses."""
+    return canonical_hash({name: metadata[name] for name in
+                           ("tensor_sha256", "weights", "atom_ids", "aliases")})
+
+
 def _worker_context(cache, device, candidate_chunk_size, query_chunk_size):
     payload = {}
     metadata = read_json(cache / "cache_identity.json")
@@ -178,9 +185,14 @@ def _worker_context(cache, device, candidate_chunk_size, query_chunk_size):
         support_meta["atom_ids"],
         support_meta["aliases"],
         weights=support_meta["weights"],
+        source_record_counts=support_meta.get("source_record_multiplicities"),
         candidate_chunk=candidate_chunk_size,
         query_chunk=query_chunk_size,
     )
+    # These are already-normalized, receipt-pinned masses. Match direct workers
+    # exactly rather than applying an additional floating-point normalization.
+    support.weights = torch.as_tensor(support_meta["weights"], dtype=torch.float64, device=device).clone()
+    support.log_weights = support.weights.log()
     schedule = payload["worker_schedule.pt"]
     adapter = SchedulerAdapter(
         schedule, recorded_diffusers_version=metadata.get("recorded_diffusers_version")
@@ -693,7 +705,7 @@ def _stage_worker(
         support, center, schedule, adapter, _ = _worker_context(
             cache, concrete, candidate_chunk_size, query_chunk_size
         )
-        bank_hash = read_json(cache / "support_metadata.json")["tensor_sha256"]
+        bank_hash = _support_bank_hash(read_json(cache / "support_metadata.json"))
         for record in records:
             paths = _stage_paths(destination, record, stage)
             stamp = destination / "completion" / stage / f"{record.original_index}.json"

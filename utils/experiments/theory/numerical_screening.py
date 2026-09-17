@@ -1,21 +1,9 @@
-"""Batched sufficient sign certificates using only saved inputs and float64.
+"""Batched CUDA enclosures for the corrected branch-gap-error condition.
 
-For positive alpha and nonnegative sigma, D < ec is equivalent to
-
-    ||sigma * (epsilon_u - epsilon_c)||²
-        < ||state - sigma * epsilon_c - alpha * target||².
-
-This proves M = D - ec - eu - V < 0 because eu and V are nonnegative.
-It proves neither M's magnitude nor a value for V. Every elementary operation
-is separately evaluated in eager IEEE-754 binary64 arithmetic and expanded
-outward with nextafter. Reductions use an explicit pairwise tree, never a
-backend-dependent floating reduction. No division, square root, transcendental,
-matrix multiplication, or approximate posterior calculation enters this proof.
-
-The contract is eager CPU/CUDA PyTorch with correctly rounded binary64 basic
-operations; this function must not be compiled with fast-math reassociation or
-fusion. Nonfinite, overflow, or subnormal arithmetic conservatively falls back
-to an unresolved result. Dtype/source perturbations are outside this scope.
+Only the current posterior is evaluated here. With E=<Delta/||Delta||, Delta-barDelta> and
+V>=0, an outward upper bound for D-E below zero certifies D-E-V<0 without an
+endpoint, gain or variation calculation. The former D<e_c shortcut is invalid
+because the two learned-reference vector errors can cancel.
 """
 from __future__ import annotations
 
@@ -23,171 +11,192 @@ import math
 
 import torch
 
+from .gpu_intervals import ArithmeticBudgetExceeded, GpuDirected, GpuInterval
+from .gpu_refinement import projected_branch_gap_error
 
-SCREENING_VERSION = "outward-binary64-squared-precheck-2"
-
-
-class _OutwardBatch:
-    """Track per-row exceptional arithmetic without host synchronizations."""
-
-    def __init__(self, batch, device):
-        self.valid = torch.ones(batch, dtype=torch.bool, device=device)
-
-    def observe(self, value):
-        # Bit classification also detects subnormals when a host happens to
-        # have enabled denormal flushing. No floating comparison decides this.
-        bits = value.contiguous().view(torch.int64)
-        exponent = bits & 0x7FF0000000000000
-        fraction = bits & 0x000FFFFFFFFFFFFF
-        exceptional = (exponent == 0x7FF0000000000000) | ((exponent == 0) & (fraction != 0))
-        self.valid &= ~exceptional.reshape(len(self.valid), -1).any(dim=1)
-
-    def rounded(self, operation, left, right):
-        if operation == "add":
-            value = left + right
-            exact_zero = left == -right
-        elif operation == "subtract":
-            value = left - right
-            exact_zero = left == right
-        elif operation == "multiply":
-            value = left * right
-            exact_zero = (left == 0) | (right == 0)
-        else:
-            raise ValueError("Unsupported screening operation")
-        self.observe(value)
-        # A product that underflows all the way to zero must not pass merely
-        # because zero has no subnormal bits. This also guards flushed results.
-        unexpected_zero = (value == 0) & ~exact_zero
-        self.valid &= ~unexpected_zero.reshape(len(self.valid), -1).any(dim=1)
-        lower = torch.nextafter(value, torch.full_like(value, -torch.inf))
-        upper = torch.nextafter(value, torch.full_like(value, torch.inf))
-        # These algebraic zeros are exact for finite operands, and retaining
-        # them avoids artificial subnormals and needless widening of padding.
-        lower = torch.where(exact_zero, torch.zeros_like(lower), lower)
-        upper = torch.where(exact_zero, torch.zeros_like(upper), upper)
-        self.observe(lower)
-        self.observe(upper)
-        return lower, upper
-
-    def scale_positive(self, interval, coefficient):
-        lower = self.rounded("multiply", interval[0], coefficient)[0]
-        upper = self.rounded("multiply", interval[1], coefficient)[1]
-        return lower, upper
-
-    def subtract(self, left, right):
-        lower = self.rounded("subtract", left[0], right[1])[0]
-        upper = self.rounded("subtract", left[1], right[0])[1]
-        return lower, upper
-
-    def squared_norm_bound(self, interval, *, upper):
-        lower, higher = interval
-        if upper:
-            absolute = torch.maximum(lower.abs(), higher.abs())
-            entries = self.rounded("multiply", absolute, absolute)[1]
-        else:
-            includes_zero = (lower <= 0) & (higher >= 0)
-            absolute = torch.where(includes_zero, torch.zeros_like(lower),
-                                   torch.minimum(lower.abs(), higher.abs()))
-            entries = self.rounded("multiply", absolute, absolute)[0].clamp_min(0)
-        while entries.shape[1] > 1:
-            pairs = entries.shape[1] // 2
-            combined = self.rounded("add", entries[:, :2 * pairs:2],
-                                    entries[:, 1:2 * pairs:2])[int(upper)]
-            # Carry an odd last entry unchanged; no fictitious summand is used.
-            if entries.shape[1] % 2:
-                combined = torch.cat((combined, entries[:, -1:]), dim=1)
-            entries = combined
-        return entries[:, 0]
+SCREENING_VERSION = "projected-gap-error-1-batched-posterior-screen-1"
+_SCREEN_WORKING_LANES = 8 * 1024 * 1024
 
 
-def _cpu_denormal_mode_is_supported():
-    """Check this thread's mode without changing process-wide arithmetic state."""
-    normal64 = torch.tensor([torch.finfo(torch.float64).tiny], dtype=torch.float64, device="cpu")
-    half64 = normal64 * .5
-    restored64 = half64 * 2.
-    normal32 = torch.tensor([torch.finfo(torch.float32).tiny], dtype=torch.float32, device="cpu")
-    half32 = normal32 * .5
-    restored32 = half32.to(dtype=torch.float64) * 2.
-    return torch.equal(restored64, normal64) and torch.equal(restored32, normal32.to(dtype=torch.float64))
-
-
-def _saved_tensor(value, *, device):
-    # Python floats are binary64; do not pass them through the default float32
-    # tensor dtype before widening. Existing floating tensor/array dtypes are
-    # preserved through transport, then exactly promoted to binary64.
-    tensor = torch.as_tensor(value, device=device, dtype=None if hasattr(value, "dtype") else torch.float64)
-    if tensor.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
-        raise ValueError("Numerical screening requires saved floating tensors")
-    return tensor.detach().to(dtype=torch.float64)
-
-
-@torch.no_grad()
 def screen_negative_condition(verified_inputs, *, device=None):
-    """Return a batched original-condition sign proof, without CPU row loops.
+    """Reject the retired conditional-error proof before accessing inputs."""
+    raise ValueError(
+        "Conditional-error screening is retired for projected-gap-error-1; "
+        "enclose the branch-gap error from the posterior before testing D-branch_gap_error"
+    )
 
-    All numerical bounds are in squared *numerator* units (alpha² times the
-    corresponding squared clean error), not L2 margin units. Strict negativity
-    of squared_difference_upper certifies only M < 0. A nonnegative bound is
-    inconclusive, and must never be interpreted as a nonnegative condition.
-    A nonnegative squared_difference_lower establishes D >= ec: the cheap
-    D - ec precheck cannot prove M < 0, but M itself may still be negative
-    because eu and V have not been evaluated.
+
+class _BatchDirected(GpuDirected):
+    """Uniform batched operations, charged conservatively to each seed row.
+
+    Shared input/geometry work uses a separate ordinary GpuDirected context and
+    is charged in full to every row. All operations in this context have the
+    batch axis (or are scalar metadata operations); ceil(lanes/B) bounds every
+    row's lane cost. No data-dependent subset changes the batch denominator.
     """
-    x = verified_inputs
-    if x.get("stored_prediction_type", "epsilon") != "epsilon":
-        raise ValueError("Numerical screening requires already-canonical epsilon")
-    alpha, sigma = float(x["alpha"]), float(x["sigma"])
-    if not math.isfinite(alpha) or not math.isfinite(sigma) or alpha <= 0 or sigma < 0:
-        raise ValueError("Numerical screening requires finite alpha > 0 and sigma >= 0")
-    state = _saved_tensor(x["state"], device=device)
-    if state.ndim < 2 or state.shape[0] < 1:
-        raise ValueError("Numerical screening requires a nonempty batch of vectors")
-    device = state.device
-    if device.type not in {"cpu", "cuda"}:
-        raise ValueError("Numerical screening supports only eager CPU/CUDA binary64 arithmetic")
-    state = state.reshape(len(state), -1)
-    if state.shape[1] < 1:
-        raise ValueError("Numerical screening requires nonempty vectors")
-    epsilon_u, epsilon_c = [_saved_tensor(x[name], device=device) for name in ("epsilon_u", "epsilon_c")]
-    if any(value.ndim < 2 or len(value) != len(state) for value in (epsilon_u, epsilon_c)):
-        raise ValueError("Numerical screening batch shapes differ")
-    epsilon_u, epsilon_c = [value.reshape(len(state), -1) for value in (epsilon_u, epsilon_c)]
-    target = _saved_tensor(x["target"], device=device).reshape(1, -1)
-    if epsilon_u.shape != state.shape or epsilon_c.shape != state.shape or target.shape[1] != state.shape[1]:
-        raise ValueError("Numerical screening vector dimensions differ")
-    target = target.expand_as(state)
-    arithmetic = _OutwardBatch(len(state), device)
-    if device.type == "cpu" and not _cpu_denormal_mode_is_supported():
-        arithmetic.valid.fill_(False)
-    alpha_tensor = torch.full((len(state), 1), alpha, dtype=torch.float64, device=device)
-    sigma_tensor = torch.full_like(alpha_tensor, sigma)
-    for value in (state, epsilon_u, epsilon_c, target, alpha_tensor, sigma_tensor):
-        arithmetic.observe(value)
-    difference = arithmetic.rounded("subtract", epsilon_u, epsilon_c)
-    delta = arithmetic.scale_positive(difference, sigma_tensor)
-    conditional_noise = arithmetic.rounded("multiply", epsilon_c, sigma_tensor)
-    scaled_target = arithmetic.rounded("multiply", target, alpha_tensor)
-    residual = arithmetic.subtract(arithmetic.subtract((state, state), conditional_noise), scaled_target)
-    delta_lower = arithmetic.squared_norm_bound(delta, upper=False)
-    delta_upper = arithmetic.squared_norm_bound(delta, upper=True)
-    residual_lower = arithmetic.squared_norm_bound(residual, upper=False)
-    residual_upper = arithmetic.squared_norm_bound(residual, upper=True)
-    squared_lower = arithmetic.rounded("subtract", delta_lower[:, None], residual_upper[:, None])[0][:, 0]
-    squared_upper = arithmetic.rounded("subtract", delta_upper[:, None], residual_lower[:, None])[1][:, 0]
-    resolved = arithmetic.valid
-    nan = torch.full_like(delta_upper, torch.nan)
-    return {
-        "certified_negative": resolved & (squared_upper < 0),
-        "arithmetic_resolved": resolved,
-        "delta_squared_lower": torch.where(resolved, delta_lower, nan),
-        "delta_squared_upper": torch.where(resolved, delta_upper, nan),
-        "residual_squared_lower": torch.where(resolved, residual_lower, nan),
-        "residual_squared_upper": torch.where(resolved, residual_upper, nan),
-        "squared_difference_lower": torch.where(resolved, squared_lower, nan),
-        "squared_difference_upper": torch.where(resolved, squared_upper, nan),
-        "method": "batched_float64_directed_squared_negative_precheck",
+    def __init__(self, batch_size, max_products, *, device):
+        self.batch_size = batch_size
+        self.scalar_lane_products = 0
+        super().__init__(max_products=max_products, device=device)
+
+    def charge(self, count=1):
+        if not isinstance(count, int) or count < 0:
+            raise ValueError("GPU interval work charge must be nonnegative")
+        super().charge((count + self.batch_size - 1) // self.batch_size)
+        self.scalar_lane_products += count
+
+
+def _prepared_inputs(support, verified_inputs):
+    device = torch.device(support.flat.device)
+    if device.type != "cuda" or getattr(torch.version, "hip", None):
+        raise ValueError("Branch-gap screening requires NVIDIA CUDA; CPU fallback is disabled")
+    if verified_inputs.get("stored_prediction_type", "epsilon") != "epsilon":
+        raise ValueError("Branch-gap screening requires canonical saved epsilon")
+    prepared = dict(verified_inputs)
+    for name in ("state", "epsilon_u", "epsilon_c", "saved_endpoint", "independent_innovation",
+                 "target", "source_endpoint_radii"):
+        if prepared.get(name) is not None:
+            prepared[name] = torch.as_tensor(prepared[name], device=device, dtype=torch.float64)
+    state = prepared["state"]
+    if state.ndim < 2 or len(state) < 1:
+        raise ValueError("Branch-gap screening requires a nonempty saved vector batch")
+    count, dimension = len(state), int(support.dimension)
+    if state.reshape(count, -1).shape[1] != dimension or dimension < 1:
+        raise ValueError("Branch-gap screening state/support dimensions differ")
+    if any(prepared.get(name) is None for name in ("epsilon_u", "epsilon_c")):
+        raise ValueError("Branch-gap screening requires both saved epsilon branches")
+    for name in ("epsilon_u", "epsilon_c", "saved_endpoint", "independent_innovation"):
+        if prepared.get(name) is not None and prepared[name].shape != state.shape:
+            raise ValueError("Branch-gap screening saved batch shapes differ: " + name)
+    if prepared["target"].numel() != dimension:
+        raise ValueError("Branch-gap screening target/support dimensions differ")
+    if prepared.get("source_endpoint_radii") is not None:
+        if prepared["source_endpoint_radii"].numel() != 2 * count:
+            raise ValueError("Branch-gap screening endpoint radius shape differs")
+        prepared["source_endpoint_radii"] = prepared["source_endpoint_radii"].reshape(count, 2)
+    alpha, sigma = float(prepared["alpha"]), float(prepared["sigma"])
+    if not (math.isfinite(alpha) and math.isfinite(sigma) and alpha > 0 and sigma > 0):
+        raise ValueError("Branch-gap screening requires finite positive alpha and sigma")
+    return prepared, count, dimension, device
+
+
+def screen_branch_gap_condition(support, verified_inputs, *, max_products, target_atom=None):
+    """Enclose all current-posterior D/E pairs with one CUDA seed batch.
+
+    Returned tensors and interval objects stay on CUDA. Only compact status and
+    deterministic operation counters are host values. ``operations_per_row``
+    includes the full shared-geometry cost plus a conservative per-row batched
+    charge; no row exceeds ``max_products``. Exhaustion never invents a sign.
+    ``prepared_inputs`` can be reused by subsequent raw-row refinement without
+    retransferring the full saved batch for each seed.
+    """
+    prepared, count, dimension, device = _prepared_inputs(support, verified_inputs)
+    shared = GpuDirected(max_products=max_products, device=device)
+    flat = torch.as_tensor(support.flat, device=device, dtype=torch.float64)
+    masses = torch.as_tensor(support.weights, device=device, dtype=torch.float64)
+    target = prepared["target"].reshape(-1)
+    if flat.shape != (support.size, dimension) or masses.shape != (support.size,) or support.size < 1:
+        raise ValueError("Branch-gap screening support shape differs")
+    if not bool(torch.isfinite(flat).all() & torch.isfinite(masses).all() & (masses > 0).all()):
+        raise ValueError("Branch-gap screening needs finite atoms and positive finite masses")
+    if target_atom is None:
+        matches = (flat == target).all(dim=1).nonzero().flatten()
+        if len(matches) != 1:
+            raise ValueError("Branch-gap screening requires one exact target atom")
+        target_atom = int(matches[0])
+    if type(target_atom) is not int or not 0 <= target_atom < support.size or not torch.equal(target, flat[target_atom]):
+        raise ValueError("Branch-gap screening target is not the declared exact atom")
+    nan = torch.full((count,), torch.nan, device=device, dtype=torch.float64)
+    result = {
+        "certified_negative": torch.zeros(count, device=device, dtype=torch.bool),
+        "arithmetic_resolved": torch.zeros(count, device=device, dtype=torch.bool),
+        "margin_upper": nan.clone(), "delta_lower": nan.clone(), "delta_upper": nan.clone(),
+        "error_lower": nan.clone(), "error_upper": nan.clone(),
+        "current_mean": None, "delta": None, "D": None, "branch_gap_error": None,
+        "prepared_inputs": prepared, "complete": False, "status": "budget_exhausted",
+        "operations_per_row": 0, "total_operations": 0,
+        "method": "batched_cuda_outward_current_posterior_D_minus_signed_projected_error",
         "version": SCREENING_VERSION,
-        "scope": "original_saved_state_canonical_epsilon_target_and_exact_saved_alpha_sigma",
-        "proof_quantity": "upper_bound_for_alpha_squared_times_D_squared_minus_ec_squared",
-        "proof_quantity_lower": "lower_bound_for_alpha_squared_times_D_squared_minus_ec_squared",
     }
+    batched = None
+    # Four-corner interval products dominate transient memory. Bound their
+    # working lanes independently of the full support/seed/latent dimensions.
+    chunk = max(1, min(int(support.candidate_chunk), _SCREEN_WORKING_LANES // (count * dimension)))
+    result["support_chunk_size"] = chunk
+    try:
+        # Validated exact binary64 inputs need no copied point arrays.
+        shared.charge(flat.numel() + masses.numel())
+        atoms, mass = GpuInterval(flat, flat), GpuInterval(masses, masses)
+        alpha, sigma = shared.interval(prepared["alpha"]), shared.interval(prepared["sigma"])
+        sigma2 = shared.square(sigma)
+        beta = shared.div(alpha, sigma2)
+        gamma = shared.div(shared.square(alpha), shared.mul(shared.interval(2.), sigma2))
+        scaled_target = shared.mul(alpha, atoms[target_atom])
+        equal_masses = bool((masses == masses[target_atom]).all())
+        geometry = []
+        for start in range(0, support.size, chunk):
+            stop = min(start + chunk, support.size)
+            difference = shared.sub(atoms[start:stop], atoms[target_atom])
+            squared_distance = shared.total(shared.square(difference), dim=-1)
+            if equal_masses:
+                # Exact equal positive binary64 masses give prior ratio one.
+                prior = shared.interval(torch.zeros(stop - start, device=device, dtype=torch.float64))
+            else:
+                prior = shared.log(shared.div(mass[start:stop], mass[target_atom]))
+            geometry.append((start, stop, difference, squared_distance, prior))
+        batched = _BatchDirected(count, max_products - shared.products, device=device)
+        state = batched.interval(prepared["state"].reshape(count, dimension))
+        epsilon_u = batched.interval(prepared["epsilon_u"].reshape(count, dimension))
+        epsilon_c = batched.interval(prepared["epsilon_c"].reshape(count, dimension))
+        delta = batched.div(batched.mul(sigma, batched.sub(epsilon_u, epsilon_c)), alpha)
+        D = batched.norm(delta)
+        offset = batched.sub(state, scaled_target)
+        parts = []
+        for _, _, difference, squared_distance, prior in geometry:
+            projected = batched.dot(offset.unsqueeze(-2), difference.unsqueeze(0), dim=-1)
+            # Expand the shared terms so every charged arithmetic output in the
+            # batched context has the same explicit seed axis.
+            penalty = GpuInterval(squared_distance.lower.expand(count, -1), squared_distance.upper.expand(count, -1))
+            log_prior = GpuInterval(prior.lower.expand(count, -1), prior.upper.expand(count, -1))
+            parts.append(batched.add(batched.sub(batched.mul(beta, projected), batched.mul(gamma, penalty)), log_prior))
+        lower = torch.cat([part.lower for part in parts], dim=-1)
+        upper = torch.cat([part.upper for part in parts], dim=-1)
+        lower[:, target_atom], upper[:, target_atom] = 0., 0.
+        weights = batched.softmax(GpuInterval(lower, upper), dim=-1)
+        # Target-centered accumulation retains precision near concentrated
+        # posteriors; every support sum is an outward pairwise reduction.
+        mean_offset = batched.interval(torch.zeros((count, dimension), device=device, dtype=torch.float64))
+        for start, stop, difference, _, _ in geometry:
+            piece = GpuInterval(weights.lower[:, start:stop], weights.upper[:, start:stop]).unsqueeze(-1)
+            mean_offset = batched.add(mean_offset, batched.total(batched.mul(piece, difference.unsqueeze(0)), dim=-2))
+        current_mean = batched.add(atoms[target_atom], mean_offset)
+        # barDelta = target-current_mean = -mean_offset exactly. Avoid an
+        # unnecessary subtraction of a large shared target from its mean.
+        E = projected_branch_gap_error(batched, delta, batched.neg(mean_offset), D)
+        margin = batched.sub(D, E)
+        # Broad intervals can recover finite posterior hulls even when a raw
+        # state was nonfinite; that source row must still remain unresolved.
+        finite_source = (torch.isfinite(prepared["state"].reshape(count, dimension)).all(dim=-1)
+                         & torch.isfinite(prepared["epsilon_u"].reshape(count, dimension)).all(dim=-1)
+                         & torch.isfinite(prepared["epsilon_c"].reshape(count, dimension)).all(dim=-1))
+        resolved = (finite_source & torch.isfinite(D.lower) & torch.isfinite(D.upper)
+                    & torch.isfinite(E.lower) & torch.isfinite(E.upper)
+                    & torch.isfinite(margin.upper)
+                    & torch.isfinite(current_mean.lower).all(dim=-1)
+                    & torch.isfinite(current_mean.upper).all(dim=-1)
+                    & torch.isfinite(delta.lower).all(dim=-1)
+                    & torch.isfinite(delta.upper).all(dim=-1))
+        result.update(
+            certified_negative=resolved & (margin.upper < 0), arithmetic_resolved=resolved,
+            margin_upper=torch.where(resolved, margin.upper, nan),
+            delta_lower=D.lower, delta_upper=D.upper, error_lower=E.lower, error_upper=E.upper,
+            current_mean=current_mean, delta=delta, D=D, branch_gap_error=E,
+            complete=True, status="complete" if bool(resolved.all()) else "unsupported_arithmetic_range",
+        )
+    except ArithmeticBudgetExceeded:
+        # A partial posterior is never a posterior of a smaller reference law.
+        # Preserve the spent budget, but expose no incomplete enclosure/sign.
+        pass
+    result["operations_per_row"] = shared.products + (0 if batched is None else batched.products)
+    result["total_operations"] = shared.products + (0 if batched is None else batched.scalar_lane_products)
+    return result

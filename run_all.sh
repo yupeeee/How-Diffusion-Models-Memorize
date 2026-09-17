@@ -53,26 +53,27 @@ Explicit model/scheduler options filter these supported pairs; requests with
 no matching pair fail before any stage. --scheduler ddpm selects sdv1 only.
 Protected generation, SSCD, and GMM proximity retain their existing defaults.
 Theory resumes shared denoiser probes and one analytical trajectory pass per
-model/scheduler, then renders four mechanism experiments and their
-fixed twelve appendices from saved scalar inputs. Probe workers use all visible GPUs.
+model/scheduler, then renders six selected theory figures from saved scalar inputs
+directly under figures/. Probe workers use all visible GPUs.
 The reference-only SNR extension and terminal bounds use separate reusable caches.
 
 Options:
   --download            Run/resume shared Webster preparation once first
   --plot                Render saved proximity and theory scalar outputs only
   --figure-suite paper  Optional alias for the default fixed paper suite
-  --diagnostics         Also render saved optional diagnostic figures
-                        Counterfactual requires saved enablement/data; diagnostics/ only
+  --diagnostics         Compatibility flag; exports the same six theory figures
+                        Diagnostic scalar measurements remain available
   --target-error-tolerance FLOAT
                         Independently supplied raw latent L2 tolerance (optional)
   --recompute-experiments
                         Resume/rebuild theory, including missing learned probes;
                         bypass download, generation, SSCD and proximity rebuilding
-  --refine-numerics     Refine existing posterior signs/condition intervals only;
-                        no upstream work or learned-probe inference
+  --refine-numerics     Opt in to interval refinement of saved numerics only;
+                        saved positive budget or 2000000 when omitted; no learned probes
   --numerical-max-products INT
-                        Per-row CUDA interval-operation budget (default: 2000000)
-                        --numerical-max-decimal-products remains an alias; zero disables refinement
+                        Positive budget explicitly enables CUDA interval refinement
+                        Normal/recompute default: 0 (numerical estimates only)
+                        --numerical-max-decimal-products remains an alias
   --numerical-decimal-precision INT
                         Legacy saved-policy field; unavailable for GPU computation
   --numerical-max-variation-nodes INT
@@ -136,7 +137,9 @@ can also be plotted using theory_validation.sh --bundle PATH --plot.
 --plot cannot be combined with --download, --overwrite, or --recompute-experiments.
 --recompute-experiments cannot be combined with --download or --overwrite.
 --refine-numerics is a separate cache-only analysis mode; missing inputs report
-an explicit recomputation command. Numerical refinement is automatic in normal analysis.
+an explicit recomputation command. Normal analysis saves numerical estimates without
+interval refinement. A positive --numerical-max-products opts in for that invocation;
+normal/recompute modes do not inherit a previously saved positive interval budget.
 Plot mode inherits omitted measurement settings from each saved bundle.
 --loss-timesteps saved enables marginal losses unless explicitly disabled.
 --evaluation-source and --num-baseline-seeds remain unsupported.

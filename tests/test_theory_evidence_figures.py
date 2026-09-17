@@ -18,6 +18,14 @@ def evidence_config(**overrides):
 def evidence_tables():
     """Synthetic scalar fixture shared with publication/CLI tests; no file reads."""
     tables = direct_tables()
+    # Preserve the historical S=.7 fixture with an independently saved E=.3.
+    # Q=.7 uses its own target-error bound max(ec, eu+tail), with eu=.3.
+    for name in ("initial", "trajectory", "matched_updates", "terminal"):
+        rows = tables[name]
+        rows["direct_branch_gap_error_rmse"] = .3
+        rows["direct_branch_gap_error_l2"] = .3 * np.sqrt(rows.latent_dimension)
+        rows["direct_unconditional_reference_error_rmse"] = .3
+        rows["direct_unconditional_reference_error_l2"] = .3 * np.sqrt(rows.latent_dimension)
     tables["forward_loss_summary"]["KL_target_to_gaussian"] = .08
     gaussian = tables["gaussian_conditional"]
     gaussian["unconditional_target_error_rmse"] = [6., 8., 6., 8.]
@@ -53,6 +61,9 @@ def evidence_tables():
     initial["evidence_injection_unconditional_mean_error_l2"] = 2.
     initial["direct_cor3_error_mean_cross_inner_product"] = 4. - np.square(initial.evidence_injection_relative_error) / 2
     matched = tables["matched_updates"]
+    matched["direct_prop5_measurement_contract"] = "projected-gap-error-1"
+    matched["direct_prop5_variation_definition"] = "positive_part_after_integrated_unit_gap_projection"
+    matched["direct_prop5_zero_gap_convention"] = "V=0_when_Delta_is_exactly_zero"
     matched["direct_prop5_matched_log_odds"] = -2.
     matched["direct_prop5_guided_log_odds"] = matched.direct_prop5_log_probability_gain - 2.
     matched["direct_prop5_zero_displacement"] = False
@@ -100,11 +111,12 @@ def evidence_tables():
     terminal["evidence_terminal_B_ref_rmse"] = terminal.evidence_terminal_corrected_ref_bound_rmse - terminal.evidence_terminal_defect_bound_rmse
     terminal["direct_conditional_error_rmse"] = terminal.evidence_terminal_conditional_error_rmse
     terminal["direct_unconditional_reference_error_rmse"] = terminal.direct_conditional_error_rmse
+    terminal["direct_branch_gap_error_rmse"] = 2 * terminal.direct_conditional_error_rmse
     terminal["direct_radius_tail_rmse"] = terminal.direct_conditional_error_rmse
-    terminal["direct_reference_target_error_rmse"] = terminal.direct_conditional_error_rmse / 2
+    terminal["direct_reference_target_error_rmse"] = terminal.direct_conditional_error_rmse
     terminal["direct_lemma6_gap_rmse"] = terminal.evidence_terminal_residual_guidance_rmse
     terminal["direct_lemma6_rhs_rmse"] = terminal.direct_conditional_error_rmse * 3
-    for stem in ("direct_conditional_error", "direct_unconditional_reference_error", "direct_radius_tail",
+    for stem in ("direct_conditional_error", "direct_unconditional_reference_error", "direct_branch_gap_error", "direct_radius_tail",
                  "direct_reference_target_error", "direct_lemma6_gap", "direct_lemma6_rhs", "evidence_terminal_B_obs", "evidence_terminal_B_ref"):
         terminal[stem + "_l2"] = terminal[stem + "_rmse"] * 2
     terminal["evidence_terminal_reconstruction_tolerance_rmse"] = 0.
@@ -194,6 +206,60 @@ def test_feedback_strict_fractions_keep_common_weights_and_unresolved_denominato
     assert metadata["figures"]["proposition5_posterior_feedback"]["condition_zero_overlap"]
 
 
+
+def test_float64_condition_estimates_are_displayed_without_interval_certificates():
+    tables = evidence_tables()
+    rows = tables["matched_updates"]
+    selected = rows.refinement_applicable
+    rows.loc[selected, "condition_sign_status"] = "positive"
+    rows.loc[selected, "condition_arithmetic_status"] = "float64_numerical_assessment"
+    rows.loc[selected, "numerical_original_margin_rmse"] = 1.
+    rows.loc[selected, "fixed_cache_gain_sign"] = "negative"
+    rows.loc[selected, "numerical_log_probability_gain"] = -.1
+    rows.loc[selected, "implication_eligible"] = False
+    frames, metadata = assemble(tables)
+    condition = frames["proposition5_posterior_feedback"].query("metric == 'condition'")
+    assert condition.fraction.eq(1).all() and condition.upper_fraction.eq(1).all()
+    assert condition.unresolved_count.eq(0).all()
+    assert frames["proposition5_condition_vs_gain"].marker_class.eq("observed").all()
+    info = metadata["figures"]["proposition5_posterior_feedback"]
+    assert info["condition_assessment_counts"] == {
+        "float64_estimated_sign": int(selected.sum()), "enclosed_sign": 0,
+        "other_resolved_sign": 0, "unresolved_or_unavailable": 0,
+    }
+    assert "numerical estimates" in info["condition_interpretation"]
+    assert not metadata["audit"]["blocking"]
+    audit = metadata["auxiliary_tables"]["proposition5_numerical_resolution_rows"]
+    assert not audit.loc[selected, "implication_eligible"].any()
+    # A real identity/enclosure failure must still block estimated displays.
+    rows.loc[selected, "numerical_publication_blocker"] = True
+    _, blocked = assemble(tables)
+    assert blocked["figures"]["proposition5_posterior_feedback"]["status"] == "blocked"
+
+
+def test_near_zero_float64_assessment_retains_unresolved_mass_and_marker():
+    tables = evidence_tables()
+    rows = tables["matched_updates"]
+    selected = rows.refinement_applicable
+    uncertain = selected & rows.seed.eq(1)
+    rows.loc[selected, "condition_arithmetic_status"] = "float64_numerical_assessment"
+    rows.loc[uncertain, "condition_sign_status"] = "unresolved"
+    rows.loc[uncertain, "numerical_original_margin_rmse"] = 1e-14
+    rows.loc[uncertain, "numerical_condition_estimate_status"] = "within_numerical_uncertainty"
+    rows.loc[uncertain, "numerical_condition_estimate_uncertainty_l2"] = 1e-12
+    frames, metadata = assemble(tables)
+    condition = frames["proposition5_posterior_feedback"].query("metric == 'condition' and group == 'SSCD > 0.75'")
+    assert condition.fraction.eq(0).all() and condition.upper_fraction.eq(1).all()
+    assert condition.unknown_fraction.eq(1).all()
+    scatter = frames["proposition5_condition_vs_gain"]
+    assert scatter.loc[scatter.seed.eq(1), "marker_class"].eq("numerically_unresolved").all()
+    assert scatter.loc[scatter.seed.eq(0), "marker_class"].eq("observed").all()
+    counts = metadata["figures"]["proposition5_posterior_feedback"]["condition_assessment_counts"]
+    assert counts["unresolved_or_unavailable"] == int(uncertain.sum())
+    assert counts["float64_estimated_sign"] == int((selected & ~uncertain).sum())
+    assert not metadata["audit"]["blocking"]
+
+
 def test_reliable_original_condition_gain_contradiction_blocks_feedback():
     tables = evidence_tables()
     selected = tables["matched_updates"].direct_prop5_applicable
@@ -205,19 +271,69 @@ def test_reliable_original_condition_gain_contradiction_blocks_feedback():
     assert metadata["figures"]["proposition5_posterior_feedback"]["status"] == "blocked"
 
 
-def test_wrong_branch_agreement_keeps_joint_target_error_and_full_bound():
+def _set_trajectory_branch_norms(rows, *, conditional, unconditional, error, gap, reference_gap=0., tail=0.):
+    """Consistent scalar designs below use target=reference=0 and collinear vectors."""
+    fields = {
+        "direct_conditional_error": conditional,
+        "direct_unconditional_target_error": unconditional,
+        "direct_unconditional_reference_error": unconditional,
+        "direct_branch_gap_error": error,
+        "direct_lemma6_gap": gap,
+        "direct_reference_target_error": reference_gap,
+        "direct_radius_tail": tail,
+        "direct_lemma6_rhs": error + tail,
+    }
+    for stem, value in fields.items():
+        rows[stem + "_rmse"] = value
+        rows[stem + "_l2"] = value * np.sqrt(rows.latent_dimension)
+
+
+def test_common_mode_wrong_target_agreement_keeps_Q_above_S_without_blocking():
     tables = evidence_tables()
     rows = tables["trajectory"]
-    rows["direct_conditional_error_rmse"] = 4.
-    rows["direct_unconditional_target_error_rmse"] = 4.
-    rows["direct_lemma6_gap_rmse"] = 0.
-    rows["direct_lemma6_rhs_rmse"] = 5.
-    frames, _ = assemble(tables)
+    # Both learned branches coincide away from the target/reference: their
+    # vector errors cancel exactly although neither branch recovers the target.
+    _set_trajectory_branch_norms(rows, conditional=4., unconditional=4., error=0., gap=0.)
+    frames, metadata = assemble(tables)
     frame = frames["lemma6_target_specific_synchronization"]
     assert frame.loc[frame.metric.eq("joint_error"), "median"].eq(4).all()
-    assert frame.loc[frame.metric.eq("gap"), "median"].eq(0).all()
-    assert frame.loc[frame.metric.eq("bound"), "median"].eq(5).all()
+    assert frame.loc[frame.metric.isin(["gap", "bound"]), "median"].eq(0).all()
     assert set(frame.step_index) == {0, 1}
+    info = metadata["figures"]["lemma6_target_specific_synchronization"]
+    assert info["status"] == "available" and not metadata["audit"]["blocking"]
+    assert info["row_bound_audit"]["joint_above_bound_count"] == len(rows)
+    assert info["row_bound_audit"]["joint_above_own_bound_count"] == 0
+    audit = metadata["auxiliary_tables"]["lemma6_joint_sample_audit"]
+    assert audit.joint_target_bound_rmse.eq(4.).all()
+    assert audit.joint_target_bound_slack_rmse.eq(0.).all()
+    assert audit.branch_gap_error_rhs_identity_residual_rmse.eq(0.).all()
+
+
+def test_nonzero_collinear_branch_errors_use_signed_projection_not_norm_sum():
+    tables = evidence_tables()
+    rows = tables["trajectory"]
+    # In d=4, learned vectors (6,0,0,0) and (4,0,0,0), with target and
+    # posterior reference at zero, give E/sqrt(d)=D/sqrt(d)=1 < 3+2.
+    _set_trajectory_branch_norms(rows, conditional=3., unconditional=2., error=1., gap=1.)
+    frames, metadata = assemble(tables)
+    frame = frames["lemma6_target_specific_synchronization"]
+    assert frame.loc[frame.metric.eq("joint_error"), "median"].eq(3.).all()
+    assert frame.loc[frame.metric.isin(["gap", "bound"]), "median"].eq(1.).all()
+    assert not metadata["audit"]["blocking"]
+    assert metadata["figures"]["lemma6_target_specific_synchronization"]["measurement_contract"] == "projected-gap-error-1"
+    rows.loc[0, "direct_branch_gap_error_rmse"] = .5
+    _, failed = assemble(tables)
+    assert failed["figures"]["lemma6_target_specific_synchronization"]["status"] == "blocked"
+    assert len(failed["auxiliary_tables"]["lemma6_failed_observations"]) == 1
+
+
+@pytest.mark.parametrize("table,column", [("trajectory", "direct_branch_gap_error_rmse"),
+                                             ("terminal", "direct_branch_gap_error_l2")])
+def test_signed_error_cannot_be_reconstructed_from_old_individual_norms(table, column):
+    tables = evidence_tables()
+    tables[table] = tables[table].drop(columns=column)
+    with pytest.raises(TheoryError, match=column):
+        assemble(tables)
 
 
 def test_terminal_exact_ecdf_zero_mass_and_ordering_preserve_clean_gate():
@@ -416,6 +532,26 @@ def test_feedback_uses_stable_sign_with_raw_H_underflow_and_endpoint_contract_ga
     assert contradicted["figures"]["proposition5_posterior_feedback"]["status"] == "blocked"
 
 
+
+@pytest.mark.parametrize("field, value", [
+    ("direct_prop5_measurement_contract", "branch-gap-error-substitution-1"),
+    ("direct_prop5_variation_definition", "integral_of_reference_difference_norm"),
+])
+def test_feedback_refuses_historical_norm_variation_receipts(field, value):
+    tables = evidence_tables()
+    rows = tables["matched_updates"]
+    rows.loc[rows.refinement_applicable, field] = value
+    frames, metadata = assemble(tables)
+    for stem in ("proposition5_posterior_feedback", "proposition5_condition_vs_gain"):
+        assert frames[stem].empty
+        info = metadata["figures"][stem]
+        assert info["status"] == "unavailable"
+        assert info["incompatible_variation_contract_count"] == int(rows.refinement_applicable.sum())
+        assert "--recompute-experiments" in info["reason"]
+    audit = metadata["auxiliary_tables"]["proposition5_numerical_resolution_rows"]
+    assert audit.loc[rows.refinement_applicable, field].eq(value).all()
+
+
 def test_missing_refinement_has_explicit_status_and_never_reuses_legacy_signs():
     tables = evidence_tables()
     tables["matched_updates"] = tables["matched_updates"].drop(columns="fixed_cache_gain_sign")
@@ -448,13 +584,36 @@ def test_terminal_looseness_uses_exact_paired_cost_and_shared_correction():
     np.testing.assert_allclose(audit.bound_looseness_l2, audit.lemma6_slack_cost_l2)
     np.testing.assert_allclose(audit.bound_looseness_l2, audit.decomposed_slack_cost_l2)
     np.testing.assert_allclose(audit.scheduler_cancellation_residual_rmse, 0)
-    assert audit.slack_radius_l2.ge(0).all() and audit.slack_triangle_l2.ge(0).all()
+    assert audit.slack_radius_l2.ge(0).all() and audit.slack_projection_alignment_l2.ge(0).all()
     info = metadata["figures"]["theorem7_terminal_components"]
     assert info["looseness_statistics"]["bound_looseness"]["count"] == 4
     tables = evidence_tables()
     tables["terminal"].loc[1, "direct_reference_target_error_l2"] = 100.
     _, failed = assemble(tables)
     assert failed["figures"]["theorem7_final_reproduction"]["status"] == "blocked"
+
+
+def test_terminal_cancelling_branch_errors_tighten_reference_bound_without_changing_correction():
+    tables = evidence_tables()
+    rows = tables["terminal"]
+    _set_trajectory_branch_norms(rows, conditional=3., unconditional=2., error=1., gap=1.)
+    for stem in ("evidence_terminal_B_obs", "evidence_terminal_B_ref"):
+        rows[stem + "_rmse"] = 4.
+        rows[stem + "_l2"] = 8.
+    rows["evidence_terminal_conditional_error_rmse"] = 3.
+    rows["evidence_terminal_residual_guidance_rmse"] = 1.
+    rows["evidence_terminal_corrected_obs_bound_rmse"] = 4. + rows.evidence_terminal_defect_bound_rmse
+    rows["evidence_terminal_corrected_ref_bound_rmse"] = 4. + rows.evidence_terminal_defect_bound_rmse
+    _, metadata = assemble(tables)
+    audit = metadata["auxiliary_tables"]["theorem7_looseness_decomposition"]
+    assert not metadata["audit"]["blocking"]
+    np.testing.assert_allclose(audit.bound_looseness_l2, 0.)
+    np.testing.assert_allclose(audit.slack_projection_alignment_l2, 0.)
+    np.testing.assert_allclose(audit.reference_formula_residual_l2, 0.)
+    np.testing.assert_allclose(audit.scheduler_cancellation_residual_rmse, 0.)
+    assert audit.evidence_terminal_B_ref_rmse.eq(4.).all()
+    assert (audit.evidence_terminal_B_ref_rmse < audit.direct_conditional_error_rmse +
+            audit.direct_conditional_error_rmse + audit.direct_unconditional_reference_error_rmse).all()
 
 
 def test_terminal_probabilistic_failure_does_not_become_numerical_bug():
@@ -543,3 +702,45 @@ def test_unrecognized_inherited_blockers_are_not_blanket_cleared(monkeypatch):
     _, metadata = assemble()
     assert metadata["audit"]["blocking"]
     assert metadata["audit"]["other_statement_failure"] == "preserve independently inherited blocker"
+
+
+def test_negative_projected_error_is_preserved_in_synchronization_and_terminal_audits():
+    tables = evidence_tables()
+    # d=4: mc=0, mu=-2, target=0, reference=-4 along one coordinate.
+    # D/sqrt(d)=1, reference-gap norm/sqrt(d)=2, E_parallel/sqrt(d)=-1.
+    for name in ("trajectory", "terminal"):
+        rows = tables[name]
+        _set_trajectory_branch_norms(rows, conditional=0., unconditional=1., error=-1.,
+                                     gap=1., reference_gap=2., tail=2.)
+    terminal = tables["terminal"]
+    for field in ("evidence_terminal_B_obs", "evidence_terminal_B_ref"):
+        terminal[field + "_rmse"] = 1.
+        terminal[field + "_l2"] = 2.
+    terminal["evidence_terminal_conditional_error_rmse"] = 0.
+    terminal["evidence_terminal_residual_guidance_rmse"] = 1.
+    terminal["evidence_terminal_corrected_obs_bound_rmse"] = 1. + terminal.evidence_terminal_defect_bound_rmse
+    terminal["evidence_terminal_corrected_ref_bound_rmse"] = 1. + terminal.evidence_terminal_defect_bound_rmse
+    terminal["direct_theorem7_endpoint_error_rmse"] = 0.
+    frames, metadata = assemble(tables)
+    assert not metadata["audit"]["blocking"]
+    synchronization = metadata["auxiliary_tables"]["lemma6_joint_sample_audit"]
+    assert synchronization.direct_branch_gap_error_rmse.eq(-1.).all()
+    np.testing.assert_allclose(synchronization.branch_gap_error_rhs_identity_residual_rmse, 0.)
+    assert frames["lemma6_target_specific_synchronization"].loc[lambda rows: rows.metric.eq("bound"), "median"].eq(1.).all()
+    audit = metadata["auxiliary_tables"]["theorem7_looseness_decomposition"]
+    assert audit.direct_branch_gap_error_l2.eq(-2.).all()
+    np.testing.assert_allclose(audit.slack_projection_alignment_l2, 0.)
+    np.testing.assert_allclose(audit.bound_looseness_l2, 0.)
+    assert "slack_triangle_l2" not in audit
+
+
+@pytest.mark.parametrize("table, field", [
+    ("trajectory", "direct_branch_gap_error_definition"),
+    ("terminal", "direct_branch_gap_error_definition"),
+    ("matched_updates", "direct_prop5_branch_gap_error_definition"),
+])
+def test_historical_norm_error_receipts_cannot_be_relabelled_as_signed_projections(table, field):
+    tables = evidence_tables()
+    tables[table][field] = "norm_of_learned_minus_reference_gap"
+    with pytest.raises(TheoryError, match="signed projected"):
+        assemble(tables)

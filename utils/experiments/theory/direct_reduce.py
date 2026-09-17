@@ -29,7 +29,7 @@ from .progress import RecordProgress, install_progress_queue, report_worker_reco
 
 TABLES = ("initial", "trajectory", "matched_updates", "terminal")
 ANALYSIS_SCHEMA_VERSION = 1
-INTEGRATION_PAYLOAD_SCHEMA_VERSION = 2
+INTEGRATION_PAYLOAD_SCHEMA_VERSION = 5
 
 
 def core_recipe():
@@ -40,18 +40,18 @@ def core_recipe():
         "formula_version": DIRECT_FORMULA_VERSION,
         "source_code": {name: file_sha256(directory / name) for name in (
             "direct_reduce.py", "direct_measurements.py", "reference_law.py",
-            "scheduler_adapter.py", "support.py", "feedback.py", "candidate_feedback.py",
+            "scheduler_adapter.py", "support.py", "feedback.py", "branch_gap.py", "candidate_feedback.py",
             "metrics.py", "cache_reader.py",
         )},
     }
 
 
 def analytical_recipe():
-    """Separately resumable original-variation and signed-gain recipe."""
+    """Separately resumable positive directional-variation and signed-gain recipe."""
     directory = Path(__file__).parent
     return {"formula_version": DIRECT_FORMULA_VERSION, "integration": asdict(DEFAULT_INTEGRATION),
             "source_code": {name: file_sha256(directory / name) for name in (
-                "direct_integration.py", "candidate_integration.py", "feedback.py", "support.py",
+                "direct_integration.py", "candidate_integration.py", "feedback.py", "support.py", "branch_gap.py",
             )}}
 
 
@@ -201,7 +201,7 @@ def _integrate_record(core, destination, record, law, config, integration_hash):
         pending = matched.direct_prop5_status.eq("integration_required_not_computed")
         for _, row in matched.loc[pending].iterrows():
             failures.append({"step_index": int(row.step_index), "seeds": [int(row.seed)],
-                             "reason": "Required original variation has no completed saved integration payload"})
+                             "reason": "Required positive directional variation has no completed saved integration payload"})
     _validate_rows(tables, record, config)
     tables["audit"] = {"complete": not failures, "core_complete": True, "integration_complete": not failures,
                        "failed_updates": failures, "core_marker_sha256": file_sha256(core_root / "complete.json"),
@@ -221,6 +221,7 @@ def _read_law(path, digest, device, candidate_chunk_size, query_chunk_size):
     metadata = payload["metadata"]
     support = FiniteSupport(payload["atoms"].to(device), metadata["atom_ids"], metadata["aliases"],
                             weights=payload["weights"].to(device),
+                            source_record_counts=metadata.get("source_record_multiplicities"),
                             candidate_chunk=candidate_chunk_size, query_chunk=query_chunk_size)
     support.weights = payload["weights"].to(device).clone()
     support.log_weights = support.weights.log()

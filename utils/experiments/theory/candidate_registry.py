@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import math
 
-REGISTRY_VERSION = "candidate-designs-1.0"
+REGISTRY_VERSION = "candidate-projected-gap-error-1"
 SHARED_DEFINITIONS = {
     "branch_estimates": "m_b,t=(x_t-sigma_t epsilon_b,t)/alpha_t; saved branch predictions are canonical epsilon; b in {u,c}; m_g,t=m_u,t+g(m_c,t-m_u,t).",
     "target_errors": "E_b,t=||m_b,t-x_star||/sqrt(d); Delta_t=m_c,t-m_u,t; D_t=||Delta_t||; SNR_t=alpha_t^2/sigma_t^2.",
@@ -383,15 +383,15 @@ DESIGNS = [
     ),
     _card(
         "PF07",
-        "Which proof-derived refinements recover positive sufficient coverage?",
+        "How do branch-gap-error and directional sufficient margins differ in positive coverage?",
         "SNR",
         "Positive coverage fraction",
-        "M0=D-||r_c||-||r_u||-V (original); M1=D-||r_c-r_u||-V; M2=D+S-V; M3=D+S-V_parallel; M0<=M1<=M2<=M3<=A",
+        "M0=D-e_t^parallel(Delta)-[W]_+; W=integral(unit_Delta.(reference_next-reference_current)); e_t^parallel(Delta)=u^T(Delta-bar{Delta})=u^T(r_c-r_u)=-S; M1=M0; M2=D+S-V_norm; M3=D+S-V_abs; A=D+S-W. M2<=M3<=M0=M1<=A; the projected error retains its sign",
         "derived_directional_condition",
         "summaries/coverage",
         ["metric", "status", "fraction", "snr", "group"],
-        "Differences in sufficient coverage attributable to cancellation and directional information.",
-        "That a refined condition verifies M0, or that A is an independent certificate.",
+        "Refined sufficient coverage under matched-endpoint applicability; M0 now equals the combined-error margin M1.",
+        "A new independently measured condition when M0 and M1 agree by definition, or that A is an independent certificate.",
         kind="margin_coverage",
         scope="integrated transitions",
         equations=[
@@ -578,11 +578,11 @@ DESIGNS = [
         "How quantitatively informative are the two distinct terminal bounds?",
         "Bound / observed endpoint error",
         "Weighted empirical CDF",
-        "B_obs=A+B; B_thm^K=[g e_c+(g-1)(e_u^K+R_K(1-p^K))]/sqrt(d); ratios use observed endpoint RMSE",
+        "B_obs=A+B; B_thm^K=[e_c+(g-1)(e_t^parallel(Delta)+R_K(1-p^K))]/sqrt(d); ratios use observed endpoint RMSE",
         "candidate_reference",
         "summaries/terminal_ratios",
         ["terminal_observed_bound_error_ratio", "terminal_candidate_bound_error_ratio"],
-        "Tightness of separate observed-geometry and candidate-theorem bounds.",
+        "Tightness of observed geometry and the refined branch-gap-error bound under the same applicability assumptions.",
         "A finite ratio for zero error or denominator smoothing.",
         kind="terminal_ecdf",
         scope="clean terminal update",
@@ -590,14 +590,14 @@ DESIGNS = [
     ),
     _card(
         "TR03",
-        "How much reproduction does each terminal bound certify?",
+        "How do actual and refined-bound tolerance fractions compare?",
         "Endpoint-error tolerance",
         "Fraction within tolerance",
         "fractions(E_endpoint<=tau), (B_obs<=tau), (B_thm^K<=tau), on common full-range RMSE tolerance grid",
         "candidate_reference",
         "summaries/terminal_tolerance",
         ["metric", "tolerance", "fraction", "group"],
-        "Observed and sufficient coverage across the entire independently saved tolerance range.",
+        "Observed and refined sufficient-bound fractions across the full saved tolerance range with unchanged applicability and correction qualifications.",
         "A selected successful tolerance or applicability without the clean update.",
         kind="terminal_tolerance",
         scope="clean terminal update",

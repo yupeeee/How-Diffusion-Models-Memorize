@@ -13,7 +13,7 @@ from utils.common.io import file_sha256, read_json
 from utils.experiments.theory import direct_reduce, direct_figures, numerical_reduce, evidence_reduce, evidence_figures, four_stage_reduce, four_stage_figures, counterfactual_probes, gaussian_controls, paper_reduce, paper_plotting
 from utils.experiments.theory.contracts import TheoryError
 from utils.experiments.theory.paper_contracts import PaperPaths, load_paper_inputs, render_saved_paper
-from utils.experiments.theory.paper_registry import paper_registry
+from utils.experiments.theory.paper_registry import measurement_registry, paper_registry
 from tests.test_theory_four_stage_figures import four_stage_tables as direct_tables, four_stage_config as direct_config
 
 
@@ -62,14 +62,25 @@ def test_direct_publication_plot_isolation_and_failure_preserve_active_role(tmp_
     _, summary, audit, frames = load_paper_inputs(output, expected_config=config)
     assert summary["complete"] and not audit["blocking"]
     main = [entry for entry in paper_registry() if entry["category"] == "main"]
-    assert len(main) == 4
+    assert len(main) == 6
     manifest = read_json(output / "figure_manifest.json")
     assert manifest["manuscript_extension_required"] is True
     for entry in main:
         assert summary["figures"][entry["stem"]]["status"] == "available"
         for relative in entry["outputs"].values():
             assert file_sha256(output / relative) == manifest["files"][relative]
-    assert "final_reproduction_bound" in frames
+    assert set(frames) == {entry["stem"] for entry in main}
+    assert "final_reproduction_bound" not in frames
+    assert "final_reproduction_bound" in summary["figures"]
+    assert "final_reproduction_bound" in summary["plot_data"]
+    assert {entry["stem"] for entry in measurement_registry()} <= set(summary["plot_data"])
+    image_paths = {path for path in manifest["files"] if Path(path).suffix in {".png", ".pdf"}}
+    assert len(image_paths) == 12 and all(Path(path).parent.as_posix() == "figures" for path in image_paths)
+    assert "figures/guidance_scale_vs_loss.png" in image_paths
+    assert not manifest.get("timestep_figures")
+    saved_registry = read_json(output / "registry.json")
+    assert len(saved_registry["figures"]) == 6
+    assert len(saved_registry["measurement_inventory"]) >= 20
     before = {name: file_sha256(output / name) for name in summary["numerical_files"]}
     with monkeypatch.context() as patch:
         patch.setattr(torch, "load", _forbidden)

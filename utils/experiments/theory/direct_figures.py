@@ -16,7 +16,15 @@ import pandas as pd
 from .contracts import TheoryError
 from .summaries import weighted_quantiles
 
-DIRECT_FIGURE_VERSION = "direct-figure-inputs-1"
+DIRECT_FIGURE_VERSION = "direct-figure-inputs-projected-gap-error-1"
+BRANCH_GAP_ERROR_CONTRACT = "projected-gap-error-1"
+PROJECTED_GAP_ERROR_DEFINITION = "signed_projected_branch_gap_reference_error"
+BRANCH_GAP_ERROR_FORMULAS = {
+    "proposition5_posterior_feedback": "x=(||Delta_t||-e_t^parallel(Delta)-mathcal_V_t)/sqrt(d); y=matched-endpoint log-probability gain",
+    "lemma6_target_specific_synchronization": "x=[e_t^parallel(Delta)+R(1-p_t)]/sqrt(d); y=||Delta_t||/sqrt(d)",
+    "theorem7_final_reproduction": "x=[e_1(c)+(g-1)*(e_1^parallel(Delta)+R(1-p_1))]/sqrt(d); y=actual endpoint error/sqrt(d)",
+    "theorem7_certification": "Refined terminal sufficient-bound fraction versus actual proximity fraction on applicable finite paired observations",
+}
 RECOVERY_TOLERANCES = (0.1, 0.2, 0.3, 0.5, 1.0)
 PAIR_KEYS = ["run_id", "original_index", "record_id", "target_id"]
 PAIR_STEP = PAIR_KEYS + ["step_index"]
@@ -69,6 +77,14 @@ def _require(frame, columns, table):
     missing = set(columns) - set(frame)
     if missing:
         raise TheoryError(f"Missing direct measurement columns in {table}: {sorted(missing)}; rerun direct analysis")
+
+
+def _require_projected_gap_error(frame, table, *, prefix="direct"):
+    """Never relabel historical nonnegative gap-error norms as signed projections."""
+    column = prefix + "_branch_gap_error_definition"
+    _require(frame, [column], table)
+    if not frame[column].eq(PROJECTED_GAP_ERROR_DEFINITION).fillna(False).all():
+        raise TheoryError(f"{table} requires signed projected branch-gap error receipts; run --recompute-experiments")
 
 
 def _unique(frame, keys, table):
@@ -237,6 +253,12 @@ def build_direct_plot_inputs(tables, config, provenance):
             if len(initial):
                 entry["actual_initial_snr"] = float(initial.iloc[0])
         entry.update(metadata or {})
+        if stem in BRANCH_GAP_ERROR_FORMULAS:
+            entry.update(measurement_contract=BRANCH_GAP_ERROR_CONTRACT,
+                measurement_formula=BRANCH_GAP_ERROR_FORMULAS[stem],
+                branch_gap_error_definition=PROJECTED_GAP_ERROR_DEFINITION,
+                branch_gap_error_formula="e_t^parallel(Delta)=u_t^T(Delta_t-bar{Delta}_t), u_t=Delta_t/||Delta_t||; signed actual-vector projection, no norm, absolute value or clipping; exact-zero Delta extends u=e^parallel=0",
+                mathematical_scope="Derived exact gap-projection identity/Cauchy refinement under the same single-target reference, matched-endpoint and clean-update prerequisites; numerical scalar estimates are not interval certificates")
         frames[stem], figures[stem] = frame, entry
         if "x" in frame:
             summary_rows.extend(_scatter_summary(stem, frame))
@@ -349,15 +371,17 @@ def build_direct_plot_inputs(tables, config, provenance):
             eligible = _boolean(rows, "direct_prop5_applicable")
             excluded = int((~eligible).sum())
             rows = rows.loc[eligible].copy()
+        if stem in BRANCH_GAP_ERROR_FORMULAS:
+            _require_projected_gap_error(rows, table, prefix="direct_prop5" if prefix == "direct_prop5" else "direct")
         frame = _pair_frame(rows, x, y, prefix)
         metadata = {"excluded_structural_rows": excluded}
         if prefix == "direct_prop5":
-            metadata.update(symlog_linthresh=0.001, numerical_uncertainty="Original integration error, source sensitivity, sign statuses and exhausted budgets remain saved per row", certification_status="not_certified_quadrature_estimate")
+            metadata.update(symlog_linthresh=0.001, numerical_uncertainty="Signed directional integration error, positive-part variation, source sensitivity, margin signs and exhausted budgets remain saved per row", certification_status="not_certified_quadrature_estimate")
         if prefix == "direct_theorem7":
             applicable = _boolean(frame, "applicable")
             metadata["clean_update_prerequisite"] = {"applicable": int(applicable.sum()), "total": len(frame), "inapplicable": int((~applicable).sum())}
             metadata["comparison_status"] = f"{int(applicable.sum())}/{len(frame)} satisfy the clean-update prerequisite"
-            metadata["theorem_claim_scope"] = "Only applicable rows; no theorem violation or certification is assigned to inapplicable points"
+            metadata["theorem_claim_scope"] = "Refined projected-gap-error terminal bound on applicable rows only; no theorem violation or certification is assigned to inapplicable points"
         save(stem, frame, metadata=metadata)
 
     excess = tables.get("forward_unconditional_loss", pd.DataFrame()).copy()

@@ -17,11 +17,12 @@ from utils.experiments.theory.paper_contracts import (
     METRIC_SCHEMA_VERSION,
     load_paper_inputs,
     measurement_sources,
+    read_plot_table,
     write_plot_table,
 )
 from utils.experiments.theory.paper_registry import (
     GROUPS, REGISTRY_VERSION, PREVIOUS_REGISTRY_VERSION, paper_registry,
-    previous_paper_registry, _ZERO_BASELINE_FIGURES,
+    previous_paper_registry, measurement_registry, _ZERO_BASELINE_FIGURES,
 )
 
 
@@ -44,26 +45,26 @@ def compact_fixture(root, *, terminal=False, diagnostics=False, previous_registr
                     "reference_law": {"theory_mean": mean_receipt}},
     )
     figures, specs, hashes = {}, {}, {}
-    mean_stems = {entry["stem"] for entry in paper_registry() if entry.get("requires_theory_mean")}
-    registry = previous_paper_registry(diagnostics) if previous_registry else paper_registry(diagnostics)
+    mean_stems = {entry["stem"] for entry in measurement_registry() if entry.get("requires_theory_mean")}
+    registry = previous_paper_registry(diagnostics) if previous_registry else measurement_registry(diagnostics)
     if previous_registry and saved_prompt_curve:
         # Historical exports can coexist with newly saved compact analysis data.
-        registry.append(next(entry for entry in paper_registry() if entry["stem"] == "branch_gap_per_prompt"))
+        registry.append(next(entry for entry in measurement_registry() if entry["stem"] == "branch_gap_per_prompt"))
     if previous_registry and saved_grouped_coverage:
-        grouped = next(entry for entry in paper_registry() if entry["stem"] == "terminal_bound_coverage")
+        grouped = next(entry for entry in measurement_registry() if entry["stem"] == "terminal_bound_coverage")
         registry = [grouped if entry["stem"] == grouped["stem"] else entry for entry in registry]
     if previous_registry and saved_zero_baselines:
         registry.extend(_ZERO_BASELINE_FIGURES)
     if previous_registry and saved_prompt_reference_curves:
-        registry.extend(entry for entry in paper_registry() if entry["stem"] in {
+        registry.extend(entry for entry in measurement_registry() if entry["stem"] in {
             "conditional_reference_error_per_prompt", "unconditional_reference_error_per_prompt",
             "target_probability_per_prompt"})
     if previous_registry and saved_reference_gap_curve:
-        registry.append(next(entry for entry in paper_registry() if entry["stem"] == "reference_branch_gap_per_prompt"))
+        registry.append(next(entry for entry in measurement_registry() if entry["stem"] == "reference_branch_gap_per_prompt"))
     if previous_registry and saved_guidance_fit:
-        registry.append(next(entry for entry in paper_registry() if entry["stem"] == "corollary3_guidance_scale_vs_loss"))
+        registry.append(next(entry for entry in measurement_registry() if entry["stem"] == "corollary3_guidance_scale_vs_loss"))
     if previous_registry and saved_reference_variation:
-        registry.append(next(entry for entry in paper_registry() if entry["stem"] == "reference_variation_per_prompt"))
+        registry.append(next(entry for entry in measurement_registry() if entry["stem"] == "reference_variation_per_prompt"))
     for entry in registry:
         stem = entry["stem"]
         if entry.get("conditional_terminal") and not terminal:
@@ -81,6 +82,14 @@ def compact_fixture(root, *, terminal=False, diagnostics=False, previous_registr
             trend={"slope": 0.03, "intercept": 0.01},
             symlog_linthresh=0.02,
         )
+        # Historical presentation fixtures still use current metric/source receipts;
+        # same-stem scalar fixtures represent refreshed science, not old-formula reuse.
+        semantic_entry = next((item for item in measurement_registry(diagnostics=diagnostics)
+                               if item["stem"] == stem), entry)
+        if semantic_entry.get("measurement_contract") == "projected-gap-error-1":
+            metadata.update(formula_version="projected-gap-error-1",
+                            measurement_contract="projected-gap-error-1",
+                            mathematical_scope=semantic_entry["mathematical_scope"])
         if stem in mean_stems:
             metadata.update(theory_mean=dict(mean_receipt), theory_mean_source=mean_receipt["source"],
                             theory_mean_sha256=mean_receipt["vector_sha256"], mean_norm_rmse=.4,
@@ -156,8 +165,12 @@ def compact_fixture(root, *, terminal=False, diagnostics=False, previous_registr
             if transition_only:
                 metadata.update(
                     prediction_domain="positive_noise_transitions",
-                    manuscript_domain="Equation 15: t=2,...,T; chronological steps 0,...,T-2; t=1 is excluded",
-                    numerical_scope="Original saved numerical estimates; unresolved condition signs or quadrature budget do not certify exact integrals",
+                    manuscript_domain="Requested directional revision: t=2,...,T; chronological steps 0,...,T-2; t=1 is excluded",
+                    formula_version="reference-directional-variation-per-prompt-1",
+                    measurement_contract="projected-gap-error-1",
+                    variation_definition="positive_part_after_integrated_unit_gap_projection",
+                    zero_gap_convention="V=0_when_Delta_is_exactly_zero",
+                    numerical_scope="Saved directional positive-part integral estimates; clipping follows the signed integral and precedes seed averaging; not certified exact integrals",
                     numerical_status_counts={"direct_prop5_integral_status": {"estimated_converged": 4, "numerically_unresolved": 4}},
                     measurement_audit_table="audit_data/feedback_endpoints.csv",
                     reference_definition="Current unconditional posterior clean reference bar{x}_t(empty), not selected global mu")
@@ -240,7 +253,7 @@ def compact_fixture(root, *, terminal=False, diagnostics=False, previous_registr
                 for value, cdf in [(.2, .25), (1., .75), (4., 1.)]
             ])
             metadata.update(
-                formula_version="terminal-coverage-by-sscd-1",
+                formula_version=entry["formula_version"],
                 grouped_zero_mass={group: {name: 0. for name in names} for group in GROUPS},
                 grouped_infinite_mass={group: {name: 0. for name in names} for group in GROUPS},
                 group_population={group: dict(denominator_weight=2., eligible_count=4, prompt_count=2) for group in GROUPS},
@@ -276,6 +289,10 @@ def compact_fixture(root, *, terminal=False, diagnostics=False, previous_registr
                     applicable=[True] * 4,
                 )
             )
+            if stem == "posterior_feedback_condition_margin":
+                frame["step_index"] = [0, 0, 1, 1]
+                frame["timestep"] = [981, 981, 961, 961]
+                frame["snr"] = [.01, .01, .02, .02]
             if stem == "lemma4_matched_displacement":
                 frame["marker_class"] = ["independently_checked", "constructed"] * 2
                 frame["direct_lemma4_verification_source"] = [
@@ -430,19 +447,22 @@ def compact_fixture(root, *, terminal=False, diagnostics=False, previous_registr
     return root
 
 
+def load_measurement_inputs(root, *, diagnostics=False):
+    """Read saved compact fixtures for legacy artist tests, without selecting exports."""
+    config, summary, audit, frames = load_paper_inputs(root, diagnostics=diagnostics)
+    for stem, spec in summary["plot_data"].items():
+        if stem not in frames:
+            frames[stem] = read_plot_table(root / spec["path"], spec)
+    return config, summary, audit, frames
+
+
 def test_fixed_registry_has_exact_paper_selection():
     entries = paper_registry()
-    assert len([e for e in entries if e["category"] == "main"]) == 4
-    assert (
-        len(
-            [
-                e
-                for e in entries
-                if e["category"] == "appendix" and not e.get("conditional_terminal")
-            ]
-        )
-        == 16
-    )
+    assert len(entries) == 6
+    assert all(e["category"] == "main" for e in entries)
+    assert all(set(e["outputs"]) == {"png", "pdf"} for e in entries)
+    assert all(path.startswith("figures/") for e in entries for path in e["outputs"].values())
+    assert all("per_timestep_exports" not in e for e in entries)
     assert not any(e.get("conditional_terminal") for e in entries)
     assert not any(e.get("comparison_centre") == "zero" for e in entries)
     assert all(len(e["outputs"]) == 2 for e in entries)
@@ -483,8 +503,16 @@ def test_real_exports_single_page_single_axes_and_no_numeric_mutation(
     monkeypatch.setattr(np, "load", forbidden)
     monkeypatch.setattr(pd, "read_parquet", forbidden)
     manifest = plotting.render_paper(root)
-    assert len(seen) == 20
-    assert len(manifest["files"]) == 41
+    assert len(seen) == 6
+    assert len(manifest["figures"]) == 6
+    assert manifest["timestep_figures"] == []
+    assert len(manifest["files"]) == 13
+    assert manifest["requested_counts"] == {"main": 6, "appendix": 0, "diagnostics": 0, "timestep_figures": 0}
+    assert all(path.startswith("figures/") for entry in manifest["figures"] for path in entry["outputs"].values())
+    captions = (root / "figure_captions.md").read_text()
+    assert "## figures/guidance_scale_vs_loss" in captions
+    assert "## figures/posterior_feedback_condition_margin" in captions
+    assert "step_000" not in captions and "step_001" not in captions
     assert not plt.get_fignums()
     for names in seen:
         assert (root / names["png"]).read_bytes().startswith(b"\x89PNG")
@@ -543,7 +571,9 @@ def test_export_failure_keeps_old_pair_manifest_and_closes_figures(
 
 
 @pytest.mark.parametrize(
-    "relative", ["main/initial_loss_recovery.png", "figure_captions.md"]
+    "relative", ["figures/initial_loss_recovery.png", "figure_captions.md",
+                 "figures/posterior_feedback_condition_margin.png",
+                 "figures/guidance_scale_vs_loss.pdf"]
 )
 def test_unowned_collision_is_checked_before_any_export(
     tmp_path, monkeypatch, relative
@@ -565,8 +595,8 @@ def test_unowned_collision_is_checked_before_any_export(
 
 def test_saved_signs_extrema_trend_and_ambiguity_are_drawn_without_refitting(tmp_path):
     root = compact_fixture(tmp_path / "paper", diagnostics=True)
-    config, summary, _audit, frames = load_paper_inputs(root, diagnostics=True)
-    entries = {e["stem"]: e for e in paper_registry(True)}
+    config, summary, _audit, frames = load_measurement_inputs(root, diagnostics=True)
+    entries = {e["stem"]: e for e in measurement_registry(True)}
 
     def draw(stem):
         return plotting._draw(
@@ -602,8 +632,8 @@ def test_saved_signs_extrema_trend_and_ambiguity_are_drawn_without_refitting(tmp
 
 def test_invalid_saved_limits_and_ambiguity_do_not_hide_data(tmp_path):
     root = compact_fixture(tmp_path / "paper", diagnostics=True)
-    config, summary, _audit, frames = load_paper_inputs(root, diagnostics=True)
-    entries = {e["stem"]: e for e in paper_registry(True)}
+    config, summary, _audit, frames = load_measurement_inputs(root, diagnostics=True)
+    entries = {e["stem"]: e for e in measurement_registry(True)}
     stem = "joint_target_recovery_early"
     with pytest.raises(TheoryError, match="crop"):
         plotting._draw(entries[stem], frames[stem], {"x_limits": [0, 1]}, config)
@@ -623,51 +653,35 @@ def test_public_shared_publisher_rejects_unsafe_or_mismatched_pair(tmp_path, nam
         shared.publish_figures(tmp_path, [(None, names)])
 
 
-def test_optional_diagnostics_use_saved_all_population_and_analytical_snr(tmp_path):
+def test_optional_diagnostics_do_not_add_publication_exports(tmp_path):
     root = compact_fixture(tmp_path / "paper", diagnostics=True)
     manifest = plotting.render_paper(root, diagnostics=True)
-    entries = {e["stem"]: e for e in manifest["figures"]}
-    assert (
-        entries["synchronization_bound_components"]["display_audit"]["population"]
-        == "all"
-    )
-    assert (
-        entries["matched_update_residual"]["display_audit"]["x_column"] == "step_index"
-    )
-    assert (
-        entries["initial_reference_snr_sweep"]["display_audit"]["x_column"]
-        == "analytical_snr"
-    )
-    assert entries["posterior_feedback_coverage_audit"]["display_audit"][
-        "estimated_and_resolved_distinct"
-    ]
-    assert entries["terminal_error_terms"]["outputs"] == {}
-    assert not (root / "diagnostics/terminal_error_terms.png").exists()
+    assert [entry["stem"] for entry in manifest["figures"]] == [entry["stem"] for entry in paper_registry()]
+    assert manifest["timestep_figures"] == []
+    assert manifest["requested_counts"]["diagnostics"] == 0
+    assert len(manifest["files"]) == 13
+    assert not (root / "diagnostics").exists()
     assert not plt.get_fignums()
 
 
-def test_early_late_alias_omits_duplicate_file_with_named_reason(tmp_path):
-    root = compact_fixture(tmp_path / "paper", diagnostics=True)
+def test_unselected_alias_remains_saved_without_export(tmp_path):
     import json
-
+    root = compact_fixture(tmp_path / "paper", diagnostics=True)
     path = root / "summary.json"
     summary = json.loads(path.read_text())
     summary["figures"]["joint_target_recovery_late"].update(
-        status="alias",
-        reason="Early and late fixed snapshots coincide",
-        alias_of="joint_target_recovery_early",
-    )
+        status="alias", reason="Early and late fixed snapshots coincide",
+        alias_of="joint_target_recovery_early")
     atomic_write_json(path, summary)
+    before = path.read_bytes()
     manifest = plotting.render_paper(root, diagnostics=True)
-    entry = next(
-        e for e in manifest["figures"] if e["stem"] == "joint_target_recovery_late"
-    )
-    assert entry["status"] == "alias" and entry["outputs"] == {}
+    assert "joint_target_recovery_late" not in {e["stem"] for e in manifest["figures"]}
     assert not (root / "diagnostics/joint_target_recovery_late.pdf").exists()
+    assert path.read_bytes() == before
 
 
 def test_dimensionless_and_mixed_axis_units_are_explicit_in_registry():
-    entries = {e["stem"]: e for e in paper_registry(diagnostics=True)}
+    entries = {e["stem"]: e for e in measurement_registry(diagnostics=True)}
     for stem in [
         "initial_target_retrieval_rank",
         "terminal_bound_tightness",
@@ -683,79 +697,27 @@ def test_dimensionless_and_mixed_axis_units_are_explicit_in_registry():
 
 def test_curated_registry_preserves_scientific_sources_and_support_order():
     from utils.experiments.theory.paper_registry import (
-        FIGURE_RETIREMENTS, PAPER_APPENDIX_ORDER, PAPER_MAIN_ORDER,
-        PLOT_RECIPE_VERSION, RETIRED_RENDER_STEMS,
+        PAPER_APPENDIX_ORDER, PAPER_MAIN_ORDER, PLOT_RECIPE_VERSION,
     )
-    old = {entry["stem"]: entry for entry in previous_paper_registry()}
-    assert len(old) == 15
+    saved = {entry["stem"]: entry for entry in measurement_registry()}
     current = paper_registry()
-    assert tuple(entry["stem"] for entry in current[:4]) == PAPER_MAIN_ORDER
-    assert tuple(entry["stem"] for entry in current[4:]) == PAPER_APPENDIX_ORDER
-    expected_support = (PAPER_APPENDIX_ORDER[:2], PAPER_APPENDIX_ORDER[2:4],
-                        PAPER_APPENDIX_ORDER[4:7], PAPER_APPENDIX_ORDER[7:9])
-    for entry, supporting in zip(current[:4], expected_support):
-        assert tuple(entry["supporting_figure_ids"]) == supporting
-    for entry in current:
-        if entry["stem"] in old:
-            previous = old[entry["stem"]]
-            for field in ("source_table", "formula_version", "formula", "caption_key"):
-                if entry["stem"] == "terminal_bound_coverage" and field in {"formula_version", "formula"}:
-                    continue  # Explicitly requested SSCD-conditional aggregation.
-                assert entry[field] == previous[field]
-            if entry["stem"] == "terminal_bound_coverage":
-                assert entry["formula_version"] == "terminal-coverage-by-sscd-1"
-                assert entry["kind"] == "four_terminal_grouped_cdf"
-                assert {"group", "denominator_weight", "eligible_count", "prompt_count"} <= set(entry["required_columns"])
-        elif entry["stem"] == "branch_gap_per_prompt":
-            assert entry["paper_slot"] == "A10"
-            assert entry["formula_version"] == "branch-gap-per-prompt-1"
-        elif entry["stem"] == "reference_variation_per_prompt":
-            assert entry["paper_slot"] == "A16"
-            assert entry["kind"] == "four_prompt_chronological"
-            assert entry["formula_version"] == "reference-variation-per-prompt-1"
-            assert entry["value_column"] == "mean_reference_variation_rmse"
-            assert entry["source_scalar_column"] == "direct_prop5_variation_rmse"
-            assert entry["prediction_domain"] == "positive_noise_transitions"
-            assert "saved_matched_updates" in entry["input_source"]
-        elif entry["stem"] == "corollary3_guidance_scale_vs_loss":
-            assert entry["paper_slot"] == "A15"
-            assert entry["kind"] == "four_guidance_fit"
-            assert entry["formula_version"] == "corollary3-guidance-fit-1"
-            assert entry["requires_theory_mean"] is True
-            assert {"x", "y", "seed_ids_json", "fit_residual_rmse", "direction_norm_rmse"} <= set(entry["required_columns"])
-        else:
-            expected = {
-                "conditional_reference_error_per_prompt": ("A11", "mean_conditional_error_rmse", "nonnegative"),
-                "unconditional_reference_error_per_prompt": ("A12", "mean_unconditional_reference_error_rmse", "nonnegative"),
-                "target_probability_per_prompt": ("A13", "mean_target_probability", "probability"),
-                "reference_branch_gap_per_prompt": ("A14", "mean_reference_gap_rmse", "nonnegative"),
-            }
-            assert (entry["paper_slot"], entry["value_column"], entry["value_domain"]) == expected[entry["stem"]]
-            assert entry["kind"] == "four_prompt_chronological"
-            assert entry["formula_version"] == "prompt-trajectory-scalars-1"
-            assert entry["value_column"] in entry["required_columns"]
-            if entry["stem"] == "reference_branch_gap_per_prompt":
-                assert entry["source_scalar_column"] == "direct_reference_target_error_rmse"
+    assert tuple(entry["stem"] for entry in current) == PAPER_MAIN_ORDER
+    assert PAPER_APPENDIX_ORDER == ()
+    for index, entry in enumerate(current, 1):
+        previous = saved[entry["stem"]]
+        for field in ("source_table", "formula_version", "caption_key", "required_columns", "plot_data_key"):
+            assert entry[field] == previous[field]
         assert entry["figure_id"] == entry["stable_stem"] == entry["plot_data_key"] == entry["stem"]
         assert entry["plot_recipe_version"] == PLOT_RECIPE_VERSION
+        assert entry["paper_slot"] == f"M{index}"
         assert not entry["allow_unavailable"]
-        assert entry["outputs"]["png"] == f"{entry['category']}/{entry['stem']}.png"
+        output_stem = "guidance_scale_vs_loss" if entry["stem"] == "corollary3_guidance_scale_vs_loss" else entry["stem"]
+        assert entry["outputs"] == {ext: f"figures/{output_stem}.{ext}" for ext in ("png", "pdf")}
+        assert set(entry["supporting_figure_ids"]) <= set(PAPER_MAIN_ORDER)
     for diagnostics in (False, True):
         for counterfactual in (False, True):
-            selected = paper_registry(diagnostics, counterfactual=counterfactual)
-            assert sum(entry["category"] == "main" for entry in selected) == 4
-            assert sum(entry["category"] == "appendix" for entry in selected) == 16
-            assert not RETIRED_RENDER_STEMS.intersection(entry["stem"] for entry in selected)
-            optional = [entry for entry in selected if entry["stem"] == "counterfactual_unconditional_response"]
-            assert bool(optional) == diagnostics
-            if optional:
-                assert optional[0]["category"] == "diagnostics"
-    assert len(FIGURE_RETIREMENTS) == 14
-    assert {(item["stem"], item["old_category"], item["new_category"]) for item in FIGURE_RETIREMENTS[:2]} == {
-        ("terminal_bound_coverage", "appendix", "main"),
-        ("final_reproduction_bound", "main", "appendix"),
-    }
-    assert all(item["new_category"] is None for item in FIGURE_RETIREMENTS[2:])
+            assert paper_registry(diagnostics, counterfactual=counterfactual) == current
+    assert len(saved) == 20
 
 
 def test_previous_registry_fixture_retains_fifteen_saved_tables(tmp_path):
@@ -793,16 +755,18 @@ def test_default_render_retains_dormant_ownership_receipts(tmp_path):
     }
     assert "diagnostics/user_notes.pdf" not in second["preserved_files"]
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before} == before
-    assert len(second["files"]) == 41
-    assert second["requested_counts"] == {"main": 4, "appendix": 16, "diagnostics": 0}
+    assert len(second["files"]) == 13
+    assert len(second["figures"]) == 6 and second["timestep_figures"] == []
+    assert second["requested_counts"] == {"main": 6, "appendix": 0, "diagnostics": 0, "timestep_figures": 0}
     captions = (root / "figure_captions.md").read_text()
-    assert "[A5: branch_target_errors](appendix/branch_target_errors.pdf)" in captions
-    assert "[A9: final_reproduction_bound](appendix/final_reproduction_bound.pdf)" in captions
+    assert "[M2: unconditional_reference_convergence](figures/unconditional_reference_convergence.pdf)" in captions
+    assert "appendix/branch_target_errors.pdf" not in captions
+    assert "appendix/final_reproduction_bound.pdf" not in captions
 
 
 def test_prompt_reference_compact_fixtures_keep_fixed_cohorts_and_probability_domain(tmp_path):
     root = compact_fixture(tmp_path / "prompt_references")
-    _, summary, _, frames = load_paper_inputs(root)
+    _, summary, _, frames = load_measurement_inputs(root)
     identity = ["run_id", "original_index", "record_id", "target_id", "step_index",
                 "seed_count", "seed_ids_json", "cohort_complete", "mean_terminal_sscd"]
     gap = frames["branch_gap_per_prompt"][identity]
@@ -821,3 +785,105 @@ def test_prompt_reference_compact_fixtures_keep_fixed_cohorts_and_probability_do
     probability = frames["target_probability_per_prompt"].mean_target_probability
     assert probability.between(0., 1.).all()
     assert probability.min() == 0. and probability.max() == 1.
+
+
+def test_condition_margin_timestep_views_are_saved_row_slices_with_explicit_time_receipts(tmp_path):
+    from copy import deepcopy
+    root = compact_fixture(tmp_path / "slices")
+    config, summary, _, frames = load_paper_inputs(root)
+    stem = "posterior_feedback_condition_margin"
+    entry = next(item for item in measurement_registry() if item["stem"] == stem)
+    frame = frames[stem].iloc[[3, 0, 2, 1]].copy()
+    metadata = deepcopy(summary["figures"][stem])
+    original_frame, original_metadata, original_entry = frame.copy(deep=True), deepcopy(metadata), deepcopy(entry)
+    views = plotting._timestep_views(entry, frame, metadata, config)
+    assert len(views) == 2
+    for k, (child, rows, receipt) in enumerate(views):
+        assert child["stem"] == stem + f"/step_{k:03d}"
+        assert child["parent_figure"] == stem
+        assert child["source_table"] == entry["source_table"]
+        assert child["axes"] == entry["axes"]
+        assert child["display_policy"] == "finite_saved_values"
+        assert child["outputs"] == {ext: f"appendix/{stem}/step_{k:03d}.{ext}" for ext in ("png", "pdf")}
+        assert rows.reset_index(drop=True).equals(frame.loc[frame.step_index.eq(k)].reset_index(drop=True))
+        detail = receipt["timestep_slice"]
+        assert detail == {"step_index": k, "manuscript_t": 50 - k, "saved_rows": 2,
+                          "finite_pairs": 2, "nonfinite_pairs": 0,
+                          "native_timesteps": [981 if k == 0 else 961], "snr_values": [.01 if k == 0 else .02]}
+        assert receipt["status"] == "available"
+        caption_entry = {**child, "measurement_metadata": receipt, "status": receipt["status"],
+                         "scientific_hash": config["scientific_hash"]}
+        caption = plotting._caption(caption_entry)
+        assert '"step_index": ' + str(k) in caption
+        assert '"manuscript_t": ' + str(50 - k) in caption
+        assert '"finite_pairs": 2' in caption
+    assert frame.equals(original_frame) and metadata == original_metadata and entry == original_entry
+
+
+@pytest.mark.parametrize("invalid", ["missing", np.nan, np.inf, -1, .5, 50, "not-a-step"])
+def test_condition_margin_timestep_views_reject_missing_or_invalid_steps(tmp_path, invalid):
+    root = compact_fixture(tmp_path / "invalid_steps")
+    config, summary, _, frames = load_paper_inputs(root)
+    stem = "posterior_feedback_condition_margin"
+    entry = next(item for item in measurement_registry() if item["stem"] == stem)
+    frame = frames[stem].copy()
+    if isinstance(invalid, str) and invalid == "missing":
+        frame = frame.drop(columns="step_index")
+    else:
+        frame["step_index"] = frame.step_index.astype(object)
+        frame.loc[frame.index[0], "step_index"] = invalid
+    with pytest.raises(TheoryError):
+        plotting._timestep_views(entry, frame, summary["figures"][stem], config)
+
+
+def test_condition_margin_keeps_pooled_finite_values_without_timestep_exports(tmp_path, monkeypatch):
+    root = compact_fixture(tmp_path / "empty_slice")
+    config, summary, audit, frames = load_paper_inputs(root)
+    stem = "posterior_feedback_condition_margin"
+    frames[stem] = frames[stem].copy()
+    frames[stem].loc[frames[stem].step_index.eq(1), "x"] = [np.nan, np.inf]
+    before = frames[stem].copy(deep=True)
+    monkeypatch.setattr(plotting, "load_paper_inputs", lambda *args, **kwargs: (config, summary, audit, frames))
+    manifest = plotting.render_paper(root)
+    assert len(manifest["figures"]) == 6 and manifest["timestep_figures"] == []
+    entry = next(e for e in manifest["figures"] if e["stem"] == stem)
+    assert entry["display_audit"]["finite_pairs"] == 2
+    assert entry["display_audit"]["missing_coordinate_pairs"] == 2
+    assert entry["display_audit"]["scatter_alpha"] == .01
+    assert len(manifest["files"]) == 13
+    assert not (root / "appendix").exists()
+    assert frames[stem].equals(before)
+    assert not plt.get_fignums()
+
+
+def test_modified_owned_selected_export_is_rejected_before_publishing(tmp_path, monkeypatch):
+    root = compact_fixture(tmp_path / "owned_figure")
+    plotting.render_paper(root)
+    figure = root / "figures/posterior_feedback_condition_margin.png"
+    figure.write_bytes(b"user-edited selected figure")
+    def forbidden(*args, **kwargs):
+        pytest.fail("export started before checking existing figure ownership")
+    monkeypatch.setattr(plotting, "publish_figures", forbidden)
+    with pytest.raises(TheoryError, match="modified outside"):
+        plotting.render_paper(root)
+    assert figure.read_bytes() == b"user-edited selected figure"
+    assert not plt.get_fignums()
+
+
+def test_selected_scatter_opacities_apply_to_all_points(tmp_path):
+    from matplotlib.collections import PathCollection
+    root = compact_fixture(tmp_path / "opacities")
+    config, summary, _, frames = load_paper_inputs(root)
+    assert shared.SCATTER_ALPHA == .8
+    for entry in paper_registry():
+        stem = entry["stem"]
+        if stem not in {"initial_loss_recovery", "corollary3_guidance_scale_vs_loss", "posterior_feedback_condition_margin"}:
+            continue
+        fig, _ = plotting._draw(entry, frames[stem], summary["figures"][stem], config)
+        try:
+            dots = [artist for artist in fig.axes[0].collections if isinstance(artist, PathCollection)]
+            assert dots
+            expected = .01 if stem == "posterior_feedback_condition_margin" else .8
+            assert all(artist.get_alpha() == expected for artist in dots)
+        finally:
+            plt.close(fig)

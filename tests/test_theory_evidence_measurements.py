@@ -31,10 +31,15 @@ def coefficient(**changes):
 
 def reference(mu, mc, target, g=2.0, mean=None):
     mean = torch.zeros_like(target) if mean is None else mean
+    delta = mc - mu
+    norm = delta.norm(dim=1)
+    unit = delta / torch.where(norm > 0, norm, torch.ones_like(norm))[:, None]
+    projected_error = norm - (unit * (target - mean)).sum(dim=1)
     return {
         "guidance_scale": g,
         "direct_conditional_error_l2": (mc - target).norm(dim=1),
         "direct_unconditional_reference_error_l2": (mu - mean).norm(dim=1),
+        "direct_branch_gap_error_l2": projected_error,
         # The two fixed atoms target/mean with p_target=0 give this exact bound.
         "direct_radius_tail_l2": (mean - target).norm().expand(len(mu)),
     }
@@ -202,7 +207,7 @@ def test_gaussian_contract_requires_saved_version_and_fixed_variance():
     assert not derive_gaussian_noise_contract(adapter, {"sampler_contract_version": 2})["supported"]
 
 
-def test_deterministic_terminal_sample_bounds_imply_cdf_order_on_all_change_points():
+def test_refined_terminal_bounds_retain_cdf_order_on_all_change_points():
     state = tensor([[0, 0], [1, 3], [-2, 1]])
     mu, mc, target = tensor([[0, 0], [0, 0], [0, 0]]), tensor([[0, 0], [1, 1], [-1, 2]]), tensor([0, 0])
     result = predict(state, mu, mc, target, coefficient(A=0.2, B=0.9))
@@ -210,6 +215,8 @@ def test_deterministic_terminal_sample_bounds_imply_cdf_order_on_all_change_poin
     obs = result.scalars["evidence_terminal_corrected_obs_bound_l2"]
     ref = result.scalars["evidence_terminal_corrected_ref_bound_l2"]
     assert actual[0] == 0 and obs[0] == 0 and ref[0] == 0
+    assert (ref >= obs).all()
+    assert result.scalars["evidence_terminal_clean_bound_order_status"] == ["consistent_with_float64_estimate"] * 3
     for tolerance in torch.cat([actual, obs, ref]).unique():
         assert (ref <= tolerance).double().mean() <= (obs <= tolerance).double().mean()
         assert (obs <= tolerance).double().mean() <= (actual <= tolerance).double().mean()
@@ -252,6 +259,7 @@ def test_supplement_uses_saved_scalars_without_reference_evaluation_and_preserve
                      "direct_conditional_error_l2": 2.0,
                      "direct_unconditional_target_error_l2": float("nan") if (step, seed) == (0, 9) else 2.0,
                      "direct_unconditional_reference_error_l2": 1.0,
+                     "direct_branch_gap_error_l2": 1.0,
                      "direct_radius_tail_l2": 1.0,
                      "direct_lemma6_rhs_l2": 4.0,
                      "direct_theorem7_applicable": False})
@@ -264,7 +272,9 @@ def test_supplement_uses_saved_scalars_without_reference_evaluation_and_preserve
         raise AssertionError("supplement must not evaluate a posterior or learned model")
 
     law = SimpleNamespace(support=SimpleNamespace(flat=torch.zeros(2, 2, dtype=torch.float64)),
-                          mean_vector=tensor([1, 0]), posterior_mean=forbidden, posterior=forbidden)
+                          mean_vector=tensor([1, 0]), theory_mean_vector=tensor([1, 0]),
+                          theory_mean_metadata={}, metadata={"mean_sha256": "fixture"},
+                          posterior_mean=forbidden, posterior=forbidden)
     adapter = SimpleNamespace(name="ddim", version_status="verified_same_diffusers_version",
                               nonlinear=False, variance_type="fixed_small", recorded_version="v", installed_version="v",
                               coefficients=lambda step: replace(coefficient(), step_index=step))
@@ -294,3 +304,17 @@ def test_stochastic_noise_without_a_verified_law_is_explicitly_unavailable():
     assert result.scalars["evidence_terminal_scope"] == "unavailable_unsupported_terminal_contract"
     assert not result.scalars["evidence_terminal_applicable"].item()
     assert "unverified_terminal_Gaussian_variance_contract" in result.scalars["evidence_terminal_status"][0]
+
+
+def test_terminal_branch_gap_error_bound_does_not_reintroduce_sum_of_errors():
+    state, mu, mc, target = tensor([[1, 3]]), tensor([[2, -1]]), tensor([[1, 1]]), tensor([0, 0])
+    supplied = reference(mu, mc, target)
+    prediction = terminal_predictor_bounds(state, mu, mc, target, coefficient(), supplied,
+        final_update=True, run_scope="run-a", terminal_update_count=1)
+    expected = supplied["direct_conditional_error_l2"] + supplied["direct_branch_gap_error_l2"] + supplied["direct_radius_tail_l2"]
+    torch.testing.assert_close(prediction.scalars["evidence_terminal_B_ref_l2"], expected)
+    supplied["direct_unconditional_reference_error_l2"] = tensor([10000.])
+    changed = terminal_predictor_bounds(state, mu, mc, target, coefficient(), supplied,
+        final_update=True, run_scope="run-a", terminal_update_count=1)
+    torch.testing.assert_close(changed.scalars["evidence_terminal_B_ref_l2"], expected)
+    assert changed.scalars["evidence_terminal_measurement_contract"] == "projected-gap-error-1"

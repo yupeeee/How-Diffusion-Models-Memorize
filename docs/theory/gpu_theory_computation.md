@@ -1,12 +1,14 @@
 # CUDA theory computation
 
-The active numerical policy is `fixed-cache-numerics-cuda-3`, with four-stage measurement implementation `four-stage-measurements-cuda-2`. Theory analysis requires NVIDIA CUDA. `--device auto` uses all visible CUDA devices with the existing spawned workers and parent-owned progress bars; `cuda:N` chooses one device. CPU/MPS requests and unavailable CUDA fail explicitly. Plot-only and compact-bundle validation do not initialize CUDA.
+The active numerical policy is `fixed-cache-numerics-cuda-8`, with four-stage measurement implementation `four-stage-measurements-cuda-2`. Theory analysis requires NVIDIA CUDA. `--device auto` uses all visible CUDA devices with the existing spawned workers and parent-owned progress bars; `cuda:N` chooses one device. CPU/MPS requests and unavailable CUDA fail explicitly. Plot-only and compact-bundle validation do not initialize CUDA.
 
 ## Computation and host responsibilities
 
 Learned predictions and their error/loss reductions, finite-law posterior calculations, raw-vector reconstruction for numerical checks, condition screening, interval gains, variation enclosures, and adaptive quadrature value/error reductions stay on their worker GPU. Production measurement modules do not call Python Decimal. The independent Decimal implementation remains only as a test/reference oracle.
 
 Python still runs on the CPU. File validation, serialization, scheduling, scalar control decisions, scalar-table aggregation and figure rendering remain host tasks. Input random draws retain the original seeded CPU generators so that this implementation change does not silently change experimental probes; draws are transferred to CUDA before numerical evaluation. Tensor-to-host transfers used for file hashes, cache payloads and final scalar records are not CPU numerical fallbacks. These distinctions matter: GPU computation cannot mean literal zero CPU utilization.
+
+The active variation is mathcal{V}=[integral signed unit-gap projection of the next-minus-current reference]_+, with positive part applied after integration. Projection and signed quadrature stay on the GPU. Zero gap has an explicit value-zero convention without division. The projected-error recipe/payload version 5 requires signed error values reconstructed from the saved actual gap and reference vectors; compatible independent probes remain reusable. Normal analysis uses point estimates by default (`--numerical-max-products 0`); interval certification is optional via `--refine-numerics` or an explicit positive budget.
 
 ## Numerical guarantees
 

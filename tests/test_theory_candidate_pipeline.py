@@ -163,3 +163,44 @@ def test_summary_interruption_never_publishes_complete(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="synthetic summary interruption"):
         discovery._summarize(tmp_path, {}, complete=True, integration_status="complete")
     assert not read_json(tmp_path / "analysis_manifest.json")["complete"]
+
+
+@pytest.mark.parametrize("empirical_receipt", [False, True])
+def test_candidate_worker_preserves_saved_empirical_masses_exactly(tmp_path, monkeypatch, empirical_receipt):
+    import torch
+    weights = torch.tensor([.7, .2999999999999999], dtype=torch.float64)
+    tensors = {"support.pt": torch.tensor([[0.], [4.]], dtype=torch.float64),
+               "center.pt": torch.tensor([1.2], dtype=torch.float64),
+               "worker_schedule.pt": {"saved": True},
+               "evaluation_initial.pt": torch.zeros((2, 1), dtype=torch.float64)}
+    support_metadata = {"atom_ids": ["a", "b"], "aliases": {"a": 0, "duplicate-a": 0, "b": 1},
+                        "weights": weights.tolist(), "tensor_sha256": "saved-atoms"}
+    if empirical_receipt:
+        weights = torch.tensor([.75, .25], dtype=torch.float64)
+        support_metadata.update(weights=weights.tolist(), source_record_multiplicities=[3, 1])
+        support_metadata["aliases"]["another-a"] = 0
+    cache_identity = {"auxiliary_files": {name: name + "-hash" for name in discovery.AUXILIARY},
+                      "recorded_diffusers_version": "saved-version"}
+    monkeypatch.setattr(discovery, "read_json", lambda path: support_metadata if path.name == "support_metadata.json" else cache_identity)
+    monkeypatch.setattr(discovery, "file_sha256", lambda path: path.name + "-hash")
+    monkeypatch.setattr(discovery, "safe_torch_load", lambda path: tensors[path.name])
+    monkeypatch.setattr(discovery, "SchedulerAdapter", lambda *args, **kwargs: "saved-adapter")
+    bank, center, schedule, adapter, initial = discovery._worker_context(tmp_path, "cpu", 1, 2)
+    assert torch.equal(bank.weights, weights)
+    assert torch.equal(bank.log_weights, weights.log())
+    assert bank.aliases == support_metadata["aliases"]
+    if empirical_receipt:
+        assert bank.metadata()["source_record_multiplicities"] == [3, 1]
+    assert torch.equal(bank.weights @ bank.flat, weights @ tensors["support.pt"])
+    assert torch.equal(center, tensors["center.pt"]) and schedule is tensors["worker_schedule.pt"]
+    assert adapter == "saved-adapter" and initial is tensors["evaluation_initial.pt"]
+
+
+def test_candidate_segment_bank_identity_pins_masses_and_aliases_without_chunk_sizes():
+    metadata = {"tensor_sha256": "same-atoms", "weights": [.75, .25],
+                "atom_ids": ["a", "b"], "aliases": {"a": 0, "duplicate-a": 0, "b": 1},
+                "candidate_chunk": 1, "query_chunk": 2}
+    original = discovery._support_bank_hash(metadata)
+    assert discovery._support_bank_hash(metadata | {"weights": [.5, .5]}) != original
+    assert discovery._support_bank_hash(metadata | {"aliases": {"a": 0, "b": 1}}) != original
+    assert discovery._support_bank_hash(metadata | {"candidate_chunk": 512, "query_chunk": 64}) == original

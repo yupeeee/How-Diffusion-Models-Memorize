@@ -55,7 +55,7 @@ def test_render_serializes_captions_before_export_and_reports_each_file(tmp_path
     monkeypatch.setattr(plotting, "publish_figures", publish)
     manifest = plotting.render_paper(root)
     saved = read_json(root / "figure_manifest.json")
-    assert len(exports) == 40 and len(closed) == 20
+    assert len(exports) == 12 and len(closed) == 6
     for entry in manifest["figures"]:
         assert entry["display_audit"] == {"condition_zero_overlap": True, "count": 2,
                                            "nested": [[False, True]]}
@@ -65,7 +65,7 @@ def test_render_serializes_captions_before_export_and_reports_each_file(tmp_path
     text = capsys.readouterr().err
     assert "[Theory] Preparing figures" in text
     assert "[Theory] Exporting figures" in text
-    assert "main/initial_loss_recovery.png" in text
+    assert "figures/initial_loss_recovery.png" in text
     assert "Writing figure captions and manifest" in text
 
 

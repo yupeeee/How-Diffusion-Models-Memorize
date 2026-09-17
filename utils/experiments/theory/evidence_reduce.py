@@ -1,6 +1,6 @@
 """Separately resumable supplements for the fixed seven-statement evidence suite.
 
-The existing learned probes, vector cores, and original variation integrals are
+The existing learned probes, vector cores, and directional variation integrals are
 left under their existing scientific identities. Only missing supplements read
 preserved vectors. A single parent progress bar coordinates all new devices.
 """

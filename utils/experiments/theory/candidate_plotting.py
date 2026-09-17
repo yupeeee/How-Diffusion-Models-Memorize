@@ -55,7 +55,7 @@ STYLE = {
     "legend.fontsize": 10,
     "text.usetex": False,
 }
-STYLE_VERSION = "candidate-stix-2"
+STYLE_VERSION = "candidate-stix-empirical-mass-3"
 CANDIDATE_AXIS_LABELS = {
     "PF01": {"y": "Candidate matched log-probability gain"},
     "PF02": {"y": "Normalized candidate log-odds gain"},
@@ -477,15 +477,23 @@ def _scatter(
     }
 
 
-def _ecdf(ax, frame, column, label, *, color=None, weighted=True):
+def _ecdf(ax, frame, column, label, *, color=None, weighted=True, weight_column=None):
     values = _numbers(frame, column)
+    explicit_weights = None
+    if weight_column is not None:
+        if weight_column not in frame:
+            raise TheoryError("Saved atom ECDF requires explicit weight column: " + weight_column)
+        explicit_weights = _numbers(frame, weight_column)
+        if not (np.isfinite(explicit_weights) & (explicit_weights > 0)).all():
+            raise TheoryError("Saved atom ECDF masses must be finite and positive")
     valid = np.isfinite(values)
     if "rank" in column:
         valid &= values >= 1
     if not valid.any():
         return 0
     valid_frame = frame.loc[valid]
-    weights = _weights(valid_frame) if weighted else np.ones(len(valid_frame))
+    weights = (explicit_weights[valid] if explicit_weights is not None else
+               _weights(valid_frame) if weighted else np.ones(len(valid_frame)))
     values = values[valid]
     order = np.argsort(values, kind="stable")
     denominator = float(weights.sum())
@@ -913,7 +921,7 @@ def _draw(ax, card, frame, tables):
                     "candidate_atom_center_distance_rmse",
                     "Distinct candidate atoms",
                     color="#aa8b32",
-                    weighted=False,
+                    weight_column="weight",
                 )
         else:
             for column, label in (

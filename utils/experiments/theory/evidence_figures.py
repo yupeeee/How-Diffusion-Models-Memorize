@@ -14,12 +14,13 @@ import pandas as pd
 from .contracts import TheoryError
 from .direct_figures import (
     PAIR_KEYS, RECOVERY_TOLERANCES, _boolean, _counts, _number, _outcomes, _pair_frame,
-    _quantities, _require, _source, _statuses, _unique, build_direct_plot_inputs,
+    _quantities, _require, _require_projected_gap_error, _source, _statuses, _unique, build_direct_plot_inputs,
 )
 from .paper_registry import AUDIT_ALIASES, evidence_registry as paper_registry
 from .summaries import weighted_quantiles
 
-EVIDENCE_FORMULA_VERSION = "fixed-statement-evidence-inputs-2"
+EVIDENCE_FORMULA_VERSION = "projected-gap-error-1"
+DIRECTIONAL_VARIATION_DEFINITION = "positive_part_after_integrated_unit_gap_projection"
 BOOTSTRAP_REPLICATES = 1000
 BOOTSTRAP_SEED = 0
 BOOTSTRAP_CONFIDENCE = .95
@@ -477,16 +478,26 @@ def _feedback_inputs(matched, save, auxiliary):
                 "quadrature_status", "quadrature_error_scope", "source_sensitivity_status",
                 "source_sensitivity_model", "numerical_publication_blocker", "implication_eligible",
                 "implication_audit_status", "numerical_original_margin_rmse",
-                "numerical_log_probability_gain", "numerical_log_odds_gain"}
+                "numerical_log_probability_gain", "numerical_log_odds_gain",
+                "direct_prop5_measurement_contract", "direct_prop5_variation_definition"}
     stems = ("proposition5_posterior_feedback", "proposition5_condition_vs_gain",
              "proposition5_first_update_comparison", "proposition5_numerical_resolution")
     missing = sorted(required - set(matched))
     if missing:
         for stem in stems:
-            save(stem, pd.DataFrame(), reason="Fixed-cache numerical refinement is unavailable; run the separate refinement stage. Legacy source-sensitive classifications are retained as audits, not substituted.", missing_refinement_fields=missing)
+            save(stem, pd.DataFrame(), reason="Fixed-cache numerical assessments are unavailable; run theory analysis to save the gain and condition estimates. Interval certification is optional. Legacy source-sensitive classifications remain audits and are not substituted.", missing_refinement_fields=missing)
         auxiliary["proposition5_numerical_resolution_rows"] = matched.copy()
         return
     structural = _boolean(matched, "refinement_applicable")
+    matching_contract = matched.direct_prop5_measurement_contract.eq(EVIDENCE_FORMULA_VERSION).fillna(False)
+    matching_definition = matched.direct_prop5_variation_definition.eq(DIRECTIONAL_VARIATION_DEFINITION).fillna(False)
+    incompatible = structural & ~(matching_contract & matching_definition)
+    if incompatible.any():
+        for stem in stems:
+            save(stem, pd.DataFrame(), reason="Signed projected-gap-error or directional positive-variation receipts are incompatible; run --recompute-experiments. Historical norm-error or norm-integral values cannot be relabeled.",
+                 measurement_contract=EVIDENCE_FORMULA_VERSION, incompatible_variation_contract_count=int(incompatible.sum()))
+        auxiliary["proposition5_numerical_resolution_rows"] = matched.copy()
+        return
     eligible = matched.loc[structural].copy()
     records, cause_records = [], []
     layers = {"feedback": "fixed_cache_gain_sign", "condition": "condition_sign_status", "source_robust_feedback": "source_robust_gain_sign"}
@@ -535,14 +546,32 @@ def _feedback_inputs(matched, save, auxiliary):
             failures |= eligible[field].fillna("").astype(str).str.startswith("failed")
     contradiction = _boolean(eligible, "implication_eligible") & eligible.condition_sign_status.eq("positive") & eligible.fixed_cache_gain_sign.isin(["negative", "zero"])
     failures |= contradiction
+    # A resolved numerical estimate is displayable without being an interval
+    # certificate. Keep its scope separate from both sign and implication gates.
+    condition_resolved = eligible.condition_sign_status.isin(["positive", "negative", "zero"])
+    condition_arithmetic = eligible.get("condition_arithmetic_status", pd.Series("unavailable", index=eligible.index)).fillna("unavailable").astype(str)
+    estimated = condition_resolved & condition_arithmetic.eq("float64_numerical_assessment")
+    enclosed = condition_resolved & condition_arithmetic.str.startswith("certified_")
+    assessment_counts = {
+        "float64_estimated_sign": int(estimated.sum()),
+        "enclosed_sign": int(enclosed.sum()),
+        "other_resolved_sign": int((condition_resolved & ~(estimated | enclosed)).sum()),
+        "unresolved_or_unavailable": int((~condition_resolved).sum()),
+    }
     common = {
         "same_population": "At each step all three numerical layers share the same structurally eligible rows and prompt-balanced weights; unavailable V and unresolved signs remain in the denominator",
         "denominator_column": "denominator_weight", "excluded_structural_count": int((~structural).sum()),
         "excluded_missing_sscd_count": int((~np.isfinite(_number(eligible, "terminal_sscd"))).sum()),
         "reliable_positive_margin_negative_gain_count": int(contradiction.sum()),
-        "band_definition": "Partial-identification [resolved positive mass, resolved positive plus unknown mass]; not a midpoint estimate or statistical confidence interval",
+        "measurement_contract": "projected-gap-error-1",
+        "condition_formula": "||Delta_t||-e_t^parallel(Delta)-mathcal{V}_t; e_t^parallel(Delta)=u_t^T(Delta_t-bar_Delta_t), u_t=Delta_t/||Delta_t||; signed with exact-zero extension u=e^parallel=0",
+        "variation_definition": "mathcal{V}_t=[integral_0^1 <Delta_t/||Delta_t||,bar{x}_{t-1}(z_t(s),empty)-bar{x}_t(x_t,empty)> ds]_+; positive part after signed integration",
+        "zero_gap_convention": "mathcal{V}_t=0 when Delta_t is exactly zero; no unit direction is formed",
+        "comparison_interpretation": "Tightened gap-error sufficient condition from the same vector decomposition; original input/reference assumptions and justified same-endpoint transfer remain required",
+        "band_definition": "Saved-assessment range [positive mass, positive plus unknown mass]; point-estimate signs are numerical assessments, not interval certificates, and this is not a statistical confidence interval",
+        "condition_assessment_counts": assessment_counts,
         "numerical_layers": {"feedback": "Stable fixed-cache saved-endpoint H/G sign; arithmetic assessments and scoped enclosures are recorded separately",
-            "condition": "Original affine-path margin sign, including negative precheck with missing V; same-endpoint implication requires a separately justified transfer",
+            "condition": "Affine-path margin ||Delta||-E_parallel-mathcal{V}, with the positive part taken after signed unit-gap projection integration and signed vector-projected E_parallel. Default signs are numerical estimates assessed against saved quadrature and float64 roundoff uncertainty; optional interval certification is recorded separately. Saved-endpoint implication requires its separately justified transfer",
             "source_robust_feedback": "Separate justified perturbation model; heuristic source-dtype sensitivity does not certify robustness",
             "reference_model_identification": "D_K is the declared empirical law, not the identified complete checkpoint training law"},
         "numerical_resolution_table": "audit_data/proposition5_numerical_resolution_rows.csv",
@@ -550,7 +579,7 @@ def _feedback_inputs(matched, save, auxiliary):
         "numerical_coverage_table": "audit_data/proposition5_strict_coverage.csv",
         "numerical_resolution_figure": "appendix/proposition5_numerical_resolution.png",
         "status_counts": _statuses(eligible),
-        "certification_status": "Per-row arithmetic_status, condition_arithmetic_status and numerical_certification_scope define the actual scope; no blanket certificate"}
+        "certification_status": "Numerical estimates do not require interval certification to be displayed. Per-row arithmetic_status, condition_arithmetic_status and numerical_certification_scope distinguish float64 assessments from optional scoped certificates; no blanket certificate or implication eligibility is inferred"}
     if not curves.empty:
         condition = curves.loc[curves.metric.eq("condition")]
         common["condition_positive_counts"] = {group: int(rows.positive_count.sum()) for group, rows in condition.groupby("group")}
@@ -559,9 +588,9 @@ def _feedback_inputs(matched, save, auxiliary):
         common["condition_unresolved_fractions"] = {group: {"minimum": float(rows.unknown_fraction.min()), "maximum": float(rows.unknown_fraction.max())} for group, rows in condition.groupby("group")}
         common["observed_condition_coverage"] = {group: {"minimum": float(rows.fraction.min()), "maximum": float(rows.fraction.max()), "upper_maximum": float(rows.upper_fraction.max())} for group, rows in condition.groupby("group")}
         common["feedback_unresolved_fractions"] = {group: {"minimum": float(rows.unknown_fraction.min()), "maximum": float(rows.unknown_fraction.max())} for group, rows in curves.loc[curves.metric.eq("feedback")].groupby("group")}
-        common["condition_interpretation"] = "Observed feedback is separate from applicability of the sufficient condition; original condition never resolved positive on these retained rows" if condition.positive_count.sum() == 0 else "Resolved original-condition coverage and unknown mass are reported separately from observed feedback"
+        common["condition_interpretation"] = "Positive fractions include clear numerical estimates and any optional certified signs; unknown mass is retained separately. Absence of interval certification alone does not make a sign unresolved. This display does not establish a certified condition-coverage or implication claim, whose original endpoint and arithmetic gates remain separate"
     status = "blocked" if failures.any() else None
-    reason = "A justified same-contract numerical implication or consistency audit failed; retain offender identities and repair the numerical calculation" if failures.any() else None
+    reason = "A justified same-contract implication, arithmetic identity, or enclosure audit failed; retain offender identities and repair the numerical calculation" if failures.any() else None
     save("proposition5_posterior_feedback", curves, status=status, reason=reason, **common)
     save("proposition5_numerical_resolution", resolution, status=status, reason=reason, **common)
     if failures.any():
@@ -569,7 +598,7 @@ def _feedback_inputs(matched, save, auxiliary):
     direct = _pair_frame(eligible, "numerical_original_margin_rmse", "numerical_log_probability_gain")
     direct["marker_class"] = np.where(eligible.condition_sign_status.isin(["positive", "negative", "zero"]) & eligible.fixed_cache_gain_sign.isin(["positive", "negative", "zero"]), "observed", "numerically_unresolved")
     save("proposition5_condition_vs_gain", direct, status=status, reason=reason, symlog_linthresh=.001,
-         endpoint_contract="x is original affine-path margin; y is saved-endpoint H. An implication is asserted only by saved implication_eligible with justified endpoint transfer. Full audit retains both affine and saved gains.", **common)
+         endpoint_contract="x is affine-path margin ||Delta||-E_parallel-mathcal{V}; y is saved-endpoint H. Ordinary points have resolved saved numerical signs, including float64 estimates, without claiming interval certification. Crosses retain finite coordinates whose sign assessment remains unresolved. An implication requires saved implication_eligible and justified endpoint transfer. Both affine and saved gains remain in the audit.", **common)
     first = eligible.loc[_number(eligible, "step_index").eq(0)]
     if not {"numerical_matched_log_odds", "numerical_saved_log_odds"}.issubset(first):
         save("proposition5_first_update_comparison", pd.DataFrame(), reason="Stable first-update endpoint log odds are unavailable; do not infer them from clipped probabilities")
@@ -583,7 +612,8 @@ def _feedback_inputs(matched, save, auxiliary):
 
 
 def _synchronization_inputs(trajectory, save, auxiliary):
-    _require(trajectory, SAMPLE_KEYS + ["step_index", "snr", "terminal_sscd", "direct_conditional_error_rmse", "direct_unconditional_target_error_rmse", "direct_lemma6_gap_rmse", "direct_lemma6_rhs_rmse"], "trajectory")
+    _require(trajectory, SAMPLE_KEYS + ["step_index", "snr", "terminal_sscd", "direct_conditional_error_rmse", "direct_unconditional_target_error_rmse", "direct_lemma6_gap_rmse", "direct_lemma6_rhs_rmse", "direct_branch_gap_error_rmse", "direct_radius_tail_rmse", "direct_unconditional_reference_error_rmse"], "trajectory")
+    _require_projected_gap_error(trajectory, "trajectory synchronization")
     rows = trajectory.copy()
     rows["joint_error"] = np.maximum(_number(rows, "direct_conditional_error_rmse"), _number(rows, "direct_unconditional_target_error_rmse"))
     gap, bound = _number(rows, "direct_lemma6_gap_rmse"), _number(rows, "direct_lemma6_rhs_rmse")
@@ -593,8 +623,19 @@ def _synchronization_inputs(trajectory, save, auxiliary):
     rows["row_bound_tolerance_rmse"] = _operation_tolerance(rows.joint_error, gap, bound)
     gap_failed = common & (rows.gap_bound_slack_rmse < -rows.row_bound_tolerance_rmse)
     joint_failed = common & (rows.joint_bound_slack_rmse < -rows.row_bound_tolerance_rmse)
-    failed = gap_failed | joint_failed
-    rows["row_bound_audit_status"] = np.select([~common, failed], ["unavailable_nonfinite_bound_or_error", "failed_fixed_float64_consistency"], default="consistent_with_float64_estimate")
+    revised_rhs = _number(rows, "direct_branch_gap_error_rmse") + _number(rows, "direct_radius_tail_rmse")
+    rows["branch_gap_error_rhs_identity_residual_rmse"] = bound - revised_rhs
+    # Error cancellation can make E_parallel small while both target errors are
+    # large. The tightened D bound is not a bound on their paired maximum Q.
+    rows["joint_target_bound_rmse"] = np.maximum(_number(rows, "direct_conditional_error_rmse"),
+        _number(rows, "direct_unconditional_reference_error_rmse") + _number(rows, "direct_radius_tail_rmse"))
+    rows["joint_target_bound_slack_rmse"] = rows.joint_target_bound_rmse - rows.joint_error
+    joint_target_failed = common & (~np.isfinite(rows.joint_target_bound_rmse) |
+        (rows.joint_target_bound_slack_rmse < -_operation_tolerance(rows.joint_target_bound_rmse, rows.joint_error)))
+    failed = gap_failed | joint_target_failed | (common & (~np.isfinite(revised_rhs) |
+        (abs(bound - revised_rhs) > _operation_tolerance(bound, revised_rhs))))
+    rows["row_bound_audit_status"] = np.select([~common, failed],
+        ["unavailable_nonfinite_bound_or_error", "failed_fixed_float64_consistency"], default="consistent_with_float64_estimate")
     rows["arithmetic_error_scope"] = SCALAR_QA_SCOPE
     primary, branches, coverage = [], [], []
     fields = {"joint_error": "joint_error", "gap": "direct_lemma6_gap_rmse", "bound": "direct_lemma6_rhs_rmse"}
@@ -626,11 +667,13 @@ def _synchronization_inputs(trajectory, save, auxiliary):
         "absolute_tolerance_coverage_table": "audit_data/lemma6_absolute_tolerance_coverage.csv",
         "absolute_tolerance_grid_rmse": list(RECOVERY_TOLERANCES),
         "absolute_tolerance_definition": "Fixed latent L2 target-error tolerance divided by sqrt(d); unchanged across SSCD groups, steps and configurations; not fitted from outcomes",
-        "row_bound_audit": {"gap_above_bound_count": int(gap_failed.sum()), "joint_above_bound_count": int(joint_failed.sum()),
+        "row_bound_audit": {"gap_above_bound_count": int(gap_failed.sum()), "joint_above_bound_count": int(joint_failed.sum()), "joint_above_own_bound_count": int(joint_target_failed.sum()),
             "eligible_count": int(common.sum()), "unavailable_count": int((~common).sum()), "arithmetic_error_scope": SCALAR_QA_SCOPE},
-        "derived_quantity": "Q<=S follows from the same reference decomposition and posterior concentration; it is not the verbatim Lemma 6 statement"}
+        "measurement_contract": "projected-gap-error-1",
+        "branch_gap_error_definition": "signed_projected_branch_gap_reference_error",
+        "derived_quantity": "D<=S with S=(e_t^parallel(Delta)+R(1-p_t))/sqrt(d). Q remains the paired target-error maximum and is separately bounded by max(e_t(c), e_t(empty)+R(1-p_t))/sqrt(d); Q>S is not a failure"}
     status = "blocked" if failed.any() else None
-    reason = "Sample-level D<=S or derived Q<=S failed the fixed numerical consistency screen; offender rows are retained" if failed.any() else None
+    reason = "A saved scalar identity, tightened D bound, or separate branch target-error bound failed numerical consistency; offender rows are retained" if failed.any() else None
     frame = pd.concat(primary, ignore_index=True) if primary else pd.DataFrame()
     save("lemma6_target_specific_synchronization", frame, status=status, reason=reason,
          band_definition="Descriptive IQR of Q displayed; quantiles of D and S retained", **info)
@@ -643,11 +686,12 @@ def _synchronization_inputs(trajectory, save, auxiliary):
 
 
 def _terminal_looseness(terminal, config, auxiliary):
-    fields = {"conditional": "direct_conditional_error_l2", "reference_error": "direct_unconditional_reference_error_l2",
+    fields = {"conditional": "direct_conditional_error_l2", "branch_gap_error": "direct_branch_gap_error_l2",
               "radius_tail": "direct_radius_tail_l2", "reference_target": "direct_reference_target_error_l2",
               "S_raw": "direct_lemma6_rhs_l2", "D_raw": "direct_lemma6_gap_l2",
               "B_obs": "evidence_terminal_B_obs_l2", "B_ref": "evidence_terminal_B_ref_l2"}
     _require(terminal, [*fields.values(), "latent_dimension"], "terminal exact looseness decomposition")
+    _require_projected_gap_error(terminal, "terminal exact looseness decomposition")
     rows = terminal.copy()
     values = {name: _number(rows, field) for name, field in fields.items()}
     dimension = _number(rows, "latent_dimension")
@@ -656,24 +700,29 @@ def _terminal_looseness(terminal, config, auxiliary):
     valid = _boolean(rows, "evidence_terminal_applicable") & np.isfinite(root_dimension)
     for value in values.values():
         valid &= np.isfinite(value)
-    ec, eu, tail, center = (values[name] for name in ("conditional", "reference_error", "radius_tail", "reference_target"))
+    ec, gap_error, tail, center = (values[name] for name in ("conditional", "branch_gap_error", "radius_tail", "reference_target"))
     S, D, obs, ref = (values[name] for name in ("S_raw", "D_raw", "B_obs", "B_ref"))
     rows["bound_looseness_l2"] = ref - obs
     rows["slack_radius_l2"] = tail - center
-    rows["slack_triangle_l2"] = ec + eu + center - D
+    # E_parallel=D-u^T bar_Delta is signed; this is alignment slack, not a norm triangle.
+    rows["slack_projection_alignment_l2"] = gap_error + center - D
     rows["lemma6_slack_cost_l2"] = (g - 1) * (S - D)
-    rows["decomposed_slack_cost_l2"] = (g - 1) * (rows.slack_radius_l2 + rows.slack_triangle_l2)
+    rows["decomposed_slack_cost_l2"] = (g - 1) * (rows.slack_radius_l2 + rows.slack_projection_alignment_l2)
     rows["looseness_identity_residual_l2"] = rows.bound_looseness_l2 - rows.lemma6_slack_cost_l2
     rows["looseness_decomposition_residual_l2"] = rows.bound_looseness_l2 - rows.decomposed_slack_cost_l2
-    rows["lemma6_rhs_identity_residual_l2"] = S - (ec + eu + tail)
+    rows["lemma6_rhs_identity_residual_l2"] = S - (gap_error + tail)
+    rows["observable_formula_residual_l2"] = obs - (ec + (g - 1) * D)
+    rows["reference_formula_residual_l2"] = ref - (ec + (g - 1) * (gap_error + tail))
     rows["looseness_tolerance_l2"] = _operation_tolerance(ref, obs, (g - 1) * S, (g - 1) * D,
-        (g - 1) * ec, (g - 1) * eu, (g - 1) * tail, (g - 1) * center)
-    rows["decomposition_tolerance_l2"] = _operation_tolerance(ec, eu, tail, center, S, D)
+        ec, (g - 1) * gap_error, (g - 1) * tail, (g - 1) * center)
+    rows["decomposition_tolerance_l2"] = _operation_tolerance(ec, gap_error, tail, center, S, D)
     failed = valid & ((abs(rows.looseness_identity_residual_l2) > rows.looseness_tolerance_l2)
         | (abs(rows.looseness_decomposition_residual_l2) > rows.looseness_tolerance_l2)
         | (abs(rows.lemma6_rhs_identity_residual_l2) > rows.decomposition_tolerance_l2)
+        | (abs(rows.observable_formula_residual_l2) > rows.looseness_tolerance_l2)
+        | (abs(rows.reference_formula_residual_l2) > rows.looseness_tolerance_l2)
         | (rows.slack_radius_l2 < -rows.decomposition_tolerance_l2)
-        | (rows.slack_triangle_l2 < -rows.decomposition_tolerance_l2)
+        | (rows.slack_projection_alignment_l2 < -rows.decomposition_tolerance_l2)
         | (rows.bound_looseness_l2 < -rows.looseness_tolerance_l2))
     corrected_obs = _number(rows, "evidence_terminal_corrected_obs_bound_rmse")
     corrected_ref = _number(rows, "evidence_terminal_corrected_ref_bound_rmse")
@@ -685,17 +734,17 @@ def _terminal_looseness(terminal, config, auxiliary):
     rows["scheduler_cancellation_status"] = np.where(corrected_finite, "finite_scalar_comparison", "unavailable_nonfinite_corrected_bounds")
     rows["looseness_audit_status"] = np.select([~valid, failed], ["unavailable_finite_scalar_decomposition", "failed_fixed_float64_consistency"], default="consistent_with_float64_estimate")
     rows["arithmetic_error_scope"] = SCALAR_QA_SCOPE
-    components = ("bound_looseness", "slack_radius", "slack_triangle", "lemma6_slack_cost", "decomposed_slack_cost", "looseness_identity_residual", "looseness_decomposition_residual")
+    components = ("bound_looseness", "slack_radius", "slack_projection_alignment", "lemma6_slack_cost", "decomposed_slack_cost", "looseness_identity_residual", "looseness_decomposition_residual")
     for name in components:
         rows[name + "_rmse"] = rows[name + "_l2"] / root_dimension
     auxiliary["theorem7_looseness_decomposition"] = rows
     return {
         "looseness_audit_table": "audit_data/theorem7_looseness_decomposition.csv",
         "looseness_statistics": {name: _quantile_description(_number(rows.loc[valid], name + "_rmse")) for name in components},
-        "looseness_identity": "B_ref-B_obs=(g-1)(S_raw-D_raw)=(g-1)(slack_radius+slack_triangle); slack_radius=R_K(1-p_K)-||bar_x_K-x_star|| and slack_triangle=e_c+e_u_K+||bar_x_K-x_star||-D_raw. The same scheduler correction cancels.",
+        "looseness_identity": "B_ref-B_obs=(g-1)(S_raw-D_raw)=(g-1)(slack_radius+slack_projection_alignment); S_raw=E_parallel+R(1-p), slack_radius=R(1-p)-||bar_Delta||, slack_projection_alignment=E_parallel+||bar_Delta||-D_raw=||bar_Delta||-u^T bar_Delta >=0; E_parallel itself may be negative. The same scheduler correction cancels.",
         "looseness_audit": {"failed_count": int(failed.sum()), "eligible_count": int(valid.sum()),
             "unavailable_count": int((~valid).sum()), "arithmetic_error_scope": SCALAR_QA_SCOPE,
-            "interpretation": "Exact algebraic attribution checked numerically on retained scalars; no tighter substitute theorem and no empirical independence claim"}}, failed
+            "interpretation": "Exact algebraic attribution of the tightened branch-gap-error bound, with projection-alignment/radius and independent scheduler-correction QA"}}, failed
 
 
 def _terminal_inputs(terminal, config, save, auxiliary):
@@ -733,6 +782,10 @@ def _terminal_inputs(terminal, config, save, auxiliary):
     scope = next((value for value in reversed(TERMINAL_SCOPES) if value in scope_counts), "unavailable_unsupported_terminal_contract")
     manuscript_extension_required = scope in TERMINAL_SCOPES[1:]
     info = {"terminal_scope": scope, "scope_counts": scope_counts, "original_clean_counts": original_counts,
+            "measurement_contract": "projected-gap-error-1",
+            "reference_comparison_formula": "e_c+(g-1)*(E_parallel+R(1-p)) plus the unchanged scheduler correction",
+            "branch_gap_error_definition": "signed_projected_branch_gap_reference_error",
+            "reference_comparison_scope": "Tightened reference-based terminal bound using the signed projected branch-gap error; the same scheduler applicability and noise qualifications remain in force",
             "manuscript_extension_required": manuscript_extension_required,
             "counts": {"total": len(terminal), "eligible": len(chosen), "excluded": int((~common).sum())},
             "excluded_status_counts": _statuses(terminal.loc[~common]),
@@ -767,6 +820,7 @@ def _terminal_inputs(terminal, config, save, auxiliary):
     ordering["observable_above_reference_beyond_roundoff"] = np.isfinite(observable) & np.isfinite(reference) & (observable - reference > _operation_tolerance(observable, reference))
     stochastic = chosen.evidence_terminal_scope.eq("finite_terminal_update_extension_gaussian_noise_bound")
     ordering["permitted_noise_event"] = stochastic & ordering.actual_above_observable_beyond_sensitivity
+    ordering["actual_above_reference_beyond_sensitivity"] = np.isfinite(reference) & (actual - reference > _operation_tolerance(actual, reference) + source_tolerance)
     ordering["blocking_consistency_failure"] = ordering.observable_above_reference_beyond_roundoff | (~stochastic & ordering.actual_above_observable_beyond_sensitivity)
     failures.loc[chosen.index] |= ordering.blocking_consistency_failure
     auxiliary["theorem7_paired_bound_ordering"] = ordering
@@ -777,8 +831,8 @@ def _terminal_inputs(terminal, config, save, auxiliary):
         "permitted_gaussian_noise_event_count": int(ordering.permitted_noise_event.sum()),
         "arithmetic_error_scope": SCALAR_QA_SCOPE,
         "source_sensitivity_scope": "Inherited independently saved reconstruction/clean-update tolerance is a source-sensitivity screen, not an arithmetic certificate. Gaussian confidence-bound failures remain possible probability events."}
-    info["raw_ordering_violations"] = {"actual_above_observable": int((actual > observable).sum()), "observable_above_reference": int((observable > reference).sum())}
-    info["ordering_interpretation"] = "Raw sample estimates retained without clipping; deterministic source-precision QA and permitted Gaussian noise-bound failures remain distinct"
+    info["raw_ordering_violations"] = {"actual_above_observable": int((actual > observable).sum()), "observable_above_reference": int((observable > reference).sum()), "actual_above_reference": int((actual > reference).sum())}
+    info["ordering_interpretation"] = "Raw tightened-bound comparisons are retained without clipping; deterministic source-precision QA and permitted Gaussian noise-bound failures remain distinct"
     if config.get("target_error_tolerance") is not None:
         dimensions = _number(chosen, "latent_dimension").dropna().unique()
         if len(dimensions) != 1 or dimensions[0] <= 0:

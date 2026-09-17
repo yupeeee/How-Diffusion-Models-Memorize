@@ -9,7 +9,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from utils.common.io import atomic_write_json, canonical_hash, canonical_json, file_sha256
-from .contracts import FOUR_STAGE_OPTION_KEYS, TheoryError, numerical_config, read_object
+from .contracts import FOUR_STAGE_OPTION_KEYS, NUMERICAL_KEYS, TheoryError, numerical_config, read_object
 from .paper_contracts import (
     BUNDLE_SCHEMA_VERSION,
     METRIC_SCHEMA_VERSION,
@@ -25,7 +25,7 @@ from .paper_contracts import (
     saved_scientific_configuration,
     write_plot_table,
 )
-from .paper_registry import REGISTRY_VERSION, RETIRED_RENDER_STEMS, paper_registry
+from .paper_registry import REGISTRY_VERSION, RETIRED_RENDER_STEMS, measurement_registry, paper_registry
 from .progress import StageProgress
 
 
@@ -189,6 +189,12 @@ def _save_peak_descriptive_summary(frames, figures, auxiliary):
                     peak_descriptive_statistics=records)
 
 
+def _same_measurement_configuration(previous, requested):
+    """Numerical assessment budgets can change without new model observations."""
+    return ({key: value for key, value in previous.items() if key not in NUMERICAL_KEYS}
+            == {key: value for key, value in requested.items() if key not in NUMERICAL_KEYS})
+
+
 def run_paper(
     project_root, *, source_analysis=None, source_logs=None, diagnostics=False,
     recompute=False, refine_numerics=False, device="auto", candidate_chunk_size=256, query_chunk_size=16,
@@ -227,7 +233,8 @@ def run_paper(
         previous_config = (read_object(output / "run_config.json")
                            if (output / "run_config.json").exists() else None)
         if (previous_config and previous_config.get("schema_version") == BUNDLE_SCHEMA_VERSION
-                and saved_scientific_configuration(previous_config) != config and not recompute):
+                and not _same_measurement_configuration(saved_scientific_configuration(previous_config), config)
+                and not recompute):
             raise TheoryError(
                 "Active paper scientific configuration differs; use --recompute-experiments "
                 "to archive the previous publication and measure the requested configuration"
@@ -239,7 +246,11 @@ def run_paper(
                     root, config=base_config, device=device, probe_batch_size=probe_batch_size,
                     candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
                 )
-        with StageProgress(f"CUDA interval refinement (float64; {base_config['numerical_max_decimal_products']:,} operations/row) and collecting saved tables"):
+        numerical_label = (
+            f"Certifying posterior and condition intervals (CUDA float64; {base_config['numerical_max_decimal_products']:,} operations/row)"
+            if base_config["numerical_max_decimal_products"] > 0 else
+            "Collecting posterior and condition estimates")
+        with StageProgress(numerical_label):
             result = run_precision_analysis(
                 root, config=base_config, refine_only=refine_numerics, device=device, probe_batch_size=probe_batch_size,
                 candidate_chunk_size=candidate_chunk_size, query_chunk_size=query_chunk_size,
@@ -335,7 +346,8 @@ def run_paper(
         })
         archive_previous = previous_config is not None and previous_config.get("scientific_hash") != scientific_hash
         with StageProgress("Publishing paper bundle"), staged_publication(output, archive_previous=archive_previous) as stage:
-            registry = paper_registry(diagnostics=True, **registry_options)
+            # Preserve every compact measurement even though publication selects six images.
+            registry = measurement_registry(diagnostics=True, **registry_options)
             plot_names = [entry["stem"] for entry in registry] + sorted(RETIRED_RENDER_STEMS)
             baseline = tables.get("initial_baseline_summary", auxiliary.get("initial_baseline_summary"))
             # Count the same optional tables as the save loops, plus three fixed
@@ -408,7 +420,11 @@ def run_paper(
                     numerical_files[name] = file_sha256(stage / name)
                     progress.update(1)
                 progress.set_postfix_str("registry.json")
-                atomic_write_json(stage / "registry.json", {"version": REGISTRY_VERSION, "figures": registry})
+                atomic_write_json(stage / "registry.json", {
+                    "version": REGISTRY_VERSION,
+                    "figures": paper_registry(diagnostics=diagnostics, **registry_options),
+                    "measurement_inventory": registry,
+                })
                 progress.update(1)
                 summary = _clean({
                     "schema_version": 2, "complete": True, "scientific_hash": scientific_hash,

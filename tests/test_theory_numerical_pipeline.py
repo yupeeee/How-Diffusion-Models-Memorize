@@ -172,14 +172,14 @@ def test_multiworker_policy_resume_preserves_observations_and_input_identity(tmp
     monkeypatch.setattr(stage, "RecordProgress", Progress)
     monkeypatch.setattr(stage, "ProcessPoolExecutor", Executor)
     monkeypatch.setattr(stage, "_worker", worker)
-    first = stage.run_precision_analysis(tmp_path, config=config(), refine_only=True)
+    first = stage.run_precision_analysis(tmp_path, config=config(numerical_max_decimal_products=2_000_000), refine_only=True)
     assert len(scheduled) == 2 and len(bars) == 1
     assert bars[0]["devices"] == 2
     assert first["tables"]["matched_updates"].numerical_variation_l2.isna().all()
     assert first["tables"]["matched_updates"].condition_sign_status.eq("negative").all()
     assert first["tables"]["matched_updates"].direct_prop5_log_probability_gain.eq(-.125).all()
     assert first["files"]["matched_updates"] == evidence["files"]["matched_updates"]
-    repeated = stage.run_precision_analysis(tmp_path, config=config(), refine_only=True)
+    repeated = stage.run_precision_analysis(tmp_path, config=config(numerical_max_decimal_products=2_000_000), refine_only=True)
     assert len(scheduled) == 2 and repeated["directory"] == first["directory"]
     changed = stage.run_precision_analysis(tmp_path, config=config(numerical_max_decimal_products=0), refine_only=True)
     assert len(scheduled) == 4 and changed["directory"] != first["directory"]
@@ -314,10 +314,11 @@ def test_worker_reassembles_completed_batches_without_raw_or_payload_deserializa
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in preserved} == preserved
 
 
-def test_screening_is_a_policy_dependency_not_a_sufficient_input_dependency():
+def test_batched_branch_gap_screen_is_a_policy_dependency_not_an_input_recipe():
     assert "numerical_screening.py" in stage.policy_recipe(config())["source_code"]
     assert "numerical_screening.py" not in stage.input_recipe()["support_sources"]
-    assert stage.policy_recipe(config())["policy"]["version"] == "fixed-cache-numerics-cuda-3"
+    assert stage.policy_recipe(config())["policy"]["version"] == "fixed-cache-numerics-cuda-8"
+    assert stage.policy_recipe(config())["policy"]["condition_contract"] == "projected-gap-error-1"
 
 
 def test_explicit_decimal_precision_cannot_silently_select_cpu(tmp_path):
@@ -333,3 +334,65 @@ def test_python_cli_rejects_arbitrary_decimal_precision(capsys):
         theory_validation.main(["--refine-numerics", "--numerical-decimal-precision", "128"])
     assert error.value.code == 2
     assert "binary64" in capsys.readouterr().err
+
+
+def test_normal_numerical_configuration_defaults_to_estimates_without_intervals():
+    from utils.experiments.theory.contracts import NUMERICAL_DEFAULTS, OPT_IN_REFINEMENT_MAX_PRODUCTS
+    assert NUMERICAL_DEFAULTS["numerical_max_decimal_products"] == 0
+    assert config()["numerical_max_decimal_products"] == 0
+    assert OPT_IN_REFINEMENT_MAX_PRODUCTS == 2_000_000
+    assert config(numerical_max_decimal_products=1234)["numerical_max_decimal_products"] == 1234
+
+
+@pytest.mark.parametrize("mode,saved_budget,explicit_budget,expected_budget", [
+    ([], 7_000_000, None, 0),
+    (["--recompute-experiments"], 7_000_000, None, 0),
+    ([], 7_000_000, 3_000_000, 3_000_000),
+    (["--recompute-experiments"], 7_000_000, 3_000_000, 3_000_000),
+    ([], 7_000_000, 0, 0),
+    (["--refine-numerics"], 7_000_000, None, 7_000_000),
+    (["--refine-numerics"], 0, None, 2_000_000),
+    (["--refine-numerics"], None, None, 2_000_000),
+    (["--refine-numerics"], 7_000_000, 0, 0),
+    (["--refine-numerics"], 0, 3_000_000, 3_000_000),
+    (["--plot"], 7_000_000, None, 7_000_000),
+    (["--validate-only"], 7_000_000, None, 7_000_000),
+    (["--plot"], 0, None, 0),
+])
+def test_cli_interval_refinement_is_opt_in_and_read_only_modes_keep_saved_budget(
+        tmp_path, monkeypatch, mode, saved_budget, explicit_budget, expected_budget):
+    from scripts import theory_validation
+    from utils.experiments.theory import paper_contracts, paper_reduce
+
+    previous = config(num_loss_seeds=23, loss_seed=17,
+                      numerical_max_decimal_products=0 if saved_budget is None else saved_budget)
+    output = PaperPaths.build(tmp_path, **previous).output_directory
+    if saved_budget is None:
+        previous.pop("numerical_max_decimal_products")
+    receipt = output / "run_config.json"
+    atomic_write_json(receipt, {"scientific_config": previous})
+    before = receipt.read_bytes()
+    calls = []
+    monkeypatch.setattr(theory_validation, "PROJECT_ROOT", tmp_path)
+    def run(root, **options):
+        assert root == tmp_path
+        calls.append(("analysis", options))
+        return output
+    def validate(bundle, **options):
+        assert bundle == output
+        calls.append(("validate", options["expected_config"]))
+    def render(bundle, **options):
+        assert bundle == output
+        calls.append(("plot", options["expected_config"]))
+    monkeypatch.setattr(paper_reduce, "run_paper", run)
+    monkeypatch.setattr(paper_contracts, "validate_paper_bundle", validate)
+    monkeypatch.setattr(paper_contracts, "render_saved_paper", render)
+    arguments = list(mode)
+    if explicit_budget is not None:
+        arguments += ["--numerical-max-products", str(explicit_budget)]
+    assert theory_validation.main(arguments) == 0
+    assert calls
+    for _, observed in calls:
+        assert observed["numerical_max_decimal_products"] == expected_budget
+        assert observed["num_loss_seeds"] == 23 and observed["loss_seed"] == 17
+    assert receipt.read_bytes() == before

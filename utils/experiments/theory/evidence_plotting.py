@@ -143,13 +143,13 @@ def _pair_loss(fig, ax, frame, metadata):
         raise TheoryError("Loss recovery has no common finite pair summaries")
     ax.vlines(x[valid], np.minimum(y[valid], control[valid]), np.maximum(y[valid], control[valid]),
               color=".65", linewidth=.55, alpha=.3, zorder=1)
-    ax.scatter(x[valid], control[valid], s=SCATTER_SIZE * .65, facecolors="none", edgecolors=".55", linewidths=.6, alpha=.55, rasterized=True)
+    ax.scatter(x[valid], control[valid], s=SCATTER_SIZE * .65, facecolors="none", edgecolors=".55", linewidths=.6, alpha=SCATTER_ALPHA, rasterized=True)
     colored = valid & np.isfinite(scores)
     ax.scatter(x[colored], y[colored], c=scores[colored], cmap="viridis",
                norm=Normalize(*SSCD_COLOR_RANGE, clip=True), s=SCATTER_SIZE,
-               edgecolors="none", alpha=.8, rasterized=True)
+               edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
     if (valid & ~colored).any():
-        ax.scatter(x[valid & ~colored], y[valid & ~colored], color=".5", s=SCATTER_SIZE, edgecolors="none", rasterized=True)
+        ax.scatter(x[valid & ~colored], y[valid & ~colored], color=".5", s=SCATTER_SIZE, edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
     bar = add_sscd_colorbar(fig, ax, scores[colored])
     bar.set_label("Mean terminal SSCD")
     intervals = all(key in frame for key in ("x_low", "x_high", "y_low", "y_high"))
@@ -256,7 +256,7 @@ def _geometry(fig, ax, frame, metadata):
     ax.scatter(x[colored], y[colored], c=scores[colored], cmap="viridis", norm=Normalize(*SSCD_COLOR_RANGE, clip=True),
                s=SCATTER_SIZE, edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
     if (valid & ~colored).any():
-        ax.scatter(x[valid & ~colored], y[valid & ~colored], color=".5", s=SCATTER_SIZE, edgecolors="none", rasterized=True)
+        ax.scatter(x[valid & ~colored], y[valid & ~colored], color=".5", s=SCATTER_SIZE, edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
     add_sscd_colorbar(fig, ax, scores[colored])
     xmin, xmax = min(0., float(x[valid].min())), max(1., float(x[valid].max()))
     padding = .045 * max(xmax - xmin, 1.)

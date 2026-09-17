@@ -28,11 +28,14 @@ def measurement_recipe(config=None):
     from .four_stage_measurements import FOUR_STAGE_VERSION, SHAPE_ATOL, SHAPE_RTOL
     config = {} if config is None else config
     return {"version": FOUR_STAGE_VERSION,
-            "response_numerical_policy": {"backend": "cuda_outward_binary64", "mantissa_bits": 53,
-                "max_products_per_seed_whole_dose_grid": int(config.get("numerical_max_decimal_products", 2_000_000)),
+            "response_numerical_policy": {
+                "backend": "cuda_outward_binary64" if config.get("numerical_max_decimal_products", 0) > 0 else "cuda_float64_assessment",
+                "certification_enabled": config.get("numerical_max_decimal_products", 0) > 0,
+                "mantissa_bits": 53,
+                "max_products_per_seed_whole_dose_grid": int(config.get("numerical_max_decimal_products", 0)),
                 "scope": "reduced_stored_logits_only",
                 "selection": "unresolved_or_nonfinite_stable_gain_or_H_G_sign_disagreement"},
-            "source_code": _sources("four_stage_measurements.py", "four_stage_reduce.py", "numerical_refinement.py", "gpu_intervals.py", "gpu_refinement.py", "metrics.py", "evidence_measurements.py", "supplemental_cache.py"),
+            "source_code": _sources("four_stage_measurements.py", "four_stage_reduce.py", "numerical_refinement.py", "gpu_intervals.py", "gpu_refinement.py", "metrics.py", "evidence_measurements.py", "supplemental_cache.py", "branch_gap.py"),
             "dose_grid": "sorted(unique(j/40 for j=0..40 union 1/g))",
             "shape_atol_rmse": SHAPE_ATOL, "shape_rtol": SHAPE_RTOL,
             "initial_baseline": "genuine_unique_seed_gaussian_probes_with_repeated_prompt_vector_disagreement_audit"}
@@ -393,7 +396,7 @@ def prepare_four_stage_primary(project_root, *, config, device="auto", probe_bat
         status_path = backing / "four_stage_measurements" / "primary_preparation.json"
         atomic_write_json(status_path, {"fast_primary_complete": complete, "mandatory_analysis_complete": False,
                           "core_hash": digest, "tasks": [task["task_hash"] for task in tasks], "receipts": receipts,
-                          "remaining_stages": ["genuine_missing_probes", "original_variation_integration", "precision_refinement", "terminal_supplements", "publication"]})
+                          "remaining_stages": ["genuine_missing_probes", "directional_positive_variation_integration", "precision_refinement", "terminal_supplements", "publication"]})
         if not complete:
             raise TheoryError(f"Fast four-stage primary preparation incomplete; compatible shards retained. See {status_path}")
         return {"core_directory": core, "task_hashes": [task["task_hash"] for task in tasks], "status": "fast_primary_complete_full_suite_pending"}

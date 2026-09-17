@@ -1,4 +1,4 @@
-"""Equation-15 finite-candidate reference variation and Proposition-5 diagnostics.
+"""Positive signed-directional reference variation and feedback diagnostics.
 
 The learned network is never evaluated here. Destination Gaussian log weights
 are affine on the matched segment. The support Gram matrix is cached once on
@@ -16,6 +16,8 @@ import math
 import numpy as np
 import torch
 
+from .branch_gap import (BRANCH_GAP_ERROR_DEFINITION, BRANCH_GAP_ZERO_CONVENTION,
+                         branch_gap_norm, projected_branch_gap_error, unit_branch_gap)
 from .support import EVIDENCE
 
 
@@ -49,6 +51,12 @@ class IntegrationConfig:
 DEFAULT_INTEGRATION = IntegrationConfig()
 INTEGRATION_POLICY = {
     **asdict(DEFAULT_INTEGRATION),
+    "version": "projected-gap-error-1",
+    "measurement_contract": "projected-gap-error-1",
+    "branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+    "branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+    "variation_definition": "positive_part_after_integrated_unit_gap_projection",
+    "zero_gap_convention": "V=0_when_Delta_is_exactly_zero",
     "method": "adaptive_Gauss_Kronrod_15_7_with_affine_envelope_initial_partition",
     "error_scope": "successive_embedded_quadrature_estimate_not_certified",
     "source_error_scope": "supplied_source_precision_sensitivity_not_certified",
@@ -212,9 +220,10 @@ def _partition(intercept, slope, config):
 
 
 class _Segment:
-    def __init__(self, support, intercept, slopes, current_weights, config):
+    def __init__(self, support, intercept, slopes, current_weights, projected_atoms, config):
         self.support, self.intercept, self.slopes = support, intercept, slopes
         self.current_weights, self.config = current_weights, config
+        self.projected_atoms = projected_atoms
         self.device = intercept.device
         self.x = torch.as_tensor(_X, device=self.device)
         self.wk = torch.as_tensor(_WK, device=self.device)
@@ -256,14 +265,15 @@ class _Segment:
             # With target-relative logits, -E[slope] is exactly the Eq.69
             # integrand alpha_next*g*kappa/sigma_next^2 * Delta.(target-mean).
             derivative = -(weights * slopes).sum(dim=1)
-            values.append(torch.stack((variation, derivative), dim=1))
+            projected = (differences * self.projected_atoms[ids]).sum(dim=1)
+            values.append(torch.stack((projected, derivative, variation), dim=1))
             self.roundoff.scatter_reduce_(
                 0, ids, rounding, reduce="amax", include_self=True
             )
             self.invalid.scatter_reduce_(
                 0, ids, invalid.to(dtype=torch.int64), reduce="amax", include_self=True
             )
-        values = torch.cat(values).reshape(len(intervals), 15, 2)
+        values = torch.cat(values).reshape(len(intervals), 15, 3)
         kronrod = (values * self.wk[None, :, None]).sum(dim=1) * half[:, None]
         gauss = (values * self.wg[None, :, None]).sum(dim=1) * half[:, None]
         magnitude = (values.abs() * self.wk[None, :, None]).sum(dim=1) * half[:, None]
@@ -289,7 +299,7 @@ def _integrate(segment, config):
         query, left, right = interval
         leaves[query].append((left, right, value, error))
         evaluations[query] += 15
-    absolute = torch.tensor([config.absolute_tolerance, config.identity_absolute_tolerance],
+    absolute = torch.tensor([config.absolute_tolerance, config.identity_absolute_tolerance, config.absolute_tolerance],
                             dtype=torch.float64, device=segment.intercept.device)
     budget_exhausted = list(truncated)
     while True:
@@ -334,8 +344,15 @@ def unavailable_feedback(count, *, device="cpu", reason, status="not_applicable"
     keys = (
         "candidate_conditional_reference_error_l2",
         "candidate_unconditional_reference_error_l2",
+        "candidate_branch_gap_error_l2",
+        "candidate_branch_gap_error_norm_diagnostic_l2",
         "candidate_variation_l2",
         "candidate_variation_error_l2",
+        "candidate_variation_signed_integral_l2",
+        "candidate_variation_signed_integral_error_l2",
+        "candidate_variation_norm_diagnostic_l2",
+        "candidate_variation_norm_diagnostic_error_l2",
+        "candidate_projection_roundoff_allowance_l2",
         "candidate_condition_margin_l2",
         "candidate_condition_margin_rmse",
         "candidate_condition_numerical_uncertainty_l2",
@@ -365,6 +382,13 @@ def unavailable_feedback(count, *, device="cpu", reason, status="not_applicable"
     result.update(
         {
             "feedback_evidence": EVIDENCE,
+            "candidate_measurement_contract": "projected-gap-error-1",
+            "candidate_branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+            "candidate_branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+            "candidate_comparison_scope": "Condition uses signed e_Delta=unit_Delta dot (Delta-bar_Delta) and V=[integral unit_Delta dot (next_reference-current_reference)]_+; the same endpoint and reference assumptions are required",
+            "candidate_variation_definition": "positive_part_after_integrated_unit_gap_projection",
+            "candidate_zero_gap_convention": "V=0_when_Delta_is_exactly_zero",
+            "candidate_variation_direction_status": ["unavailable_projection_denominator"] * count,
             "feedback_eligible": torch.zeros(count, dtype=torch.bool, device=device),
             "feedback_status": [reason] * count,
             "candidate_condition_status": [status] * count,
@@ -407,7 +431,7 @@ def proposition5_feedback(
     source_error_l2=0.0,
     config=None,
 ):
-    """Compute the candidate-law Equation-15 condition and matched log-p gain.
+    """Compute the positive-directional variation condition and matched log-p gain.
 
     The caller establishes the affine scheduler and nonterminal transition.
     `source_error_l2` is a predeclared, raw-L2 source-rounding sensitivity of the
@@ -509,11 +533,20 @@ def proposition5_feedback(
     reference = current_weights @ support.flat
     ec = (mc - support.flat[target]).norm(dim=1)
     eu = (mu - reference).norm(dim=1)
-    gap = delta.norm(dim=1)
+    gap = branch_gap_norm(delta)
+    gap_error = projected_branch_gap_error(delta, support.flat[target] - reference)
+    error_norm_diagnostic = branch_gap_norm(delta - (support.flat[target] - reference))
     intercept = _logits(support, cf, target, an, sn)
     difference = support.target_geometry(target)[0]
     slopes = (an / (sn * sn)) * (shift @ difference.T)
-    segment = _Segment(support, intercept, slopes, current_weights, config)
+    zero_gap = (delta == 0).all(dim=1)
+    projection_available = torch.isfinite(gap) & (gap > 0)
+    direction = unit_branch_gap(delta)
+    projected_atoms = direction @ difference.T
+    projection_available &= torch.isfinite(projected_atoms).all(dim=1)
+    projected_atoms = torch.where(zero_gap[:, None], torch.zeros_like(projected_atoms),
+        torch.where(projection_available[:, None], projected_atoms, torch.full_like(projected_atoms, torch.nan)))
+    segment = _Segment(support, intercept, slopes, current_weights, projected_atoms, config)
     totals, errors, evaluations, refinements, exhausted = _integrate(segment, config)
     values = torch.as_tensor(totals, dtype=torch.float64, device=device)
     uncertainty = torch.as_tensor(errors, dtype=torch.float64, device=device)
@@ -522,9 +555,15 @@ def proposition5_feedback(
     ).expand(count)
     if not bool(torch.isfinite(source_error).all() & (source_error >= 0).all()):
         raise ValueError("Source-error sensitivity must be finite and nonnegative")
-    variation, integrated_gain = values[:, 0], values[:, 1]
-    margin = gap - ec - eu - variation
-    margin_error = uncertainty[:, 0] + segment.roundoff + source_error
+    signed_variation, integrated_gain = values[:, 0], values[:, 1]
+    signed_variation = torch.where(zero_gap, torch.zeros_like(gap), signed_variation)
+    variation = signed_variation.clamp_min(0)
+    variation_error = torch.where(zero_gap, torch.zeros_like(gap), uncertainty[:, 0])
+    projection_roundoff = 128 * torch.finfo(torch.float64).eps * support.size * torch.maximum(
+        torch.ones_like(gap), projected_atoms.abs().amax(dim=1))
+    projection_roundoff = torch.where(zero_gap, torch.zeros_like(gap), projection_roundoff)
+    margin = gap - gap_error - variation
+    margin_error = variation_error + projection_roundoff + source_error + 128 * torch.finfo(torch.float64).eps * (gap + gap_error.abs() + variation)
     endpoints = {
         "matched": _posterior_fields(intercept, target),
         # Compute observed endpoint logits independently of segment interpolation.
@@ -564,8 +603,23 @@ def proposition5_feedback(
             "feedback_eligible": torch.ones(count, dtype=torch.bool, device=device),
             "candidate_conditional_reference_error_l2": ec,
             "candidate_unconditional_reference_error_l2": eu,
+            "candidate_branch_gap_error_l2": gap_error,
+            "candidate_branch_gap_error_norm_diagnostic_l2": error_norm_diagnostic,
+            "candidate_measurement_contract": "projected-gap-error-1",
+            "candidate_branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+            "candidate_branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+            "candidate_comparison_scope": "Condition uses signed e_Delta=unit_Delta dot (Delta-bar_Delta) and V=[integral unit_Delta dot (next_reference-current_reference)]_+; the same endpoint and reference assumptions are required",
             "candidate_variation_l2": variation,
-            "candidate_variation_error_l2": uncertainty[:, 0],
+            "candidate_variation_error_l2": variation_error,
+            "candidate_variation_signed_integral_l2": signed_variation,
+            "candidate_variation_signed_integral_error_l2": variation_error,
+            "candidate_variation_norm_diagnostic_l2": values[:, 2],
+            "candidate_variation_norm_diagnostic_error_l2": uncertainty[:, 2],
+            "candidate_projection_roundoff_allowance_l2": projection_roundoff,
+            "candidate_variation_direction_status": [
+                "zero_gap_convention" if zero else "finite_nonzero_gap_projection" if available
+                else "unavailable_projection_denominator"
+                for zero, available in zip(zero_gap.tolist(), projection_available.tolist())],
             "candidate_condition_margin_l2": margin,
             "candidate_condition_margin_rmse": margin / math.sqrt(support.dimension),
             "candidate_condition_numerical_uncertainty_l2": margin_error,
@@ -634,7 +688,7 @@ def proposition5_feedback(
         invalid,
         identical,
     ) in enumerate(decisions):
-        integration_ok = not exhausted[index] and not invalid
+        integration_ok = not exhausted[index] and not invalid and math.isfinite(m) and math.isfinite(me)
         qa_ok = residual <= allowance and slack >= -slack_allowance - gt and sr <= st
         result["candidate_integral_status"][index] = (
             "estimated_converged" if integration_ok else "numerically_unresolved"

@@ -15,7 +15,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 from matplotlib.transforms import blended_transform_factory
 
-from utils.experiments.plotting import SCATTER_SIZE, SSCD_COLOR_RANGE, add_sscd_colorbar
+from utils.experiments.plotting import SCATTER_ALPHA, SCATTER_SIZE, SSCD_COLOR_RANGE, add_sscd_colorbar
 from .contracts import TheoryError
 from .evidence_plotting import (
     _REFERENCE, _SCOPES, _curve, _ecdf_support, _groups, _legend, _nonnegative_limits,
@@ -78,6 +78,13 @@ def _common_curves(frame, metrics):
 def _chronological(ax, entry, frame, metadata):
     metrics = ("gap", "joint_error") if entry["stem"] == "branch_gap_synchronization" else (
         ("conditional", "unconditional") if entry["stem"] == "branch_target_errors" else ("gap", "joint_error", "bound"))
+    styles = {metric: _QUANTITIES[metric][1] for metric in metrics}
+    if entry["stem"] == "synchronization_bound":
+        metrics = ("gap", "bound")
+        # Historical compact tables also retain the paired maximum target
+        # distance. Omit only its artwork; keep the saved values unchanged.
+        frame = frame.loc[~frame.metric.eq("joint_error")]
+        styles = {"gap": "-", "bound": "--"}
     _common_curves(frame, metrics)
     last = _index_axis(ax, metadata)
     quantities, groups, total = [], [], 0
@@ -95,7 +102,7 @@ def _chronological(ax, entry, frame, metadata):
                 x, y = _number(part, "step_index"), _number(part, "median")
                 total += int(np.isfinite(y).sum())
                 displayed.append(y)
-                ax.plot(x, y, color=color, linestyle=_QUANTITIES[metric][1], linewidth=1.5,
+                ax.plot(x, y, color=color, linestyle=styles[metric], linewidth=1.5,
                         marker="." if len(part) == 1 else None, markersize=3)
                 if metric == "joint_error" or entry["stem"] == "branch_target_errors":
                     lower, upper = _number(part, "q25"), _number(part, "q75")
@@ -104,14 +111,27 @@ def _chronological(ax, entry, frame, metadata):
                     ax.fill_between(x, lower, upper, color=color, alpha=.10, linewidth=0)
                     displayed.extend([lower, upper])
     for metric in metrics:
-        label, style = _QUANTITIES[metric]
-        quantities.append(Line2D([], [], color=".3", linestyle=style, label=label))
+        label = _QUANTITIES[metric][0]
+        quantities.append(Line2D([], [], color=".3", linestyle=styles[metric], label=label))
     _nonnegative_limits(ax, displayed)
-    first = _legend(ax, groups, loc="upper left", size=10)
-    if first is not None:
-        ax.add_artist(first)
-    _legend(ax, quantities, loc="upper right", size=10)
+    legend_audit = {}
+    if entry["stem"] == "synchronization_bound":
+        # Match terminal-bound coverage: one column for SSCD groups and one
+        # for quantities, with the complete legend above the data axes.
+        groups.extend(Line2D([], [], linestyle="none", alpha=0., label="")
+                      for _ in range(len(quantities) - len(groups)))
+        ax.legend(handles=[*groups, *quantities], loc="lower center", bbox_to_anchor=(.5, 1.01),
+                  bbox_transform=ax.transAxes, ncol=2, frameon=False, borderaxespad=0,
+                  fontsize=10, handlelength=1.65,
+                  handletextpad=.4, columnspacing=.7, labelspacing=.3)
+        legend_audit = {"legend_placement": "outside top", "legend_columns": "SSCD groups; manuscript quantities"}
+    else:
+        first = _legend(ax, groups, loc="upper left", size=10)
+        if first is not None:
+            ax.add_artist(first)
+        _legend(ax, quantities, loc="upper right", size=10)
     return {"finite_summary_cells": total, "chronological_prediction_range": [0, last],
+            "displayed_metrics": list(metrics), "quantity_styles": styles, **legend_audit,
             "common_population_checked": True, "terminal_output_prediction": False,
             "horizontal_coordinate": "T-t equals saved chronological index k; 0 is initialization, not native timestep zero",
             "display_range_policy": "Complete displayed medians and drawn IQRs plus fixed 6% upper padding; raw extrema remain saved"}
@@ -268,7 +288,7 @@ def _guidance_fit(fig, ax, frame, metadata, config):
     # root once, after validating nonnegativity, without rewriting saved inputs.
     plotted_x = np.sqrt(x)
     ax.scatter(plotted_x, y, c=score, cmap="viridis", norm=Normalize(*SSCD_COLOR_RANGE, clip=True),
-               s=SCATTER_SIZE, edgecolors="none", alpha=.8, rasterized=True)
+               s=SCATTER_SIZE, edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
     add_sscd_colorbar(fig, ax, score)
     label = rf"$g={guidance:g}$"
     ax.axhline(guidance, color=".4", linestyle="--", linewidth=1, label=label)
@@ -453,7 +473,7 @@ def _terminal(fig, ax, frame, metadata, *, counterfactual=False):
     ax.set_aspect("equal", adjustable="box")
     interior = finite & ((x > 0) & (y > 0) if log else True)
     colors = dict(cmap="viridis", norm=Normalize(*SSCD_COLOR_RANGE, clip=True),
-                  s=SCATTER_SIZE, edgecolors="none", alpha=.8, rasterized=True)
+                  s=SCATTER_SIZE, edgecolors="none", alpha=SCATTER_ALPHA, rasterized=True)
     def points(mask, px, py, *, transform=None, marker="o"):
         if not mask.any():
             return
@@ -462,7 +482,7 @@ def _terminal(fig, ax, frame, metadata, *, counterfactual=False):
         extra = {"transform": transform} if transform is not None else {}
         ax.scatter(np.asarray(px)[observed], np.asarray(py)[observed], c=score[selected][observed], marker=marker, **colors, **extra)
         if (~observed).any():
-            ax.scatter(np.asarray(px)[~observed], np.asarray(py)[~observed], color=".5", marker=marker, s=SCATTER_SIZE, **extra)
+            ax.scatter(np.asarray(px)[~observed], np.asarray(py)[~observed], color=".5", marker=marker, s=SCATTER_SIZE, alpha=SCATTER_ALPHA, **extra)
     points(interior, x[interior], y[interior])
     if log:
         zero_x = finite & (x == 0) & (y > 0)

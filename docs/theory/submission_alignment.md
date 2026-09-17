@@ -1,3 +1,5 @@
+> Historical mathematical context: the active contract is now `projected-gap-error-1`, documented in [four_stage_experiments.md](four_stage_experiments.md). It uses the signed projected gap error, and retains the positive part after signed directional integration. Norm-error/norm-integral formulas below describe preceding designs and are not active evaluated quantities. Historical numerical receipts are not relabeled.
+
 > The active figure organization is now [four_stage_experiments.md](four_stage_experiments.md). Seven-primary filenames and roles below describe the preceding design; compatible mathematical measurements and numerical contracts remain reusable. Matching LaTeX is unavailable; historical label strings are author-supplied, not verified source labels.
 
 # Submission alignment for the fixed seven-statement evidence suite
@@ -17,6 +19,8 @@ The mounted [revised.pdf](../../revised.pdf) was inspected; its verified SHA-256
 | Theorem 7, `thm:final_reproduction`, with the explicitly proposed extension below when needed | `theorem7_final_reproduction` | Actual latent reproduction and two sufficient-bound coverages over all tolerance change points. Terminal components are appended when supported; original uncorrected applicability is retained. |
 
 ## Common empirical reference and input laws
+
+Current-prior update: default cached-target analysis now gives each source record equal mass and sums exact-duplicate masses (n_i/N); see [the active reference-law contract](four_stage_experiments.md). The equal-distinct-atom description below records the preceding design, not the current prior. This update does not establish complete-training coverage or the conditional single-target premise.
 
 The empirical law is `D_K=sum_j pi_j delta_(u_j)`, with its existing frozen atoms, exact-atom deduplication, masses, preprocessing, and source provenance. The default is equal mass per distinct compatible complete cached target before prompt selection. An explicitly declared alternative law keeps its validated supplied masses. Neither construction identifies a checkpoint's complete training corpus or its frequencies.
 
@@ -40,13 +44,13 @@ For Lemma 2, the 97-point reference-only grid extends from `SNR_T*1e-6` to `SNR_
 
 For Corollary 3, let `v=x_star-mu_K` and `J=g*(m_c-m_u)`. The geometry records `q=<J,v>/(g*||v||^2)`, the directly formed perpendicular vector `J_perp=J-g*q*v`, `r_perp=||J_perp||/(g*||v||)`, and `E_rel=||J-g*v||/(g*||v||)`. Thus `E_rel^2=(q-1)^2+r_perp^2`. This normalization is an explicitly derived visualization of the full discrepancy, not a new numbered theorem or a fitted coefficient. The guidance cancellation is algebra at fixed `g`, not a guidance sweep. Exact-zero and float64-arithmetic-unresolved directions retain their absolute errors and exclusion reasons.
 
-## Original Proposition-5 condition and target-specific behavior
+## Refined branch-gap-error condition and target-specific behavior
 
-The primary sufficient test remains `M=||Delta||-e_c-e_u_K-V_K`. Its `V_K` is the original integral associated with `eq:cross_step_reference_variation`; sharper exploratory margins cannot replace it. The gain `H=log p_K(next,x_next)-log p_K(next,x_cf_next)` uses the same destination law at both endpoints. The signed integrated identity associated with `eq:proof_integrated_target_posterior_change` remains independently audited.
+The refined sufficient test is `M=||Delta||-E-V_K`, with `E=e_t(Delta)=||Delta-bar{Delta}||`. Its `V_K` is the original integral associated with `eq:cross_step_reference_variation`; the reference integral itself is unchanged. The gain `H=log p_K(next,x_next)-log p_K(next,x_cf_next)` uses the same destination law at both endpoints. The signed integrated identity associated with `eq:proof_integrated_target_posterior_change` remains independently audited.
 
 Strict condition coverage uses `M>0`; observed strict feedback uses a numerically resolved positive gain. Stable endpoint log odds can resolve a gain sign when its log-probability magnitude underflows. Zero displacement is not a strict case. Nonnegative comparisons are logged separately. Both fractions use the same eligible seed population, prompt-balanced weights, and timestep; unresolved signs remain in the denominator and contribute only to separately labeled ambiguity bounds. Quadrature and source-sensitivity estimates do not become rigorous interval certificates. Positive feedback does not imply that the sufficient condition held, and zero condition coverage must remain a numerical zero.
 
-Lemma 6 retains `D=||m_c-m_u||/sqrt(d)` and `S=(e_c+e_u_K+R_K*(1-p_K))/sqrt(d)`. The paired quantity `Q=max(||m_c-x_star||,||m_u-x_star||)/sqrt(d)` is computed before aggregation. Besides `D<=S`, the definitions and posterior concentration give `Q<=S`: conditional target error is bounded by `e_c`, and unconditional target error by `e_u_K+R_K*(1-p_K)`. This is recorded as a direct consequence rather than the lemma's verbatim statement. Small branch gap alone can describe agreement on the wrong target. Current-reference quantities remain available at the last prediction even when the destination posterior is undefined.
+Lemma 6 retains `D=||m_c-m_u||/sqrt(d)` and `S=(E+R_K*(1-p_K))/sqrt(d)`. The paired quantity `Q=max(||m_c-x_star||,||m_u-x_star||)/sqrt(d)` is computed before aggregation. Triangle and posterior concentration give D<=S. Q remains descriptive: common-mode branch error can cancel in E, so Q<=S is not asserted. Small branch gap alone can describe agreement on the wrong target. Current-reference quantities remain available at the last prediction even when the destination posterior is undefined.
 
 ## Proposed finite-terminal-update extension
 
@@ -62,9 +66,9 @@ The CFG identity in Equation 3 and terminal target decomposition in Equation 16,
 
 `||m_g-x_star|| <= B_obs := e_c+(g-1)*||Delta||`.
 
-Applying Lemma 6 gives
+Applying the refined triangle/posterior-concentration bound gives
 
-`B_obs <= B_ref := g*e_c+(g-1)*(e_u_K+R_K*(1-p_K))`.
+`B_obs <= B_ref := e_c+(g-1)*(E+R_K*(1-p_K))`.
 
 For an independently valid bound `delta_sched>=||r_sched||`, the triangle inequality therefore yields
 

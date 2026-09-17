@@ -206,3 +206,24 @@ def test_shell_refine_center_can_inherit_saved_baseline_path(tmp_path):
     assert len(calls) == 1
     assert "--refine-numerics" in calls[0]
     assert "--cached-baseline" not in calls[0]
+
+
+def test_numerical_policy_can_change_without_changing_measurements():
+    from utils.experiments.theory.paper_reduce import _same_measurement_configuration
+    certified = config(numerical_max_decimal_products=200_000_000,
+                       numerical_max_variation_nodes=257, numerical_variation_absolute_width=1e-8)
+    ordinary = config(numerical_max_decimal_products=0)
+    assert _same_measurement_configuration(certified, ordinary)
+    assert _same_measurement_configuration(ordinary, certified)
+
+
+@pytest.mark.parametrize("change", [
+    {"guidance_scale": 8.0}, {"num_loss_seeds": 93}, {"loss_seed": 17},
+    {"num_mean_samples": 12000}, {"num_seeds": 40},
+    {"counterfactual_unconditional": True, "counterfactual_steps": [0]},
+])
+def test_numerical_policy_migration_cannot_hide_changed_observations(change):
+    from utils.experiments.theory.paper_reduce import _same_measurement_configuration
+    previous = config(numerical_max_decimal_products=2_000_000)
+    requested = config(numerical_max_decimal_products=0, **change)
+    assert not _same_measurement_configuration(previous, requested)

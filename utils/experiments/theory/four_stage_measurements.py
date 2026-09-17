@@ -269,7 +269,7 @@ def response_rows(payload, identities, guidance, *, device, policy=None):
                 "response_dose_gpu_products": spent[index] - before,
                 "response_curve_gpu_products": spent[index],
                 "response_curve_gpu_budget": policy.max_decimal_products,
-                "response_arithmetic_backend": "cuda_outward_binary64",
+                "response_arithmetic_backend": "cuda_outward_binary64" if policy.max_decimal_products else "cuda_float64_assessment",
                 "response_effective_mantissa_bits": 53, "response_cpu_fallback": False,
                 "structural_applicable": True, "endpoint_contract": "fixed_reconstructed_affine_segment",
                 "endpoint_status": endpoint_status, "endpoint_construction_method": method,
@@ -401,7 +401,7 @@ def measure_record(log, record, law, adapter, config, core_tables, *, gaussian_b
                         raise TheoryError("First-response sufficient payload differs from fixed law/target")
                     responses.append(response_rows(payload, response_id, g, device=device,
                         policy=NumericalPolicy(decimal_precision=int(config.get("numerical_decimal_precision", 64)),
-                                               max_decimal_products=int(config.get("numerical_max_decimal_products", 2_000_000)))))
+                                               max_decimal_products=int(config.get("numerical_max_decimal_products", 0)))))
                 else:
                     responses.append(unavailable_response(response_id, g, "first_update_outside_nonterminal_affine_positive_noise_domain"))
     trajectory_frame = pd.concat(trajectory, ignore_index=True)

@@ -11,7 +11,7 @@ from pathlib import Path
 from utils.common.cli import MAX_SEED, generation_cache_parent_name
 
 SCHEMA_VERSION = 3
-FORMULA_VERSION = "cache-theory-3.0-proposition5"
+FORMULA_VERSION = "cache-theory-projected-gap-error-1"
 EVIDENCE_LEVELS = (
     "finite_noise_observation",
     "model_center_diagnostic",
@@ -47,8 +47,8 @@ def read_object(path: Path) -> dict:
     return value
 
 
-DIRECT_FORMULA_VERSION = "direct-seven-statements-1"
-EVIDENCE_FORMULA_VERSION = "fixed-seven-statement-evidence-1"
+DIRECT_FORMULA_VERSION = "direct-projected-gap-error-1"
+EVIDENCE_FORMULA_VERSION = "projected-gap-error-1"
 DIRECT_SCIENCE_DEFAULTS = {
     "mean_source": "reference-min-snr",
     "num_mean_samples": 10000,
@@ -61,9 +61,10 @@ DIRECT_SCIENCE_DEFAULTS = {
     "reference_snr_decades": 6.0,
     "terminal_noise_run_alpha": 0.05,
 }
+OPT_IN_REFINEMENT_MAX_PRODUCTS = 2_000_000
 NUMERICAL_DEFAULTS = {
     "numerical_decimal_precision": 64,
-    "numerical_max_decimal_products": 2_000_000,
+    "numerical_max_decimal_products": 0,
     "numerical_max_variation_nodes": 65,
     "numerical_variation_absolute_width": 1e-6,
 }
@@ -108,7 +109,7 @@ def numerical_config(
     reference_snr_decades=6.0,
     terminal_noise_run_alpha=0.05,
     numerical_decimal_precision=64,
-    numerical_max_decimal_products=2_000_000,
+    numerical_max_decimal_products=0,
     numerical_max_variation_nodes=65,
     numerical_variation_absolute_width=1e-6,
     counterfactual_unconditional=False,

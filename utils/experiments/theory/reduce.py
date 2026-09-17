@@ -127,7 +127,7 @@ TIME_BLOCK_SIZE = 8
 def build_support(
     sources, *, candidate_chunk_size=256, query_chunk_size=16, device="cpu"
 ):
-    """Freeze every valid target in the declared experiment source run before selection."""
+    """Freeze the equal-record empirical law of complete targets before selection."""
     science = sources.runs["experiment"]["scientific_config"]
     keys = (
         "model_id",
@@ -229,7 +229,7 @@ def build_support(
     metadata = support.metadata()
     metadata["missing_candidates"] = missing
     metadata["bank_policy"] = (
-        "all_valid_complete_targets_from_declared_experiment_run_before_frozen_prompt_selection; equal_mass_per_exact_distinct_latent_atom"
+        "all_valid_complete_source_records_from_declared_experiment_run_before_frozen_prompt_selection; equal_mass_per_source_record_aggregated_by_exact_latent"
     )
     metadata["source_run"] = sources.experiment.run_directory.relative_to(
         sources.root
@@ -240,7 +240,7 @@ def build_support(
         "declared_candidate_distribution_K; actual_training_law_and_frequencies_unidentified"
     )
     candidate_mean = support.weights @ support.flat
-    metadata["candidate_mean_kind"] = "mu_K_mean_of_declared_candidate_atoms"
+    metadata["candidate_mean_kind"] = "mu_K_empirical_mean_of_declared_source_records"
     metadata["candidate_mean_l2"] = float(candidate_mean.norm())
     metadata["candidate_mean_rmse"] = float(candidate_mean.norm()) / math.sqrt(
         support.dimension
@@ -250,6 +250,14 @@ def build_support(
     ).hexdigest()
     metadata["latent_contract"] = {key: science.get(key) for key in keys}
     metadata["membership_source_count"] = len(source_rows)
+    if len(source_rows) != metadata["source_record_count"]:
+        raise TheoryError("Duplicate source-record IDs in the declared empirical bank")
+    for row in source_rows:
+        index = support.aliases[row["candidate_id"]]
+        row["source_record_prior_mass"] = 1 / len(source_rows)
+        row["support_atom_id"] = support.atom_ids[index]
+        row["support_atom_source_count"] = support.source_record_counts[index]
+        row["support_atom_prior_mass"] = metadata["weights"][index]
     return support, metadata, pd.DataFrame(source_rows)
 
 
@@ -362,7 +370,11 @@ def _record_metrics(
                     coefficients.alpha,
                     coefficients.sigma,
                     unconditional=mu,
+                    include_mean=True,
                 )
+                current_reference_mean = current_reference.pop("posterior_mean", None)
+                if current_reference_mean is None:
+                    current_reference_mean = torch.full_like(mu, torch.nan, dtype=torch.float64)
                 metrics.update(current_reference)
                 update_metrics, matched, displacement = adapter.matched_update(
                     state, next_state, u, c, g, k, target=target - center_device
@@ -421,6 +433,14 @@ def _record_metrics(
                 metrics["candidate_conditional_reference_error_l2"] = metrics[
                     "conditional_target_error_l2"
                 ]
+                from .branch_gap import projected_branch_gap_error
+                gap_error = projected_branch_gap_error(
+                    mc - mu, target - current_reference_mean, latent_ndim=target.ndim
+                )
+                metrics["candidate_branch_gap_error_definition"] = "signed_projected_branch_gap_reference_error"
+                metrics["candidate_branch_gap_error_zero_gap_convention"] = "u=0_and_e_parallel=0_when_Delta_is_exactly_zero"
+                metrics["candidate_branch_gap_error_l2"] = gap_error
+                metrics["candidate_branch_gap_error_rmse"] = gap_error / math.sqrt(target.numel())
                 terminal = None
                 if k == steps - 1:
                     terminal = adapter.terminal_diagnostics(
@@ -438,9 +458,7 @@ def _record_metrics(
                     metrics.update(
                         candidate_terminal_bound(
                             metrics["conditional_target_error_l2"],
-                            current_reference[
-                                "candidate_unconditional_reference_error_l2"
-                            ],
+                            metrics["candidate_branch_gap_error_l2"],
                             current_reference["candidate_radius_l2"],
                             current_reference["target_log_complement"],
                             guidance=g,
@@ -797,7 +815,11 @@ def _run_theory_shard(
             candidate_chunk=candidate_chunk_size,
             query_chunk=query_chunk_size,
             weights=support_meta["weights"],
+            source_record_counts=support_meta.get("source_record_multiplicities"),
         )
+        # Device staging preserves the saved normalized empirical masses exactly.
+        support.weights = torch.tensor(support_meta["weights"], dtype=torch.float64, device=concrete)
+        support.log_weights = support.weights.log()
         evaluation_initial = payloads["evaluation_initial.pt"]
         schedule = payloads["worker_schedule.pt"]
         version = (
@@ -886,7 +908,7 @@ def _run_theory_shard(
                             loaded_record=loaded_record,
                         )
                         if prepare_candidate_endpoints:
-                            from .candidate_reduce import stage_shared_endpoint_record
+                            from .candidate_reduce import _support_bank_hash, stage_shared_endpoint_record
 
                             stage_shared_endpoint_record(
                                 sources,
@@ -898,7 +920,7 @@ def _run_theory_shard(
                                 adapter,
                                 device=concrete,
                                 query_chunk_size=query_chunk_size,
-                                bank_hash=support_meta["tensor_sha256"],
+                                bank_hash=_support_bank_hash(support_meta),
                                 loaded_record=loaded_record,
                                 base_frames=(frame, initial, endpoint),
                             )
@@ -1101,6 +1123,7 @@ def _run_theory(
             "metrics.py",
             "scheduler_adapter.py",
             "support.py",
+            "branch_gap.py",
             "feedback.py",
             "summaries.py",
             "statements.py",

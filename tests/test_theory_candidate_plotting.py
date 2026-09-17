@@ -775,3 +775,33 @@ def test_baseline_populations_and_exact_saved_tolerance_grid():
     assert grid["values"] == [0.0, 0.07, 0.2]
     assert grid["source_sha256"] == "f" * 64
     assert grid["source_table"] == "summaries/joint_tolerance.parquet"
+
+
+def test_bank_ecdf_uses_saved_empirical_atom_masses_without_reweighting_gaussian_seeds():
+    card = next(card for card in candidate_registry()["designs"] if card["id"] == "UB02")
+    baseline = pd.DataFrame({"run_id": ["run", "run"], "seed": [0, 1], "unconditional_center_rmse": [.2, .4]})
+    bank = pd.DataFrame({"candidate_atom_center_distance_rmse": [1., 2., 3.], "weight": [.5, .25, .25]})
+    before = bank.copy(deep=True)
+    fig, ax = plt.subplots()
+    try:
+        stats = plotting._draw(ax, card, baseline, {"bank_geometry": bank})
+        curves = {line.get_label(): line for line in ax.lines}
+        assert np.allclose(curves["Initial unconditional"].get_ydata(), [.5, 1.])
+        assert np.allclose(curves["Distinct candidate atoms"].get_ydata(), [.5, .75, 1.])
+        assert stats["finite_observations"] == 5 and bank.equals(before)
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("weights", [None, [.5, np.nan], [.5, 0.]])
+def test_bank_ecdf_requires_valid_saved_atom_weights(weights):
+    bank = pd.DataFrame({"distance": [1., 2.]})
+    if weights is not None:
+        bank["weight"] = weights
+    fig, ax = plt.subplots()
+    try:
+        with pytest.raises(TheoryError, match="weight|masses"):
+            plotting._ecdf(ax, bank, "distance", "Atoms", weight_column="weight")
+        assert not ax.lines
+    finally:
+        plt.close(fig)

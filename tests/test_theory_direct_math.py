@@ -41,9 +41,16 @@ def test_reference_mean_explicit_mass_deduplication_and_exact_radius():
     assert reference.target_radius("atom-0") == 6.0
     assert reference.support.aliases["atom-0"] == reference.support.aliases["atom-1"]
     assert torch.equal(reference.to("cpu").support.weights, reference.support.weights)
-    # No supplied masses means equal DISTINCT atoms, not three recovered records.
-    uniform = law(((2.0, 1.0), (2.0, 1.0), (8.0, 1.0)))
-    torch.testing.assert_close(uniform.mean_vector, torch.tensor([5.0, 1.0], dtype=torch.float64))
+    assert reference.metadata["weight_definition"] == "predeclared_explicit_weights"
+    assert reference.metadata["source_record_multiplicities"] is None
+    # Each source record retains its mass when exact latent atoms are collapsed.
+    empirical = law(((2.0, 1.0), (2.0, 1.0), (8.0, 1.0)))
+    torch.testing.assert_close(empirical.mean_vector, torch.tensor([4.0, 1.0], dtype=torch.float64))
+    assert empirical.metadata["source_record_multiplicities"] == [2, 1]
+    assert empirical.metadata["source_record_count"] == 3
+    assert empirical.to("cpu").support.metadata() == empirical.support.metadata()
+    assert empirical.metadata["version"] == "direct-reference-law-2"
+    assert empirical.law_hash != reference.law_hash
 
 
 def test_law_hash_is_independent_of_chunking_and_zero_mass_is_explicit():
@@ -131,7 +138,10 @@ def test_lemma6_all_current_states_and_wrong_target_branch_agreement():
     values, _, _ = direct.current_reference_metrics(state, wrong, wrong, target, reference, "atom-0", 0.9, math.sqrt(0.19))
     assert values["direct_lemma6_gap_l2"].item() == 0
     assert values["direct_conditional_error_l2"].item() > 100
-    assert values["direct_lemma6_rhs_l2"].item() > 100
+    torch.testing.assert_close(values["direct_lemma6_rhs_l2"],
+                               values["direct_branch_gap_error_l2"] + values["direct_radius_tail_l2"])
+    assert values["direct_lemma6_rhs_l2"].item() < 100
+    torch.testing.assert_close(values["direct_reference_branch_gap_l2"], values["direct_reference_target_error_l2"])
     assert values["direct_target_radius_l2"] == 3.0
     assert values["direct_reference_target_error_l2"].item() <= values["direct_radius_tail_l2"].item() + 1e-12
 
@@ -146,7 +156,7 @@ def test_small_vector_and_nonzero_probability_underflow_do_not_become_exact_zero
     assert torch.isfinite(values["direct_target_log_complement"]).all()
 
 
-def test_singleton_proposition5_has_exact_zero_gain_and_original_negative_margin():
+def test_singleton_branch_gap_error_matches_gap_and_gives_zero_margin_and_gain():
     reference = law(((2.0, 1.0),))
     target = reference.support.atoms[0]
     mu = torch.tensor([[1.0, 0.0]], dtype=torch.float64)
@@ -161,7 +171,11 @@ def test_singleton_proposition5_has_exact_zero_gain_and_original_negative_margin
     assert result["direct_prop5_applicable"]
     assert result["direct_prop5_log_probability_gain"].item() == 0
     assert result["direct_prop5_variation_l2"].item() == 0
-    assert result["direct_prop5_lower_bound"].item() < 0
+    assert result["direct_prop5_margin_l2"].item() == 0
+    assert result["direct_prop5_lower_bound"].item() == 0
+    assert result["direct_prop5_lower_bound_slack"].item() == 0
+    assert not result["direct_prop5_strict_positive_condition"].item()
+    assert metrics["direct_branch_gap_error_l2"].item() == 2
     assert torch.isnan(result["direct_prop5_log_odds_gain"]).all()
 
 
@@ -224,7 +238,7 @@ def narrow_transition(*, integrate=False, payload_callback=None, config=None):
     return reference, result
 
 
-def test_original_variation_narrow_transition_signed_integral_and_negative_lower_bound():
+def test_branch_gap_error_margin_uses_positive_directional_variation_and_preserves_endpoint_integral():
     from utils.experiments.theory.candidate_integration import IntegrationConfig
 
     captured = []
@@ -240,6 +254,11 @@ def test_original_variation_narrow_transition_signed_integral_and_negative_lower
     assert torch.equal(result["direct_prop5_log_probability_gain"], observed_gain)
     assert torch.isnan(core["direct_prop5_variation_l2"]).all()
     assert result["direct_prop5_variation_l2"].item() == pytest.approx(4 / 3, abs=2e-7)
+    assert result["direct_prop5_variation_signed_integral_l2"].item() == pytest.approx(4 / 3, abs=2e-7)
+    assert result["direct_prop5_variation_definition"] == "positive_part_after_integrated_unit_gap_projection"
+    assert result["direct_prop5_measurement_contract"] == "projected-gap-error-1"
+    assert payload["reference_branch_gap"].item() == 0
+    assert payload["branch_gap_error"].item() == 3
     assert result["direct_prop5_margin_l2"].item() == pytest.approx(-4 / 3, abs=2e-7)
     assert result["direct_prop5_log_probability_gain"].item() < 0
     assert result["direct_prop5_lower_bound"].item() < 0
@@ -430,3 +449,89 @@ def test_reference_mean_receipt_and_device_roundtrip_preserve_the_exact_atom_law
         torch.testing.assert_close(current[field], old[field], rtol=0, atol=0)
     torch.testing.assert_close(current["direct_reference_to_bank_mean_error_l2"], old["direct_reference_mean_offset_l2"], rtol=0, atol=0)
     assert not torch.equal(current["direct_reference_mean_offset_l2"], old["direct_reference_mean_offset_l2"])
+
+
+
+def test_branch_gap_error_retains_cancellation_and_differs_from_reference_gap():
+    reference = law()
+    target = reference.support.atoms[0]
+    state = torch.tensor([[0.3, -0.2]], dtype=torch.float64)
+    small, _, mean = direct.current_reference_metrics(state, state, state, target, reference, "atom-0", .8, .6)
+    common_mode, _, _ = direct.current_reference_metrics(state, state + 100, state + 100, target, reference, "atom-0", .8, .6)
+    torch.testing.assert_close(small["direct_branch_gap_error_l2"], common_mode["direct_branch_gap_error_l2"])
+    assert common_mode["direct_conditional_error_l2"].item() > 100
+    conditional, unconditional = target.expand_as(state), mean
+    exact, _, _ = direct.current_reference_metrics(state, unconditional, conditional, target, reference, "atom-0", .8, .6)
+    assert exact["direct_branch_gap_error_l2"].item() == 0
+    assert exact["direct_reference_branch_gap_l2"].item() > 0
+    torch.testing.assert_close(exact["direct_lemma6_rhs_l2"], exact["direct_radius_tail_l2"])
+    assert exact["direct_measurement_contract"] == "projected-gap-error-1"
+
+
+@pytest.mark.parametrize("matched_coordinate,expected_zero", [(-1., True), (-2., True), (0., False)])
+def test_direct_variation_mapping_preserves_signed_cancellation_and_separate_norm_diagnostic(matched_coordinate, expected_zero):
+    from scipy.integrate import quad
+    reference = law(((1., 0.), (-1., 0.)))
+    target = reference.support.atoms[0]
+    state = torch.zeros((1, 2), dtype=torch.float64)
+    mu = torch.tensor([[2 * matched_coordinate, 0.]], dtype=torch.float64)
+    mc = mu + torch.tensor([[2., 0.]], dtype=torch.float64)
+    matched = .5 * mu
+    observed = matched + mc - mu
+    coeff = UpdateCoefficients(0, 1, 0, .8, .6, .8**2/.6**2,
+                               1., .5, .5, .5, 0., True, True, "synthetic_affine")
+    _, weights, mean = direct.current_reference_metrics(
+        state, mu, mc, target, reference, "atom-0", coeff.alpha, coeff.sigma)
+    result = direct.proposition5_metrics(
+        state, mu, mc, matched, observed, target, "atom-0", reference, coeff,
+        weights, mean, torch.zeros(1, dtype=torch.float64),
+        torch.ones(1, dtype=torch.bool), 2.)
+    signed = quad(lambda s: math.tanh(4 * (matched_coordinate + 2 * s)), 0., 1., epsabs=1e-12)[0]
+    assert result["direct_prop5_variation_signed_integral_l2"].item() == pytest.approx(signed, abs=2e-7)
+    assert result["direct_prop5_variation_l2"].item() == pytest.approx(max(0., signed), abs=2e-7)
+    assert result["direct_prop5_variation_rmse"].item() == pytest.approx(max(0., signed) / math.sqrt(2), abs=2e-7)
+    assert result["direct_prop5_variation_norm_diagnostic_l2"].item() > .7
+    assert result["direct_prop5_margin_l2"].item() == pytest.approx(1 - max(0., signed), abs=2e-7)
+    assert result["direct_prop5_variation_direction_status"] == ["finite_nonzero_gap_projection"]
+    if expected_zero:
+        assert result["direct_prop5_variation_l2"].item() == pytest.approx(0., abs=2e-7)
+
+
+@pytest.mark.parametrize("delta,reference,expected", [
+    ([2., 0.], [1., 3.], 1.),
+    ([1., 0.], [3., 5.], -2.),
+    ([-2., 0.], [1., 4.], 3.),
+    ([0., 0.], [7., 9.], 0.),
+])
+def test_projected_branch_gap_error_is_signed_and_ignores_orthogonal_component(delta, reference, expected):
+    from utils.experiments.theory.branch_gap import projected_branch_gap_error
+    result = projected_branch_gap_error(torch.tensor([delta]), torch.tensor(reference))
+    assert result.dtype == torch.float64
+    assert result.shape == (1,)
+    assert result.item() == pytest.approx(expected)
+
+
+def test_projected_branch_gap_error_preserves_tensor_batch_axes_and_tiny_nonzero_direction():
+    from utils.experiments.theory.branch_gap import projected_branch_gap_error, unit_branch_gap, branch_gap_norm
+    delta = torch.tensor([[[[1e-300, 0.]]], [[[0., 0.]]]], dtype=torch.float64)
+    reference = torch.tensor([[[2., 0.]]], dtype=torch.float64)
+    result = projected_branch_gap_error(delta, reference, latent_ndim=3)
+    torch.testing.assert_close(result, torch.tensor([-2., 0.], dtype=torch.float64))
+    assert branch_gap_norm(delta, latent_ndim=3)[0].item() == 1e-300
+    assert unit_branch_gap(delta, latent_ndim=3)[0, 0, 0, 0].item() == 1.
+    for invalid in (float("nan"), float("inf")):
+        assert torch.isnan(projected_branch_gap_error(torch.tensor([[invalid, 0.]]), reference.reshape(2))).all()
+    assert torch.isnan(projected_branch_gap_error(torch.zeros(1, 2), torch.tensor([float("nan"), 0.]))).all()
+
+
+def test_current_reference_negative_projected_error_is_kept_and_normalized_with_sign():
+    reference = law(((1., 0.), (-1., 0.)))
+    z = torch.zeros(1, 2, dtype=torch.float64)
+    mc = torch.tensor([[.25, 0.]], dtype=torch.float64)
+    values, _, _ = direct.current_reference_metrics(z, z, mc, reference.support.atoms[0], reference, "atom-0", .8, .6)
+    assert values["direct_branch_gap_error_l2"].item() == pytest.approx(-.75)
+    assert values["direct_branch_gap_error_rmse"].item() == pytest.approx(-.75 / math.sqrt(2))
+    assert values["direct_branch_gap_error_norm_diagnostic_l2"].item() == pytest.approx(.75)
+    assert values["direct_lemma6_rhs_l2"].item() == pytest.approx(.25)
+    assert values["direct_lemma6_slack_l2"].item() == pytest.approx(0.)
+    assert values["direct_branch_gap_error_definition"] == "signed_projected_branch_gap_reference_error"

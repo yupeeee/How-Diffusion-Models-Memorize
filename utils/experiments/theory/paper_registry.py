@@ -6,12 +6,91 @@ import copy
 
 from .paper_notation import NOTATION_DETAILS, NOTATION_SCOPE, NOTATION_VERSION, PAPER_AXES
 
-REGISTRY_VERSION = "four-stage-paper-curation-13"
+REGISTRY_VERSION = "four-stage-paper-curation-20"
 PREVIOUS_REGISTRY_VERSION = "four-stage-evidence-1"
 COMPATIBLE_PRESENTATION_REGISTRY_VERSIONS = frozenset({
-    REGISTRY_VERSION, "four-stage-paper-curation-12", "four-stage-paper-curation-11", "four-stage-paper-curation-10", "four-stage-paper-curation-9", "four-stage-paper-curation-8", "four-stage-paper-curation-7", "four-stage-paper-curation-6", "four-stage-paper-curation-5", "four-stage-paper-curation-4", "four-stage-paper-curation-3", "four-stage-paper-curation-2", PREVIOUS_REGISTRY_VERSION,
+    REGISTRY_VERSION, "four-stage-paper-curation-19", "four-stage-paper-curation-18", "four-stage-paper-curation-17", "four-stage-paper-curation-16", "four-stage-paper-curation-15", "four-stage-paper-curation-14", "four-stage-paper-curation-13", "four-stage-paper-curation-12", "four-stage-paper-curation-11", "four-stage-paper-curation-10", "four-stage-paper-curation-9", "four-stage-paper-curation-8", "four-stage-paper-curation-7", "four-stage-paper-curation-6", "four-stage-paper-curation-5", "four-stage-paper-curation-4", "four-stage-paper-curation-3", "four-stage-paper-curation-2", PREVIOUS_REGISTRY_VERSION,
 })
 PLOT_RECIPE_VERSION = NOTATION_VERSION
+
+BRANCH_GAP_ERROR_CONTRACT = "projected-gap-error-1"
+_BRANCH_GAP_ERROR_SCOPE = (
+    "Requested signed projected-gap-error refinement: e_t^parallel(Delta)=u_t^T(Delta_t-bar{Delta}_t), "
+    "u_t=Delta_t/||Delta_t|| and bar{Delta}_t=bar{x}_t(c)-bar{x}_t(empty). "
+    "The actual vector projection may be negative; it is not a norm, absolute value, or clipped scalar. "
+    "The exact identity ||Delta||=e^parallel+u^T bar{Delta}, Cauchy and posterior concentration "
+    "give D<=S and the qualified terminal bound. The directional condition retains matched-endpoint "
+    "and applicability prerequisites. These are derived refinements requested by the author, not unchanged PDF expressions. "
+    "mathcal{V}=[integral signed unit-gap projection of next reference minus current reference]_+ "
+    "retains its positive part after integration. Exactly zero Delta uses the computational extension "
+    "u=0, e^parallel=0 and mathcal{V}=0 without claiming a unit direction. "
+    "Q<=S is not asserted; common-mode errors can make Q large."
+)
+_BRANCH_GAP_ERROR_FORMULAS = {
+    "posterior_feedback_over_time": "Resolved gain H>0 and refined margin M=||Delta||-e_t^parallel(Delta)-mathcal{V}>0 on the same structural population and prompt weights; unresolved mass remains explicit. The sufficient implication retains the matched-endpoint and applicability qualifications.",
+    "posterior_feedback_condition_margin": "x=[||Delta||-e_t^parallel(Delta)-mathcal{V}]/sqrt(d), y=saved matched-endpoint log-probability gain. e_t^parallel(Delta)=u_t^T(Delta-bar{Delta}) is formed from vectors and retains its sign. All finite saved x/y pairs are ordinary dots in the combined and per-timestep views, without sign-based filtering or marker classes. Numerical signs and refined sufficient-condition/endpoint-transfer checks remain separate audit data.",
+    "synchronization_bound": "D=||Delta||/sqrt(d) and S=[e_t^parallel(Delta)+R(1-p)]/sqrt(d) are formed per sample before shared-population aggregation. The refined Lemma 6 bound D<=S follows from the exact gap-projection identity, Cauchy and posterior concentration.",
+    "final_reproduction_bound": "x=[B_ref+delta_sched]/sqrt(d), y=E_end/sqrt(d), with B_ref=e_c+(g-1)*(e_t^parallel(Delta)+R(1-p)). The refined gap bound implies B_obs<=B_ref for g>1; endpoint and independent correction qualifications remain unchanged.",
+    "terminal_bound_coverage": "Common-population prompt-balanced ECDFs of E_end/sqrt(d), [B_obs+delta_sched]/sqrt(d), and [B_ref+delta_sched]/sqrt(d), separately by same-seed terminal SSCD. B_obs=e_c+(g-1)||Delta||; B_ref=e_c+(g-1)*(e_t^parallel(Delta)+R(1-p)). The refined ordering uses the same applicability and independent-correction scope; curve ordering does not replace row-level checks.",
+}
+
+_BRANCH_GAP_ERROR_ALIASES = {
+    "proposition5_posterior_feedback": "posterior_feedback_over_time",
+    "proposition5_condition_vs_gain": "posterior_feedback_condition_margin",
+    "proposition5_numerical_resolution": "posterior_feedback_over_time",
+    "posterior_feedback_coverage_audit": "posterior_feedback_over_time",
+    "terminal_bound_tightness": "final_reproduction_bound",
+    "lemma6_target_specific_synchronization": "synchronization_bound",
+    "lemma6_bound_vs_gap": "synchronization_bound",
+    "theorem7_final_reproduction": "terminal_bound_coverage",
+    "theorem7_uncorrected_bound_audit": "final_reproduction_bound",
+    "theorem7_terminal_components": "final_reproduction_bound",
+    "theorem7_certification": "terminal_bound_coverage",
+}
+
+
+def _apply_branch_gap_error_contract(entry):
+    """Version current mathematical semantics; frozen descriptor lists stay historical."""
+    source = _BRANCH_GAP_ERROR_ALIASES.get(entry["stem"], entry["stem"])
+    if source not in _BRANCH_GAP_ERROR_FORMULAS:
+        return entry
+    if source == "posterior_feedback_over_time" and entry["kind"] == "scatter":
+        source = "posterior_feedback_condition_margin"
+    elif source == "terminal_bound_coverage" and entry["kind"] == "scatter":
+        source = "final_reproduction_bound"
+    formula = _BRANCH_GAP_ERROR_FORMULAS[source]
+    if entry["stem"] == "posterior_feedback_coverage_audit":
+        formula = "Revised M0=M1=D-e_t^parallel(Delta)-[W]_+, M2=D+S_projection-V_norm, M3=D+S_projection-V_abs, A=D+S_projection-W. With E_parallel=-S_projection, M2<=M3<=M0=M1<=A; the projection remains signed. W is the signed projected integral. Resolved/estimated strict-positive coverage uses one shared structural population; endpoint/application qualifications remain explicit."
+    elif entry["stem"] == "terminal_bound_tightness":
+        formula = "B_obs=[e_c+(g-1)||Delta||]/sqrt(d); B_ref=[e_c+(g-1)(e_t^parallel(Delta)+R(1-p))]/sqrt(d). Ratios divide each by the observed endpoint RMSE only when nonzero; zero-error statuses remain explicit."
+    entry.update(formula=formula, interpretation=formula + " " + _BRANCH_GAP_ERROR_SCOPE,
+                 formula_version=BRANCH_GAP_ERROR_CONTRACT, measurement_contract=BRANCH_GAP_ERROR_CONTRACT,
+                 direct_statement=False, evidence_classification="Derived signed projected-gap-error refinement",
+                 mathematical_scope=_BRANCH_GAP_ERROR_SCOPE,
+                 manuscript_label_status="derived_refinement_from_gap_projection_identity_and_cauchy",
+                 supporting_equation="Derived refinement using the exact gap-projection identity and Cauchy; same endpoint, reference-law and correction prerequisites",
+                 presentation_note=_BRANCH_GAP_ERROR_SCOPE,
+                 semantic_question="How does the refined branch-gap-error comparison relate to the saved measured outcome?")
+    if entry["stem"] in {"theorem7_uncorrected_bound_audit", "theorem7_final_reproduction"} and entry["kind"] == "scatter":
+        entry["formula"] = "x=[e_1(c)+(g-1)(e_1^parallel(Delta)+R(1-p_1))]/sqrt(d), y=actual saved endpoint error/sqrt(d), under the original verified clean-update prerequisite; no finite-step correction is silently inserted."
+        entry["interpretation"] = entry["formula"] + " " + _BRANCH_GAP_ERROR_SCOPE
+    if source in {"posterior_feedback_over_time", "posterior_feedback_condition_margin"}:
+        entry["normalization"] = ("Saved margin [||Delta||-e_t^parallel(Delta)-mathcal{V}]/sqrt(d) and matched log-probability gain, or weighted fractions of their assessed signs. mathcal{V} takes its positive part after signed unit-gap projection integration; dimensional normalization is applied once.")
+    entry["reference"] = "Equality of compared quantities"
+    if entry["stem"] in _BRANCH_GAP_ERROR_FORMULAS or source == "posterior_feedback_condition_margin":
+        entry["axes"] = copy.deepcopy(PAPER_AXES.get(source, entry["axes"]))
+    elif source == "synchronization_bound" and entry["kind"] == "scatter":
+        entry["axes"] = {"x": r"$[e_t^{\parallel}(\boldsymbol{\Delta})+R(1-p_t)]/\sqrt{d}$",
+                         "y": r"$\|\boldsymbol{\Delta}_t\|/\sqrt{d}$"}
+    elif source == "final_reproduction_bound" and entry["kind"] == "scatter":
+        entry["axes"] = copy.deepcopy(PAPER_AXES["final_reproduction_bound"])
+    elif entry["stem"] == "theorem7_certification":
+        entry["axes"] = {"x": "Sufficient bound fraction", "y": "Actual proximity fraction"}
+    entry["x_definition"], entry["y_definition"] = entry["axes"]["x"], entry["axes"]["y"]
+    entry["notation_details"] = NOTATION_DETAILS.get(source, _BRANCH_GAP_ERROR_SCOPE)
+    entry["axis_notation"] = NOTATION_SCOPE
+    return entry
+
 FORMULA_VERSION = "revised-fixed-evidence-2"
 # Stable CSV population keys; mathematical typography belongs only to display labels.
 GROUPS = ("SSCD > 0.75", "SSCD <= 0.75")
@@ -130,7 +209,7 @@ LEGACY_CORE = [
         "Initial: ||m_u,0-mu||_2/sqrt(d); candidate atoms: ||u_j-mu||_2/sqrt(d), about exactly the same fixed independent mu.",
         ["value", "cdf", "distribution"],
         group_rule="Separate unique evaluation seeds and distinct candidate atoms.",
-        weighting="Separate equal-mass ECDFs over unique evaluation run/seed pairs and distinct candidate atoms.",
+        weighting="Equal mass over unique evaluation run/seed pairs; candidate atoms use declared empirical masses, aggregating duplicate source records.",
     ),
     _entry(
         "PF03",
@@ -647,7 +726,7 @@ APPENDIX = [
 ]
 
 
-def direct_audit_registry(diagnostics=False):
+def direct_audit_registry(diagnostics=False, *, historical=False):
     """Seven direct statements plus supporting checks; legacy designs require opt-in."""
     entries = copy.deepcopy(CORE + APPENDIX)
     if diagnostics:
@@ -657,7 +736,7 @@ def direct_audit_registry(diagnostics=False):
             entry["direct_statement"] = False
             entry["interpretation"] = "Retained behavioral diagnostic, not a direct statement comparison."
             entries.append(entry)
-    return entries
+    return entries if historical else [_apply_branch_gap_error_contract(entry) for entry in entries]
 
 
 DIRECT_AUDIT_ENTRIES = {entry["stem"]: entry for entry in CORE + APPENDIX}
@@ -783,12 +862,12 @@ AUDIT_ALIASES = {
 }
 
 
-def evidence_registry(diagnostics=False):
+def evidence_registry(diagnostics=False, *, historical=False):
     """Fixed seven evidence primaries and twelve required appendix contracts."""
     entries = copy.deepcopy(EVIDENCE_MAIN + EVIDENCE_APPENDIX)
     if diagnostics:
         existing = {entry["stem"] for entry in entries}
-        for entry in direct_audit_registry(diagnostics=True):
+        for entry in direct_audit_registry(diagnostics=True, historical=historical):
             stem = AUDIT_ALIASES.get(entry["stem"], entry["stem"])
             if stem in existing:
                 continue
@@ -796,7 +875,7 @@ def evidence_registry(diagnostics=False):
                          outputs={ext: f"diagnostics/{stem}.{ext}" for ext in ("png", "pdf")})
             entries.append(entry)
             existing.add(stem)
-    return entries
+    return entries if historical else [_apply_branch_gap_error_contract(entry) for entry in entries]
 
 
 # Fixed precision/presentation revision; no branch depends on measured outcomes.
@@ -849,13 +928,13 @@ EVIDENCE_APPENDIX.insert(7, _evidence(
 ))
 for _item in EVIDENCE_APPENDIX:
     if _item["stem"] == "theorem7_terminal_components":
-        _item["formula"] += " The linked exact looseness audit retains B_ref-B_obs=(g-1)(S_raw-D_raw)=(g-1)(slack_radius+slack_triangle); the shared scheduler correction cancels."
+        _item["formula"] += " The linked exact looseness audit retains B_ref-B_obs=(g-1)(S_raw-D_raw)=(g-1)(slack_radius+slack_projection_alignment); the shared scheduler correction cancels."
 del _item
 
 
 # Active suite: four mechanism stages. The previous seven-statement registry
 # remains an explicit frozen diagnostic source, never the default selector.
-_EVIDENCE_BY_STEM = {entry["stem"]: entry for entry in evidence_registry(True)}
+_EVIDENCE_BY_STEM = {entry["stem"]: entry for entry in evidence_registry(True, historical=True)}
 
 
 def _four_stage(original, stem, category, kind, question, x, y, formula, columns, **metadata):
@@ -876,6 +955,9 @@ def _four_stage(original, stem, category, kind, question, x, y, formula, columns
     return entry
 
 
+# Frozen preceding scientific descriptors for receipt/readback fixtures. Current
+# public selectors apply _apply_branch_gap_error_contract to affected entries;
+# these historical e_c+e_u expressions are not current computation/display specs.
 FOUR_STAGE_MAIN = [
     _four_stage("theorem1_loss_recovery", "initial_loss_recovery", "main", "pair_loss",
         "How does genuine forward loss compare with initial Gaussian conditional recovery and its matched unconditional control?",
@@ -1047,7 +1129,7 @@ _PROMPT_TRAJECTORY_FIGURES = [
         "Mean target posterior probability on the actual saved generated trajectory state, formed as mean(exp(saved direct_target_log_probability)) across seeds. Exponentiation precedes averaging; exp(mean(log probability)) would be a different quantity. It is not a conditional-only counterfactual probability."),
     _prompt_trajectory_figure(
         "reference_branch_gap_per_prompt", "mean_reference_gap_rmse", "nonnegative",
-        r"$\|\bar{\mathbf{x}}_t(c)-\bar{\mathbf{x}}_t(\varnothing)\|/\sqrt{d}$", "direct_reference_target_error_rmse",
+        r"$\|\bar{\boldsymbol{\Delta}}_t\|/\sqrt{d}$", "direct_reference_target_error_rmse",
         "The analytical reference branch difference is conditional minus unconditional, bar{x}_t(c)-bar{x}_t(empty), at the same actual saved state and noise level. Under the stated single-target conditional law, bar{x}_t(c)=x_star, so its normalized norm equals saved direct_reference_target_error_rmse, whose vector has the opposite sign, bar{x}_t(empty)-x_star. Norm equality permits reuse without vector reconstruction or another normalization. Individual seed norms are averaged; the learned branch gap, differences of error norms, and the radius-tail bound are not substituted."),
 ]
 
@@ -1055,23 +1137,26 @@ _PROMPT_TRAJECTORY_FIGURES = [
 _PROMPT_REFERENCE_VARIATION = _four_stage(
     "proposition5_posterior_feedback", "reference_variation_per_prompt", "appendix", "four_prompt_chronological",
     "How does the saved cross-step reference variation evolve for each complete prompt-target seed cohort?",
-    r"$T-t$", r"$V_t/\sqrt{d}$",
-    "Equation 15 and Proposition 5: one curve per prompt-target pair averages the saved per-seed cross-step reference-variation norm-integral estimates V_t/sqrt(d). Only positive-noise transitions t=2,...,T are represented, at chronological coordinates T-t=0,...,T-2. No value is inserted at the final prediction t=1 or at the output. The same complete fixed seed cohort defines every displayed transition and its fixed mean terminal-SSCD color. Finite nonnegative estimates remain included when the condition-sign assessment is unresolved; numerical statuses and missingness remain explicit. Refined interval midpoints do not replace the saved original estimates. Displaying these estimates does not certify the integral or its sign conditions. This scalar reduction performs no new integration, posterior evaluation or inference.",
+    r"$T-t$", r"$\mathcal{V}_t/\sqrt{d}$",
+    "Requested directional revision of the Proposition 5 variation: mathcal{V}_t is the positive part after integrating <Delta_t/||Delta_t||,bar{x}_{t-1}(x_cf+s*g*kappa_t*Delta_t,empty)-bar{x}_t(x_t,empty)> over s in [0,1]. Neither a norm, an absolute value nor nodewise clipping is used. One curve per prompt-target pair averages the saved per-seed mathcal{V}_t/sqrt(d) values after each signed integral and positive part. Exactly zero Delta uses the explicit value-zero convention without a unit direction. Only t=2,...,T is represented, at chronological T-t=0,...,T-2, with no final-prediction or output padding. The same complete seed cohort defines all points and their fixed mean terminal-SSCD color. Finite nonnegative estimates remain included when sign assessment is unresolved; wrong-contract or missing values remain unavailable. Refined interval midpoints do not replace point estimates. This scalar reduction performs no integration, posterior evaluation or inference and does not certify exact integrals.",
     ["run_id", "original_index", "record_id", "target_id", "step_index", "mean_reference_variation_rmse",
      "mean_terminal_sscd", "seed_count", "seed_ids_json", "latent_dimension", "cohort_complete"],
-    formula_version="reference-variation-per-prompt-1", experiment=2,
-    manuscript_results=["Proposition 5", "Equation 15"],
+    formula_version="reference-directional-variation-per-prompt-1", experiment=2,
+    manuscript_results=["Requested directional revision of Proposition 5 variation"],
     value_column="mean_reference_variation_rmse", value_domain="nonnegative",
     source_scalar_column="direct_prop5_variation_rmse", prediction_domain="positive_noise_transitions",
     input_source=["saved_matched_updates", "saved_initial_terminal_outcomes"],
     reference_law="The declared finite atom-law posterior and saved cross-step numerical integration contract; not an identified complete training law",
-    normalization="Arithmetic mean of saved per-seed V_t/sqrt(d) estimates; dimensional normalization is already present and is not repeated",
+    normalization="Arithmetic mean of saved per-seed mathcal{V}_t/sqrt(d); positive part follows each signed integral before seed averaging, and dimensional normalization is not repeated",
+    measurement_contract="projected-gap-error-1",
+    variation_definition="positive_part_after_integrated_unit_gap_projection",
+    zero_gap_convention="mathcal{V}=0 when Delta is exactly zero; no unit direction",
     averaging_measure="Arithmetic mean of individual saved seed estimates on the same complete fixed cohort at every applicable positive-noise transition",
     averaging_unit="Retained prompt-target pair, preserving run/original-index/record/target identity",
     group_rule="All complete eligible prompt-target pairs; no SSCD split or variation-value selection",
     weighting="Equal seed mass within each prompt-target pair; the same seeds define mean terminal SSCD",
     band_definition="None; one seed-mean estimate per pair and transition, with numerical status in caption/audit",
-    required_applicability="Complete fixed seed cohort at every applicable positive-noise transition, finite nonnegative original estimates, true direct_prop5_applicable, an accepted integral status and matched terminal SSCD; unresolved condition signs or quadrature budget alone do not exclude estimates; the final t=1 prediction is outside the integral domain",
+    required_applicability="Complete fixed seed cohort at every applicable positive-noise transition, finite nonnegative directional positive-variation estimates with matching measurement-contract/definition and signed-integral receipts, true direct_prop5_applicable, an accepted integral status and matched terminal SSCD; unresolved condition signs or quadrature budget alone do not exclude estimates; the final t=1 prediction is outside the integral domain",
     measurement_audit_table="audit_data/feedback_endpoints.csv",
     accepted_integral_statuses=["estimated_converged", "numerically_unresolved", "analytic_single_atom_reference", "converged"],
     cohort_audit_table="audit_data/reference_variation_per_prompt_cohort.csv",
@@ -1148,7 +1233,7 @@ def previous_paper_registry(diagnostics=False, *, counterfactual=False):
         entries.append(copy.deepcopy(_COUNTERFACTUAL))
     if diagnostics:
         existing = {entry["stem"] for entry in entries}
-        for entry in evidence_registry(True):
+        for entry in evidence_registry(True, historical=True):
             if entry["stem"] in existing:
                 continue
             entry.update(category="diagnostics", outputs={ext: f"diagnostics/{entry['stem']}.{ext}" for ext in ("png", "pdf")})
@@ -1175,11 +1260,11 @@ RENDER_RETIREMENTS = tuple({
     "rendering_retired": True, "measurements_retained": True,
     "owned_paths": [f"{category}/{stem}.{extension}" for category in ("main", "appendix", "diagnostics") for extension in ("png", "pdf")],
 } for stem in sorted(RETIRED_RENDER_STEMS))
-PAPER_MAIN_ORDER = (
+MEASUREMENT_MAIN_ORDER = (
     "initial_loss_recovery", "branch_gap_posterior_response",
     "branch_gap_synchronization", "terminal_bound_coverage",
 )
-PAPER_APPENDIX_ORDER = (
+MEASUREMENT_APPENDIX_ORDER = (
     "initial_unconditional_mean_concentration", "unconditional_reference_convergence",
     "posterior_feedback_over_time", "posterior_feedback_condition_margin",
     "branch_target_errors", "synchronization_bound", "branch_gap_peak_step",
@@ -1189,13 +1274,13 @@ PAPER_APPENDIX_ORDER = (
     "corollary3_guidance_scale_vs_loss", "reference_variation_per_prompt",
 )
 _SUPPORT = {
-    "initial_loss_recovery": PAPER_APPENDIX_ORDER[:2],
-    "branch_gap_posterior_response": PAPER_APPENDIX_ORDER[2:4],
-    "branch_gap_synchronization": PAPER_APPENDIX_ORDER[4:7],
-    "terminal_bound_coverage": PAPER_APPENDIX_ORDER[7:9],
+    "initial_loss_recovery": MEASUREMENT_APPENDIX_ORDER[:2],
+    "branch_gap_posterior_response": MEASUREMENT_APPENDIX_ORDER[2:4],
+    "branch_gap_synchronization": MEASUREMENT_APPENDIX_ORDER[4:7],
+    "terminal_bound_coverage": MEASUREMENT_APPENDIX_ORDER[7:9],
 }
 _PRESENTATION_NOTES = {
-    "reference_variation_per_prompt": "A16 displays the arithmetic mean of saved per-seed Equation-15 V_t/sqrt(d) estimates, using one full fixed cohort and mean terminal-SSCD color per pair. Its domain is t=2,...,T, or T-t=0,...,T-2, without a terminal t=1 placeholder. Numerical statuses and cohort exclusions remain auditable; estimates are not relabeled certified integrals.",
+    "reference_variation_per_prompt": "A16 averages saved per-seed mathcal{V}_t/sqrt(d), where mathcal{V} is the positive part after each signed directional integral. One full fixed cohort and mean terminal-SSCD color per pair; t=2,...,T only, with no terminal placeholder. The new scientific contract rejects old norm-integral caches. Numerical statuses remain auditable; estimates are not certified exact integrals.",
     "corollary3_guidance_scale_vs_loss": "A15 plots the full guided-clean least-squares coefficient from Corollary 3 Equation 54 against sqrt of the saved genuine forward loss divided by d*SNR_T, with the root outside the draw mean. The compact x column and scientific formula version are unchanged. One point uses the complete fixed seed cohort and its mean terminal SSCD. Selected mu is unchanged; the configured-g guide is labeled, negative fits remain, and direction degeneracy or incomplete cohorts are excluded with audit reasons.",
     "reference_branch_gap_per_prompt": "A14 is the norm of conditional minus unconditional analytical clean reference at the same saved state and noise. The single-target conditional reference equals x_star, making the saved opposite-sign unconditional-reference-to-target norm identical. Average individual normalized norms once over the complete fixed seed cohort; color uses the same seeds' mean terminal SSCD. No learned-gap, error-difference or radius-tail substitution is used.",
     "conditional_reference_error_per_prompt": "A11 retains saved individual normalized conditional-reference errors before seed averaging. Same fixed full seed cohort and mean terminal-SSCD color at every chronological prediction; the conditional reference retains the single-target assumption.",
@@ -1207,9 +1292,9 @@ _PRESENTATION_NOTES = {
     "terminal_bound_coverage": "Each terminal-SSCD group (>0.75 or <=0.75) has three weighted fractions E<=tau, B_obs+delta_sched<=tau, and B_ref+delta_sched<=tau on identical eligible samples and weights within that group. Gold/purple identify groups; solid/dashed/dash-dot identify actual/observable/reference. All six curves share one tolerance scale. Expected ordering F_ref<=F_obs<=F_actual never substitutes for row-level checks; violations remain reported. Independent correction and original-clean versus deterministic/pathwise/probabilistic scope are retained. Latent tolerance is not decoded-copy identity or an SSCD-derived threshold; see paired comparisons A8 and A9.",
     "unconditional_reference_convergence": "The selected mu is estimated from unconditional posterior references at the analytical extension minimum SNR on a separate Gaussian bank by default. The horizontal guide marks the normalized exact-bank-to-selected-mean offset; its value and meaning remain in the caption and audit, without a legend entry. One fixed evaluation Gaussian probe bank is used across genuine native labels. The dotted analytical-only reference segment below SNR_T contains no network evaluations; solid reference and dashed/dotted learned quantities above initialization retain the complete saved native sweep. Empirical reference identification does not identify the checkpoint's complete training marginal.",
     "posterior_feedback_over_time": "Resolved strict-positive feedback and original-condition coverage use the same structural population and weights. Unknown signs remain in the denominator. The condition upper boundary is possible unresolved mass, not observed satisfaction or a statistical confidence interval. A shared zero curve is explicitly labeled only when both saved condition curves are identically zero; exact per-group positive and unresolved sample-transition counts remain in caption metadata.",
-    "posterior_feedback_condition_margin": "Both zero guides remain visible. Symmetric-log gain uses its saved threshold; positive/nonnegative/negative and unresolved condition counts retain their saved classification. A fixed 6% span padding beyond zero on the margin axis is display space only, not fabricated positive observations. Original margin and endpoint gain keep their independent contract qualifications.",
+    "posterior_feedback_condition_margin": "All finite saved margin/gain pairs are ordinary dots, colored by terminal SSCD where available; no Observed/Unresolved legend, sign gate or sign-dependent marker is used. The combined plot retains all saved timesteps, with additional PNG/PDF views grouped only by chronological step_index k=T-t. Pooled point opacity is one-fiftieth of the shared scatter alpha; per-timestep point opacity is unchanged. Every saved step has a publication status; steps without finite pairs have no fabricated image, and no terminal-output value is inserted. Both zero guides, saved gain scale, numerical classifications and endpoint qualifications remain recorded. The 6% zero-inclusive margin padding is display space only.",
     "branch_target_errors": "Conditional and unconditional target-error medians and their descriptive IQRs use the same paired population at each prediction. Overlapping error norms do not prove vector equality, and group timing is not an every-seed ordering. Full displayed curves/bands share one scale and zero origin.",
-    "synchronization_bound": "Complete reference bound S, actual vector gap D and paired maximum Q are reduced per sample before shared-weight medians. The displayed Q IQR and all curves, including the larger lower-SSCD bound, share one nonnegative scale. Raw tails, components and pointwise audits remain saved.",
+    "synchronization_bound": "Only the actual vector gap D (solid) and complete Lemma 6 right-hand side S (dashed) are displayed as shared-weight medians, with both SSCD groups on one nonnegative scale. The paired maximum target-distance curve and its IQR are omitted. The legend sits outside above the plot, with SSCD groups in one column and the two quantities in the other. Raw tails, components and pointwise audits remain saved.",
     "branch_gap_per_prompt": "Each curve averages saved per-seed branch-gap norms over one complete fixed seed cohort; its color averages terminal SSCD over exactly that cohort. The normalized saved norms are not divided by sqrt(d) again. Incomplete or mismatched cohorts are disclosed in the saved cohort audit, never silently filled or reduced during plotting.",
     "branch_gap_peak_step": "Weighted bin mass of each complete trajectory's earliest resolved global maximum, not a density or first local peak. Full prediction range and late mass are retained; exact/near ties, flat/incomplete cases and group overlap remain recorded. A post-initial peak is not proof of unimodality or a categorical outcome dichotomy.",
     "terminal_observable_bound": "The abscissa is (B_obs+delta_sched)/sqrt(d), with B_obs=e_c+(g-1)||Delta||. Every applicable actual endpoint and loose or violated comparison remains visible, with exact zeros and the independent correction scope preserved.",
@@ -1217,8 +1302,8 @@ _PRESENTATION_NOTES = {
 }
 
 
-def paper_registry(diagnostics=False, *, counterfactual=False):
-    """The sole active selector: four main and sixteen mandatory appendix plots."""
+def measurement_registry(diagnostics=False, *, counterfactual=False):
+    """Comprehensive saved measurement inventory; it does not select exports."""
     # Optional learned probes are diagnostics only; saved enablement never adds a paper slot.
     previous = previous_paper_registry(diagnostics, counterfactual=False)
     by_stem = {entry["stem"]: entry for entry in previous}
@@ -1227,22 +1312,23 @@ def paper_registry(diagnostics=False, *, counterfactual=False):
     by_stem[_GUIDANCE_FIT["stem"]] = _GUIDANCE_FIT
     by_stem[_PROMPT_REFERENCE_VARIATION["stem"]] = _PROMPT_REFERENCE_VARIATION
     by_stem.update({entry["stem"]: entry for entry in _PROMPT_TRAJECTORY_FIGURES})
-    slots = {stem: f"A{index}" for index, stem in enumerate(PAPER_APPENDIX_ORDER, 1)}
+    slots = {stem: f"A{index}" for index, stem in enumerate(MEASUREMENT_APPENDIX_ORDER, 1)}
     entries = []
-    for category, ordered in (("main", PAPER_MAIN_ORDER), ("appendix", PAPER_APPENDIX_ORDER)):
+    for category, ordered in (("main", MEASUREMENT_MAIN_ORDER), ("appendix", MEASUREMENT_APPENDIX_ORDER)):
         for order, stem in enumerate(ordered, 1):
             entry = copy.deepcopy(by_stem[stem])
             entry.update(category=category, section=category, order=order,
                 paper_slot=f"M{order}" if category == "main" else slots[stem],
                 outputs={extension: f"{category}/{stem}.{extension}" for extension in ("png", "pdf")})
             entries.append(entry)
-    active = set(PAPER_MAIN_ORDER + PAPER_APPENDIX_ORDER)
+    active = set(MEASUREMENT_MAIN_ORDER + MEASUREMENT_APPENDIX_ORDER)
     for entry in previous:
         if entry["stem"] not in active and entry["stem"] not in RETIRED_RENDER_STEMS:
             entry = copy.deepcopy(entry)
             entry.update(section="supported_optional_diagnostic", order=len(entries) + 1, paper_slot=None)
             entries.append(entry)
     for entry in entries:
+        _apply_branch_gap_error_contract(entry)
         stem = entry["stem"]
         entry.update(figure_id=stem, stable_stem=stem, plot_data_key=stem,
             renderer=entry["kind"], formula_id=f"{entry['formula_version']}:{stem}",
@@ -1250,11 +1336,27 @@ def paper_registry(diagnostics=False, *, counterfactual=False):
             required_applicability=entry.get("required_applicability", "Recorded measurement availability and mathematical applicability; no fabricated fallback"),
             supporting_figure_ids=list(_SUPPORT.get(stem, ())),
             supporting_figure_slots=[slots[value] for value in _SUPPORT.get(stem, ())],
-            presentation_note=_PRESENTATION_NOTES.get(stem, "Saved optional diagnostic; numerical definitions remain unchanged"))
+            presentation_note=(_BRANCH_GAP_ERROR_SCOPE if entry.get("measurement_contract") == BRANCH_GAP_ERROR_CONTRACT else _PRESENTATION_NOTES.get(stem, "Saved optional diagnostic; numerical definitions remain unchanged")))
+        if stem == "synchronization_bound":
+            entry["display_band_definition"] = "None; only the two median curves are displayed within each SSCD group."
+            entry["semantic_question"] = "How does the branch-gap norm compare with the right-hand side of Lemma 6?"
+            entry["presentation_note"] = _PRESENTATION_NOTES[stem] + " " + _BRANCH_GAP_ERROR_SCOPE
         if stem in active:
             entry["allow_unavailable"] = False
         if stem == "posterior_feedback_over_time":
             entry["required_columns"] = [*entry["required_columns"], "eligible_count"]
+        if stem == "posterior_feedback_condition_margin":
+            entry["required_columns"] = ["x", "y", "step_index", "terminal_sscd"]
+            entry["display_policy"] = "finite_saved_values"
+            entry["pooled_scatter_alpha_scale"] = 1.0 / 50.0
+            entry["per_timestep_exports"] = {
+                "column": "step_index",
+                "directory": "appendix/posterior_feedback_condition_margin",
+                "filename_template": "step_{step_index:03d}",
+                "coordinate": "chronological k=T-t",
+                "row_policy": "finite_saved_x_y",
+            }
+            entry["presentation_note"] = _PRESENTATION_NOTES[stem] + " " + _BRANCH_GAP_ERROR_SCOPE
         if stem in PAPER_AXES:
             entry["axes"] = copy.deepcopy(PAPER_AXES[stem])
             entry["x_definition"], entry["y_definition"] = entry["axes"]["x"], entry["axes"]["y"]
@@ -1272,6 +1374,60 @@ def paper_registry(diagnostics=False, *, counterfactual=False):
             entry["display_range_policy"] = "all_displayed_curves_and_bands_plus_fixed_6_percent_padding"
         elif entry["kind"] == "four_peak":
             entry["display_range_policy"] = "all_displayed_weighted_bin_masses_plus_fixed_6_percent_padding"
+    return entries
+
+
+PAPER_MAIN_ORDER = (
+    "initial_loss_recovery",
+    "unconditional_reference_convergence",
+    "corollary3_guidance_scale_vs_loss",
+    "posterior_feedback_condition_margin",
+    "synchronization_bound",
+    "terminal_bound_coverage",
+)
+PAPER_APPENDIX_ORDER = ()
+PUBLICATION_OUTPUT_ALIASES = {"corollary3_guidance_scale_vs_loss": "guidance_scale_vs_loss"}
+
+
+def paper_registry(diagnostics=False, *, counterfactual=False):
+    """Select exactly six figures; optional measurement flags never add exports.
+
+    Scientific stems, source tables, formula IDs and measurements are unchanged.
+    The guidance filename alias is strictly a publication-path convention.
+    """
+    inventory = {entry["stem"]: entry for entry in measurement_registry()}
+    slots = {stem: f"M{index}" for index, stem in enumerate(PAPER_MAIN_ORDER, 1)}
+    entries = []
+    for order, stem in enumerate(PAPER_MAIN_ORDER, 1):
+        entry = copy.deepcopy(inventory[stem])
+        output_stem = PUBLICATION_OUTPUT_ALIASES.get(stem, stem)
+        support = [name for name in entry.get("supporting_figure_ids", ()) if name in slots]
+        entry.update(category="main", section="main", order=order,
+                     paper_slot=slots[stem], output_stem=output_stem,
+                     outputs={extension: f"figures/{output_stem}.{extension}" for extension in ("png", "pdf")},
+                     supporting_figure_ids=support,
+                     supporting_figure_slots=[slots[name] for name in support],
+                     allow_unavailable=False)
+        entry.pop("per_timestep_exports", None)
+        entry.pop("pooled_scatter_alpha_scale", None)
+        if stem == "posterior_feedback_condition_margin":
+            entry["pooled_scatter_alpha"] = 0.01
+            entry["presentation_note"] = (
+                "One pooled plot contains every finite saved margin/gain pair across all saved timesteps, "
+                "with circular points, terminal-SSCD color where available, and opacity 0.01. "
+                "There are no status marker classes or per-timestep exports. Numerical classifications, "
+                "zero guides and endpoint qualifications remain recorded. " + _BRANCH_GAP_ERROR_SCOPE)
+            entry["formula"] = entry["formula"].replace("combined and per-timestep views", "pooled view")
+        elif stem == "initial_loss_recovery":
+            entry["presentation_note"] = (
+                "Conditional and hollow unconditional points share pair identity and x coordinate. "
+                "Monte Carlo intervals, initial SNR and draw/seed counts retain their saved definitions. "
+                "Color is mean terminal SSCD; the selected-mean comparison is reported by unconditional_reference_convergence.")
+        elif stem == "terminal_bound_coverage":
+            entry["presentation_note"] = _PRESENTATION_NOTES[stem].replace("; see paired comparisons A8 and A9", "") + " " + _BRANCH_GAP_ERROR_SCOPE
+        elif stem == "corollary3_guidance_scale_vs_loss":
+            entry["presentation_note"] = _PRESENTATION_NOTES[stem].replace("A15 plots", "The figure plots")
+        entries.append(entry)
     return entries
 
 # Exact runtime migration allowlist. A path match alone never establishes ownership.

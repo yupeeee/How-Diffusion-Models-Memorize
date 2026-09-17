@@ -85,18 +85,31 @@ def test_positive_condition_and_endpoint_integral_identity():
 
 
 @pytest.mark.parametrize(
-    "conditional,unconditional,gain_sign",
-    [(-1.0, 0.0, "negative"), (0.0, -2.0, "positive")],
+    "conditional,unconditional,gain_sign,condition_status",
+    [(-1.0, 0.0, "negative", "estimated_not_met"),
+     (0.0, -0.4, "positive", "estimated_met")],
 )
-def test_unmet_condition_preserves_both_gain_signs(
-    conditional, unconditional, gain_sign
+def test_projected_condition_preserves_both_gain_signs(
+    conditional, unconditional, gain_sign, condition_status
 ):
     result = measure(conditional=conditional, unconditional=unconditional)
-    assert result["candidate_condition_status"] == ["estimated_not_met"]
+    assert result["candidate_condition_status"] == [condition_status]
     assert result["candidate_gain_status"] == [gain_sign]
     expected = 1 if gain_sign == "positive" else -1
     assert expected * result["candidate_log_probability_gain"].item() > 0
     assert result["candidate_integral_identity_residual"].abs().item() < 1e-7
+
+
+def test_common_mode_errors_cancel_in_branch_gap_condition():
+    result = measure(conditional=2.0, unconditional=1.0)
+    assert result["candidate_conditional_reference_error_l2"].item() == 1.0
+    assert result["candidate_unconditional_reference_error_l2"].item() == pytest.approx(1.0)
+    assert result["candidate_branch_gap_error_l2"].item() == pytest.approx(0.0, abs=1e-14)
+    assert result["candidate_condition_margin_l2"].item() == pytest.approx(
+        1.0 - result["candidate_variation_l2"].item()
+    )
+    assert result["candidate_condition_status"] == ["estimated_met"]
+    assert result["candidate_integral_qa_status"] == ["consistent_with_numerical_estimates"]
 
 
 def test_current_reference_uses_current_noise_and_state():
@@ -113,24 +126,33 @@ def test_current_reference_uses_current_noise_and_state():
     )
     current_mean = math.tanh(0.3 * 0.4 / 0.95**2)
     shift = 2 * 0.2 * (0.8 - 0.1)
-    variation = quad(
-        lambda s: abs(math.tanh(0.95 * (-0.2 + s * shift) / 0.2**2) - current_mean),
+    signed = quad(
+        lambda s: math.tanh(0.95 * (-0.2 + s * shift) / 0.2**2) - current_mean,
         0,
         1,
         epsabs=1e-11,
         points=[0.2 / shift],
     )[0]
+    variation = max(0., signed)
+    assert result["candidate_variation_signed_integral_l2"].item() == pytest.approx(signed, abs=3e-7)
     assert result["candidate_unconditional_reference_error_l2"].item() == pytest.approx(
         abs(0.1 - current_mean)
     )
     assert result["candidate_variation_l2"].item() == pytest.approx(variation, abs=3e-7)
+    expected_gap_error = (0.8 - 0.1) - (1.0 - current_mean)
+    assert expected_gap_error < 0
+    assert result["candidate_branch_gap_error_norm_diagnostic_l2"].item() == pytest.approx(abs(expected_gap_error))
+    assert result["candidate_branch_gap_error_l2"].item() == pytest.approx(expected_gap_error)
+    assert result["candidate_condition_margin_l2"].item() == pytest.approx(
+        0.7 - expected_gap_error - variation, abs=3e-7
+    )
     wrong_reference = math.tanh(0.95 * 0.4 / 0.2**2)
     wrong = quad(
-        lambda s: abs(math.tanh(0.95 * (-0.2 + s * shift) / 0.2**2) - wrong_reference),
+        lambda s: math.tanh(0.95 * (-0.2 + s * shift) / 0.2**2) - wrong_reference,
         0,
         1,
     )[0]
-    assert abs(variation - wrong) > 0.1
+    assert abs(signed - wrong) > 0.1
 
 
 def test_sharp_interior_transition_resolved_and_not_endpoint_only():
@@ -162,7 +184,7 @@ def test_sharp_interior_transition_resolved_and_not_endpoint_only():
     assert result["candidate_integral_identity_residual"].abs().item() < 1e-3
 
 
-def test_norm_is_inside_integral_with_interior_cancellation():
+def test_positive_part_is_after_signed_integral_and_preserves_interior_cancellation():
     # Current mean is zero. Symmetric segment means integrate to zero, while
     # their norm has strictly positive average.
     result = measure(
@@ -176,8 +198,10 @@ def test_norm_is_inside_integral_with_interior_cancellation():
     )
     beta = 1 / 0.2**2
     expected = np.logaddexp(beta, -beta) / beta - math.log(2) / beta
-    assert result["candidate_variation_l2"].item() == pytest.approx(expected, abs=1e-6)
-    assert result["candidate_variation_l2"].item() > 0.9
+    assert result["candidate_variation_l2"].item() == pytest.approx(0., abs=1e-12)
+    assert result["candidate_variation_signed_integral_l2"].item() == pytest.approx(0., abs=1e-12)
+    assert result["candidate_variation_norm_diagnostic_l2"].item() == pytest.approx(expected, abs=1e-6)
+    assert result["candidate_variation_norm_diagnostic_l2"].item() > .9
 
 
 def test_budget_exhaustion_retains_variation_and_unresolved_status():
@@ -496,3 +520,27 @@ def test_cuda_candidate_feedback_matches_cpu_without_boolean_scatter():
                     )
             else:
                 assert actual == expected, name
+
+
+def test_negative_directional_integral_has_zero_primary_penalty():
+    result = measure(matched=-2., conditional=1., unconditional=0., guidance=2., kappa=.5,
+                     destination_alpha=1., destination_sigma=.5)
+    expected = quad(lambda s: math.tanh(4 * (-2 + s)), 0., 1., epsabs=1e-12)[0]
+    assert expected < 0
+    assert result["candidate_variation_signed_integral_l2"].item() == pytest.approx(expected, abs=1e-8)
+    assert result["candidate_variation_l2"].item() == 0
+    assert result["candidate_variation_norm_diagnostic_l2"].item() > .9
+    assert result["candidate_measurement_contract"] == "projected-gap-error-1"
+
+
+def test_exact_zero_gap_has_explicit_zero_variation_even_if_reference_moves():
+    result = measure(conditional=2., unconditional=2., matched=-1., destination_alpha=1., destination_sigma=.2)
+    assert result["candidate_variation_l2"].item() == 0
+    assert result["candidate_variation_error_l2"].item() == 0
+    assert result["candidate_variation_signed_integral_l2"].item() == 0
+    assert result["candidate_variation_norm_diagnostic_l2"].item() > .9
+    assert result["candidate_variation_direction_status"] == ["zero_gap_convention"]
+    assert result["candidate_zero_gap_convention"] == "V=0_when_Delta_is_exactly_zero"
+    assert result["candidate_branch_gap_error_l2"].item() == 0
+    assert result["candidate_branch_gap_error_norm_diagnostic_l2"].item() == pytest.approx(1.)
+    assert result["candidate_branch_gap_error_definition"] == "signed_projected_branch_gap_reference_error"

@@ -7,6 +7,7 @@ from pathlib import Path
 import contextlib
 import fcntl
 import os
+import re
 import shutil
 import shlex
 import stat
@@ -20,7 +21,7 @@ from utils.common.cli import generation_cache_namespace, generation_cache_parent
 from utils.common.io import atomic_write_json, canonical_hash, file_sha256
 from .contracts import FOUR_STAGE_OPTION_KEYS, TheoryError, numerical_config, read_object
 
-METRIC_SCHEMA_VERSION = "four-stage-evidence-1"
+METRIC_SCHEMA_VERSION = "four-stage-evidence-projected-gap-error-1"
 BUNDLE_SCHEMA_VERSION = 5
 ID_COLUMNS = {
     "original_index",
@@ -198,6 +199,7 @@ def measurement_sources():
             "direct_probe_cache.py",
             "direct_reduce.py",
             "support.py",
+            "branch_gap.py",
             "scheduler_adapter.py",
             "candidate_integration.py",
             "candidate_feedback.py",
@@ -570,11 +572,13 @@ def _finish_backup(output, backup, archive_previous):
 def retire_obsolete_figures(stage, previous):
     """Apply the explicit presentation migration inside the role transaction.
 
-    Only enumerated, hash-verified regular images may be unlinked in the stage.
-    The original bundle remains the rollback copy until the directory swap
-    commits. Conflicts are reported, never interpreted as deletion permission.
+    Only known renderer image paths with matching ownership hashes may be
+    unlinked in the stage. Historical per-step exports are included; arbitrary
+    images and every saved measurement remain outside the deletion allowlist.
+    The original bundle remains the rollback copy until the directory swap.
     """
-    from .paper_registry import FIGURE_RETIREMENTS, REGISTRY_VERSION
+    from .paper_registry import (FIGURE_RETIREMENTS, REGISTRY_VERSION,
+                                 measurement_registry, paper_registry, previous_paper_registry)
 
     stage = reject_symlinks(stage)
     manifest_path = contained_path(stage, "figure_manifest.json")
@@ -604,11 +608,38 @@ def retire_obsolete_figures(stage, previous):
             raise TheoryError("Not a regular renderer image")
         return path, file_sha256(path)
 
+    selected = {entry["stem"]: entry for entry in paper_registry(diagnostics=True, counterfactual=True)}
+    historical = [*previous_paper_registry(diagnostics=True, counterfactual=True),
+                  *measurement_registry(diagnostics=True, counterfactual=True)]
+    known_stems = {entry["stem"] for entry in historical} | set(selected)
+    known_stems.update(spec["stem"] for spec in FIGURE_RETIREMENTS)
+    aliases = {entry.get("output_stem", stem): stem for stem, entry in selected.items()}
+    aliases.update({stem: stem for stem in known_stems})
+    timestep_stems = {entry["stem"] for entry in historical if entry.get("per_timestep_exports")}
+    categories = {"main", "appendix", "diagnostics", "figures"}
+
+    def specification_for(name):
+        # Ownership of a user comparison or a cached image does not authorize deletion.
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts or relative.suffix not in {".png", ".pdf"}:
+            return None
+        parts = relative.parts
+        if len(parts) == 2 and parts[0] in categories and relative.stem in aliases:
+            stem = aliases[relative.stem]
+            replacement = selected.get(stem, {}).get("outputs", {})
+            return {"stem": stem, "replacement": replacement,
+                    "reason": ("Selected publication moved to figures; saved measurements retained"
+                               if replacement else "Figure omitted from the six selected publications; saved measurements retained")}
+        if (len(parts) == 3 and parts[0] in categories and parts[1] in timestep_stems
+                and re.fullmatch(r"step_[0-9]{3,}\.(png|pdf)", parts[2])):
+            return {"stem": parts[1], "replacement": {},
+                    "reason": "Per-timestep exports retired; selected combined figure and saved measurements retained"}
+        return None
+
     def replacement_ready(specification):
-        if specification["new_category"] is None:
-            return True
-        for suffix in ("png", "pdf"):
-            name = f"{specification['new_category']}/{specification['stem']}.{suffix}"
+        if specification["replacement"] and set(specification["replacement"]) != {"png", "pdf"}:
+            return False
+        for name in specification["replacement"].values():
             try:
                 _path, digest = regular_image(name)
             except (OSError, TheoryError):
@@ -617,41 +648,54 @@ def retire_obsolete_figures(stage, previous):
                 return False
         return True
 
-    allowed = {}
-    for specification in FIGURE_RETIREMENTS:
-        for suffix in ("png", "pdf"):
-            name = f"{specification['old_category']}/{specification['stem']}.{suffix}"
-            allowed[name] = specification
-            destination = (f"{specification['new_category']}/{specification['stem']}.{suffix}"
-                           if specification["new_category"] else None)
-            row = {"old_path": name, "stable_stem": specification["stem"],
-                   "sha256": owned.get(name), "destination": destination,
-                   "reason": specification["reason"]}
-            try:
-                path, digest = regular_image(name)
-            except (OSError, TheoryError) as error:
-                row.update(status="conflict", decision="preserved_unsafe_path", detail=str(error).replace(str(stage), "<active_bundle>"))
-            else:
-                if digest is None:
-                    # Retain the receipt of a completed deletion across reruns.
-                    if prior_records.get(name, {}).get("status") in {"removed", "already_absent"}:
-                        row = prior_records[name]
-                    else:
-                        row.update(status="already_absent", decision="no_file_to_retire")
-                    completed.add(name)
-                elif name in active:
-                    row.update(status="conflict", decision="preserved_active_output")
-                elif name not in owned:
-                    row.update(status="conflict", decision="preserved_unowned", observed_sha256=digest)
-                elif digest != owned[name]:
-                    row.update(status="conflict", decision="preserved_modified", observed_sha256=digest)
-                elif not replacement_ready(specification):
-                    row.update(status="conflict", decision="preserved_missing_replacement_pair")
+    # Known routes without ownership are reported, never silently removed.
+    historical_paths = {name for entry in historical for name in entry["outputs"].values()}
+    historical_paths.update(f"{spec['old_category']}/{spec['stem']}.{suffix}"
+                            for spec in FIGURE_RETIREMENTS for suffix in ("png", "pdf"))
+    for entry in previous.get("timestep_figures", []):
+        if isinstance(entry, dict) and isinstance(entry.get("outputs"), dict):
+            historical_paths.update(name for name in entry["outputs"].values() if isinstance(name, str))
+    candidates = historical_paths | set(owned) | set(prior_records)
+    allowed = {name: spec for name in sorted(candidates)
+               if name not in active and (spec := specification_for(name)) is not None}
+    removed_parents = set()
+    for name, specification in allowed.items():
+        destination = specification["replacement"].get(Path(name).suffix.lstrip("."))
+        row = {"old_path": name, "stable_stem": specification["stem"],
+               "sha256": owned.get(name), "destination": destination,
+               "reason": specification["reason"]}
+        try:
+            path, digest = regular_image(name)
+        except (OSError, TheoryError) as error:
+            row.update(status="conflict", decision="preserved_unsafe_path", detail=str(error).replace(str(stage), "<active_bundle>"))
+        else:
+            if digest is None:
+                if prior_records.get(name, {}).get("status") in {"removed", "already_absent"}:
+                    row = prior_records[name]
                 else:
-                    path.unlink()
-                    completed.add(name)
-                    row.update(status="removed", decision="moved" if destination else "retired")
-            records[name] = row
+                    row.update(status="already_absent", decision="no_file_to_retire")
+                completed.add(name)
+            elif name not in owned:
+                row.update(status="conflict", decision="preserved_unowned", observed_sha256=digest)
+            elif digest != owned[name]:
+                row.update(status="conflict", decision="preserved_modified", observed_sha256=digest)
+            elif not replacement_ready(specification):
+                row.update(status="conflict", decision="preserved_missing_replacement_pair")
+            else:
+                path.unlink()
+                completed.add(name)
+                removed_parents.add(path.parent)
+                row.update(status="removed", decision="moved" if destination else "retired")
+        records[name] = row
+    # Only now-empty image folders are removed. Preserved user/scalar files
+    # prevent rmdir and remain untouched; this never walks arbitrary output trees.
+    for parent in sorted(removed_parents, key=lambda path: len(path.parts), reverse=True):
+        while parent != stage and parent.is_relative_to(stage):
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
 
     # Invalid historical ownership paths grant no authority, even if their
     # basename resembles an authorized retired figure. Never open those paths.
@@ -670,7 +714,7 @@ def retire_obsolete_figures(stage, previous):
     current["preserved_files"] = preserved
     atomic_write_json(manifest_path, current)
     ledger = {"kind": "theory_figure_retirement", "schema_version": 1, "registry_version": REGISTRY_VERSION,
-              "scope": "Explicit renderer image migration in this active bundle only",
+              "scope": "Six selected publications; ownership-checked renderer migration in this active bundle only",
               "records": [records[name] for name in sorted(records)],
               "preserved_other_owned_paths": sorted(name for name in preserved if name not in records),
               "other_files_policy": "All non-enumerated files and scientific artifacts are preserved"}
@@ -719,12 +763,13 @@ def render_saved_paper(bundle, *, expected_config=None, diagnostics=False):
                 retire_obsolete_figures(stage, previous)
             # registry.json is presentation metadata; immutable scientific
             # run_config/summary and plot_data remain byte-for-byte unchanged.
-            from .paper_registry import REGISTRY_VERSION, paper_registry
+            from .paper_registry import REGISTRY_VERSION, measurement_registry, paper_registry
             saved = read_object(contained_path(stage, "run_config.json"))
             counterfactual = saved_scientific_configuration(saved).get("counterfactual_unconditional", False)
             atomic_write_json(contained_path(stage, "registry.json"), {
                 "version": REGISTRY_VERSION,
                 "figures": paper_registry(diagnostics=True, counterfactual=counterfactual),
+                "measurement_inventory": measurement_registry(diagnostics=True, counterfactual=counterfactual),
             })
             result = read_object(contained_path(stage, "figure_manifest.json"))
     return result

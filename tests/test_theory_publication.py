@@ -141,7 +141,7 @@ def test_plot_rejects_missing_equation15_columns_with_exact_recompute_command(
     with pytest.raises(TheoryError) as caught:
         render_bundle(bundle)
     message = str(caught.value)
-    assert "Equation-15 V" in message and missing in message
+    assert "projected branch-gap error and directional positive-part V" in message and missing in message
     assert (
         "./run_all.sh --recompute-experiments --model sdv1 --scheduler ddim --g 7.5 --T 3 --N 3"
         in message
@@ -154,6 +154,6 @@ def test_plot_rejects_old_schema_before_creating_figures(saved_cache):
     manifest = read_json(bundle / "manifest.json")
     manifest["schema_version"] -= 1
     atomic_write_json(bundle / "manifest.json", manifest)
-    with pytest.raises(TheoryError, match="Old feedback scalars lack Equation-15 V"):
+    with pytest.raises(TheoryError, match="Old feedback scalars lack projected branch-gap error and directional positive-part V"):
         render_bundle(bundle)
     assert not (bundle / "figures").exists()

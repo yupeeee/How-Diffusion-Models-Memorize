@@ -603,7 +603,7 @@ def test_manuscript_exact_inventory_and_guarded_population_formulas():
     )
     assert unavailable["paper_conditional_reference_error_l2"] is None
     identified = dict(
-        identified_training_distribution=True, single_target_verified=True
+        identified_training_distribution=True, single_target_verified=True, branch_gap_error_l2=3.0
     )
     assert synchronization_bound(1, 2, 10, 0.9, **identified)[
         "bound_l2"
@@ -635,3 +635,33 @@ def test_manuscript_exact_inventory_and_guarded_population_formulas():
         )["slack_l2"]
         is None
     )
+
+
+def test_refined_statements_require_explicit_branch_gap_error_not_error_sum():
+    identified = dict(identified_training_distribution=True, single_target_verified=True)
+    assert synchronization_bound(1, 2, 10, .9, **identified)["bound_l2"] is None
+    revised = synchronization_bound(100, 200, 10, .9, branch_gap_error_l2=.25, **identified)
+    assert revised["bound_l2"] == pytest.approx(1.25)
+    assert revised["measurement_contract"] == "projected-gap-error-1"
+    terminal = terminal_reproduction_bound(1, 200, 10, .9, branch_gap_error_l2=.25,
+        guidance=2, terminal_clean_update=True, **identified)
+    assert terminal["bound_l2"] == pytest.approx(2.25)
+    assert terminal["branch_gap_error_term_l2"] == .25
+
+
+def test_projected_scalar_statements_accept_negative_error_without_clipping():
+    scope = dict(identified_training_distribution=True, single_target_verified=True,
+                 branch_gap_error_l2=-1.0)
+    condition = posterior_feedback_condition(
+        1.0, 50.0, 60.0, .25, guidance=2.0, kappa=.1, destination_sigma=.2, **scope)
+    assert condition["rhs_l2"] == -.75
+    assert condition["slack_l2"] == 1.75
+    assert condition["measurement_contract"] == "projected-gap-error-1"
+    sync = synchronization_bound(50.0, 60.0, 2.0, 0.0, **scope)
+    assert sync["bound_l2"] == 1.0
+    terminal = terminal_reproduction_bound(1.0, 60.0, 2.0, 0.0,
+        guidance=2.0, terminal_clean_update=True, **scope)
+    assert terminal["branch_gap_error_term_l2"] == -1.0
+    assert terminal["bound_l2"] == 2.0
+    invalid = synchronization_bound(50.0, 60.0, -2.0, 0.0, **scope)
+    assert invalid["status"] == "unavailable"

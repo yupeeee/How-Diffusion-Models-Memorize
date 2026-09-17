@@ -155,6 +155,9 @@ def test_zero_displacement_is_exact_zero_with_no_artificial_direction():
     integrated = integrate(bank, out)
     assert torch.isnan(integrated["candidate_exact_directional_average_l2"]).all()
     assert torch.isfinite(integrated["candidate_margin_original_l2"]).all()
+    assert integrated["candidate_variation_positive_signed_integral_l2"].item() == 0
+    assert integrated["candidate_variation_signed_integral_l2"].item() == 0
+    assert integrated["candidate_variation_direction_status"] == ["zero_gap_convention"]
 
 
 @pytest.mark.parametrize(
@@ -284,21 +287,24 @@ def test_positive_target_gain_can_move_reference_farther_from_target():
     assert out.scalars["candidate_next_reference_target_contraction_rmse"].item() < 0
 
 
-def test_cancelled_orthogonal_errors_refine_negative_original_margin():
+def test_cancelled_orthogonal_errors_give_identical_positive_branch_gap_error_margins():
     bank = support(((1.0, 0.0), (-1.0, 0.0)))
     out = measure(bank, mc=[1.0, 100.0], mu=[0.0, 100.0])
     r = integrate(bank, out)
     assert out.scalars["candidate_combined_reference_error_l2"].item() == pytest.approx(
         0
     )
-    assert r["candidate_margin_original_l2"].item() < 0
+    assert r["candidate_margin_original_l2"].item() > 0
+    torch.testing.assert_close(r["candidate_margin_original_l2"], r["candidate_margin_combined_l2"])
     assert r["candidate_margin_combined_l2"].item() > 0
     assert out.scalars["candidate_log_probability_gain"].item() > 0
     margins = [
         r[f"candidate_margin_{name}_l2"].item()
         for name in ("original", "combined", "signed_error", "projected_variation")
     ] + [r["candidate_exact_directional_average_l2"].item()]
-    assert np.diff(margins).min() >= -1e-12
+    assert margins[0] == pytest.approx(margins[1])
+    assert margins[0] <= margins[-1] + 1e-12
+    assert np.diff(margins[2:]).min() >= -1e-12
     assert abs(r["candidate_integral_identity_residual"].item()) < 1e-8
     assert abs(r["candidate_directional_identity_residual"].item()) < 1e-8
 
@@ -606,3 +612,93 @@ def test_real_smoke_shaped_source_uncertainty_is_separate_from_normalization():
     integrated = integrate(bank, out)
     assert torch.isfinite(integrated["candidate_exact_directional_average_l2"]).all()
     assert (integrated["candidate_margin_signed_error_uncertainty_l2"] >= 100.0).all()
+
+
+
+def test_branch_gap_error_margin_uses_positive_signed_variation_and_qualified_order_checks():
+    bank = support()
+    out = measure(bank, mc=[10.0], mu=[0.0])
+    result = integrate(bank, out)
+    error = out.segment["branch_gap_error"]
+    torch.testing.assert_close(error, out.segment["combined_reference_error"])
+    torch.testing.assert_close(error, out.scalars["candidate_branch_gap_error_l2"])
+    assert error.item() != out.segment["reference_branch_gap"].item()
+    torch.testing.assert_close(result["candidate_margin_original_l2"],
+        out.segment["delta_norm"] - error - result["candidate_variation_positive_signed_integral_l2"])
+    assert result["candidate_margin_gap_0_1_l2"].item() == 0
+    assert result["candidate_margin_order_status"] == ["consistent_with_numerical_estimate"]
+    assert result["candidate_measurement_contract"] == ["projected-gap-error-1"]
+    assert abs(result["candidate_directional_identity_residual"].item()) < 1e-8
+
+
+@pytest.mark.parametrize("matched,mc,mu", [(0., 1., 0.), (-2., 1., 0.), (-1., 1., -1.)])
+def test_primary_variation_is_positive_part_after_independent_signed_integral(matched, mc, mu):
+    bank = support()
+    out = measure(bank, mc=[mc], mu=[mu], matched=[matched], guidance=2., kappa=.5,
+                  destination_alpha=1., destination_sigma=.5)
+    result = integrate(bank, out)
+    shift = mc - mu
+    signed = quad(lambda s: math.tanh(4 * (matched + s * shift)), 0., 1., epsabs=1e-12)[0]
+    old_norm = quad(lambda s: abs(math.tanh(4 * (matched + s * shift))), 0., 1., epsabs=1e-12)[0]
+    assert result["candidate_variation_signed_integral_l2"].item() == pytest.approx(signed, abs=2e-8)
+    assert result["candidate_variation_positive_signed_integral_l2"].item() == pytest.approx(max(0., signed), abs=2e-8)
+    assert result["candidate_variation_norm_integral_l2"].item() == pytest.approx(old_norm, abs=2e-8)
+    assert result["candidate_variation_definition"] == ["positive_part_after_integrated_unit_gap_projection"]
+    if matched < 0:
+        assert result["candidate_variation_norm_integral_l2"].item() > .7
+    if matched == -1.:
+        # The sharper primary margin can exceed the old norm-based diagnostic;
+        # that descriptive comparison must not trigger a bound-order failure.
+        assert result["candidate_margin_gap_1_2_l2"].item() < -.7
+        assert result["candidate_margin_order_status"] == ["consistent_with_numerical_estimate"]
+        assert result["candidate_integration_status"] == ["estimated_converged"]
+
+
+def test_primary_directional_variation_is_not_removed_by_direction_resolution_flag():
+    bank = support()
+    out = measure(bank)
+    reference = integrate(bank, out)
+    out.segment["direction_resolved"] = torch.zeros_like(out.segment["direction_resolved"])
+    unresolved_direction = integrate(bank, out)
+    torch.testing.assert_close(unresolved_direction["candidate_variation_positive_signed_integral_l2"],
+                               reference["candidate_variation_positive_signed_integral_l2"])
+    assert unresolved_direction["candidate_variation_direction_status"] == ["finite_nonzero_gap_projection"]
+    assert torch.isnan(unresolved_direction["candidate_exact_directional_average_l2"]).all()
+
+
+def test_nonzero_gap_with_underflowed_projection_denominator_is_not_exact_zero():
+    bank = support()
+    out = measure(bank)
+    out.segment["beta"] = 1e-300
+    out.segment["delta_norm"] = torch.tensor([1e-300], dtype=torch.float64)
+    out.segment["delta_exact_zero"] = torch.tensor([False])
+    result = integrate(bank, out, config=IntegrationConfig(max_evaluations=30))
+    assert torch.isnan(result["candidate_variation_positive_signed_integral_l2"]).all()
+    assert result["candidate_variation_direction_status"] == ["unavailable_projection_denominator"]
+    assert result["candidate_integration_status"] == ["numerically_unresolved"]
+
+
+@pytest.mark.parametrize("mc,expected", [(.25, -.75), (-.25, 1.25), (0., 0.)])
+def test_candidate_primary_gap_error_preserves_signed_projection_and_zero_extension(mc, expected):
+    bank = support()
+    out = measure(bank, mc=[mc], mu=[0.])
+    assert out.segment["branch_gap_error"].item() == pytest.approx(expected)
+    torch.testing.assert_close(out.segment["signed_error_projection"], -out.segment["branch_gap_error"])
+    result = integrate(bank, out)
+    assert torch.isfinite(result["candidate_margin_original_l2"]).all()
+    assert result["candidate_measurement_contract"] == ["projected-gap-error-1"]
+    assert out.scalars["candidate_branch_gap_error_definition"] == ["signed_projected_branch_gap_reference_error"]
+    if mc != 0:
+        ordered = [result["candidate_margin_" + key + "_l2"].item()
+                   for key in ("signed_error", "projected_variation", "original", "combined")]
+        ordered.append(result["candidate_exact_directional_average_l2"].item())
+        assert np.diff(ordered).min() >= -1e-10
+        assert result["candidate_margin_order_status"] == ["consistent_with_numerical_estimate"]
+
+
+def test_candidate_old_norm_payload_cannot_be_relabelled_as_projected_error():
+    bank = support()
+    out = measure(bank)
+    out.segment["measurement_contract"] = "directional-positive-variation-1"
+    with pytest.raises(ValueError, match="signed projected"):
+        integrate(bank, out)

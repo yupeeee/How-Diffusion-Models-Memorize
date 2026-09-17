@@ -1,4 +1,4 @@
-"""Resumable original Proposition 5 integration from saved endpoint payloads.
+"""Resumable branch-gap-error condition integration from saved endpoint payloads.
 
 This stage accepts scalar logits and shared law geometry only, never raw
 trajectory tensors, model loaders or denoiser calls.
@@ -9,11 +9,12 @@ import math
 
 import torch
 
+from .branch_gap import BRANCH_GAP_ERROR_DEFINITION, BRANCH_GAP_ZERO_CONVENTION
 from .candidate_integration import DEFAULT_INTEGRATION, integration_metrics
 
 
 def integrate_proposition5_payload(support, payload, base_metrics, config=None):
-    """Complete original-V observations using saved scalar/Gram inputs only.
+    """Complete positive-directional-variation observations for the revised condition using saved scalar/Gram inputs only.
 
     Learned predictions and raw latent states are unnecessary for this stage.
     Endpoint observations survive an integration failure and can be resumed.
@@ -22,6 +23,12 @@ def integrate_proposition5_payload(support, payload, base_metrics, config=None):
     result = dict(base_metrics)
     result.update(
         direct_prop5_status="matched_finite_law_comparison",
+        direct_prop5_measurement_contract="projected-gap-error-1",
+        direct_prop5_branch_gap_error_definition=BRANCH_GAP_ERROR_DEFINITION,
+        direct_prop5_branch_gap_error_zero_convention=BRANCH_GAP_ZERO_CONVENTION,
+        direct_prop5_variation_definition="positive_part_after_integrated_unit_gap_projection",
+        direct_prop5_zero_gap_convention="V=0_when_Delta_is_exactly_zero",
+        direct_prop5_comparison_scope="branch_gap_error_and_positive_signed_variation; implication_requires_original_endpoint_and_reference_contracts",
         direct_prop5_integration_absolute_tolerance=config.absolute_tolerance,
         direct_prop5_integration_relative_tolerance=config.relative_tolerance,
         direct_prop5_integration_max_evaluations=config.max_evaluations,
@@ -42,7 +49,13 @@ def integrate_proposition5_payload(support, payload, base_metrics, config=None):
         return result
     mapping = {
         "margin_l2": "margin_original_l2", "margin_rmse": "margin_original_rmse",
-        "variation_l2": "variation_norm_integral_l2", "variation_error_l2": "variation_norm_integral_error_l2",
+        "variation_l2": "variation_positive_signed_integral_l2", "variation_error_l2": "variation_positive_signed_integral_error_l2",
+        "variation_signed_integral_l2": "variation_signed_integral_l2",
+        "variation_signed_integral_error_l2": "variation_signed_integral_error_l2",
+        "variation_norm_diagnostic_l2": "variation_norm_integral_l2",
+        "variation_norm_diagnostic_error_l2": "variation_norm_integral_error_l2",
+        "variation_direction_status": "variation_direction_status",
+        "projection_roundoff_l2": "projection_roundoff_allowance_l2",
         "uncertainty_l2": "margin_original_uncertainty_l2", "integrated_gain": "integrated_log_probability_gain",
         "integrated_gain_error": "integrated_log_probability_gain_error",
         "integral_identity_residual": "integral_identity_residual", "integral_identity_allowance": "integral_identity_allowance",

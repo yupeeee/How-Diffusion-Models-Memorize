@@ -197,11 +197,25 @@ def interval_gain(arithmetic, intercept, slopes, target_atom):
     return {"H": H, "G": G, "gain_sign": G.sign, "slope0": slope0, "slope1": slope1}
 
 
-def negative_condition_precheck(D, ec, eu=None, *, arithmetic=None):
-    """V>=0 and eu>=0: a negative upper bound resolves sign, not magnitude."""
+
+def projected_branch_gap_error(arithmetic, delta, reference_delta, D=None):
+    """Offline oracle for the signed error projected onto the actual gap."""
+    c = arithmetic
+    if not delta or len(delta) != len(reference_delta):
+        raise ValueError("Projected error requires matching actual branch-gap vectors")
+    D = c.norm(delta) if D is None else D
+    if D.lower == D.upper == 0 and all(value.lower == value.upper == 0 for value in delta):
+        return Interval.point(0)
+    if D.lower <= 0 or not D.upper.is_finite():
+        raise ArithmeticError("Unit branch-gap direction unresolved: norm contains zero or is nonfinite")
+    unit = [c.div(value, D) for value in delta]
+    return c.dot(unit, [c.sub(value, reference) for value, reference in zip(delta, reference_delta)])
+
+
+def negative_condition_precheck(D, branch_gap_error, *, arithmetic=None):
+    """Offline reference: V>=0 bounds D-branch_gap_error-V by D-branch_gap_error."""
     c = arithmetic or Directed()
-    eu = Interval.point(0) if eu is None else eu
-    upper = c.sub(c.sub(D, ec), eu).upper
+    upper = c.sub(D, branch_gap_error).upper
     return {"upper": upper, "condition_sign_status": "negative" if upper < 0 else "unresolved",
             "condition_value_status": "unavailable_variation_not_computed"}
 
@@ -224,31 +238,48 @@ def posterior_mean(arithmetic, atoms, weights):
             for k in range(len(atoms[0]))]
 
 
-def enclose_variation(arithmetic, atoms, intercept, slopes, current_mean, D, ec, eu,
-                      *, max_nodes=65, absolute_width=1e-6, current_in_convex_hull=True,
+def enclose_variation(arithmetic, atoms, intercept, slopes, current_mean, D, branch_gap_error,
+                      *, delta, max_nodes=65, absolute_width=1e-6, current_in_convex_hull=True,
                       current_mass_defect=None, target_atom=0):
-    """Certified midpoint enclosure including every node operation.
+    """Offline oracle: take the positive part only after the signed integral.
 
-    For a_j affine logit slopes, |d mean/ds| <= diameter*range(a)/4:
-    Cauchy--Schwarz bounds each directional covariance, and Popoviciu bounds
-    both variances. This also covers rounded cached slopes whose exact vector
-    construction is unavailable. If slopes are beta<h,u_j>, this recovers the
-    requested beta*||h||*diameter**2/4 bound. Sum L*w**2/4 over leaves.
+    The derivative of the projected posterior mean is a covariance bounded by
+    range(projections)*range(slopes)/4. Signed leaf integrals keep cancellation.
+    This test oracle never provides a production CPU fallback.
     """
     if not 0 <= target_atom < len(slopes):
         raise ValueError("Invalid target slope index")
     if max_nodes < 1 or absolute_width <= 0:
         raise ValueError("Variation budget requires a positive node count")
+    if len(delta) != len(current_mean) or len(delta) != len(atoms[0]):
+        raise ValueError("Directional variation requires the actual branch-gap vector")
+    if not current_in_convex_hull and current_mass_defect is None:
+        raise ValueError("Rounded current weights require an explicit mass-defect bound")
     c = arithmetic
-    diameter, maximum_norm = support_geometry(c, atoms)
+    diameter, _maximum_norm = support_geometry(c, atoms)
+    exact_zero = D.lower == D.upper == 0 and all(value.lower == value.upper == 0 for value in delta)
+    if exact_zero:
+        relative_slopes = [c.sub(value, slopes[target_atom]) for value in slopes]
+        if not all(value.lower == value.upper == 0 for value in relative_slopes):
+            raise ArithmeticError("Zero branch gap has inconsistent nonconstant affine slopes")
+        if not branch_gap_error.lower <= 0 <= branch_gap_error.upper:
+            raise ArithmeticError("Zero branch gap has inconsistent projected error")
+        zero = Interval.point(0)
+        return {"V": zero, "M": zero, "signed_projected_integral": zero,
+                "nodes": 0, "stopping_reason": "exact_zero_branch_gap_convention",
+                "direction_status": "exact_zero_gap_no_unit_direction", "lipschitz": zero,
+                "diameter": diameter, "integrated_H": zero,
+                "error_method": "analytic_zero_direction_convention_no_integrand_division"}
+    if D.lower <= 0:
+        raise ArithmeticError("Unit branch-gap direction unresolved: norm enclosure contains zero")
+    direction = [c.div(value, D) for value in delta]
+    projections = [c.dot([c.sub(value, centre) for value, centre in zip(atom, current_mean)], direction)
+                   for atom in atoms]
+    projection_range = Interval(min(value.lower for value in projections), max(value.upper for value in projections))
+    projection_spread = c.sub(Interval.point(projection_range.upper), Interval.point(projection_range.lower))
     spread = c.sub(Interval.point(max(value.upper for value in slopes)),
                    Interval.point(min(value.lower for value in slopes)))
-    lipschitz = c.div(c.mul(diameter, spread), Interval.point(4))
-    cap = diameter.upper
-    if not current_in_convex_hull:
-        if current_mass_defect is None:
-            raise ValueError("Rounded current weights require an explicit mass-defect bound")
-        cap = c.add(diameter, c.mul(current_mass_defect, maximum_norm)).upper
+    lipschitz = c.div(c.mul(projection_spread, spread), Interval.point(4))
     gain_lipschitz = c.div(c.square(spread), Interval.point(4))
     nodes = 0
 
@@ -257,12 +288,14 @@ def enclose_variation(arithmetic, atoms, intercept, slopes, current_mean, D, ec,
         width = c.sub(Interval.point(right), Interval.point(left))
         midpoint = c.div(c.add(Interval.point(left), Interval.point(right)), Interval.point(2))
         weights = c.softmax([c.add(b, c.mul(midpoint, a)) for b, a in zip(intercept, slopes)])
-        mean = posterior_mean(c, atoms, weights)
-        f = c.norm([c.sub(a, b) for a, b in zip(mean, current_mean)])
+        f = c.dot(weights, projections)
         midpoint_integral = c.mul(width, f)
         remainder = c.div(c.mul(lipschitz, c.square(width)), Interval.point(4))
-        # d log p_target / ds = a_target - E_p[a], including a nonzero
-        # common logit gauge. Production target-relative payloads use a_target=0.
+        support_range = c.mul(width, projection_range)
+        lo = max(support_range.lower, c.sub(midpoint_integral, remainder).lower)
+        hi = min(support_range.upper, c.add(midpoint_integral, remainder).upper)
+        if hi < lo:
+            raise ArithmeticError("Inconsistent signed node enclosure and posterior support range")
         derivative = c.sub(slopes[target_atom], c.dot(weights, slopes))
         gain_midpoint = c.mul(width, derivative)
         gain_remainder = c.div(c.mul(gain_lipschitz, c.square(width)), Interval.point(4))
@@ -270,19 +303,16 @@ def enclose_variation(arithmetic, atoms, intercept, slopes, current_mean, D, ec,
                                  c.add(gain_midpoint, gain_remainder).upper)
         nodes += 1
         c.evaluated_nodes += 1
-        lo = max(Decimal(0), c.sub(midpoint_integral, remainder).lower)
-        hi = min(c.mul(width, Interval.point(cap)).upper, c.add(midpoint_integral, remainder).upper)
-        if hi < lo:
-            raise ArithmeticError("Inconsistent node enclosure and convex-hull cap")
-        return (left, right, Interval(lo, hi), gain_interval)
+        return left, right, Interval(lo, hi), gain_interval
 
     leaves = [leaf(Decimal(0), Decimal(1))]
     stop = "node_budget_exhausted"
     while True:
-        V = c.total(value for _, _, value, _ in leaves)
+        signed = c.total(value for _, _, value, _ in leaves)
+        signed = Interval(max(projection_range.lower, signed.lower), min(projection_range.upper, signed.upper))
         integrated_H = c.total(value for _, _, _, value in leaves)
-        V = Interval(max(Decimal(0), V.lower), min(cap, V.upper))
-        margin = c.sub(c.sub(c.sub(D, ec), eu), V)
+        V = Interval(max(Decimal(0), signed.lower), max(Decimal(0), signed.upper))
+        margin = c.sub(c.sub(D, branch_gap_error), V)
         width = c.sub(Interval.point(V.upper), Interval.point(V.lower)).upper
         if margin.sign in {"positive", "negative", "zero"}:
             stop = "condition_sign_resolved"
@@ -292,12 +322,12 @@ def enclose_variation(arithmetic, atoms, intercept, slopes, current_mean, D, ec,
             break
         if nodes + 2 > max_nodes:
             break
-        # Exact Decimal endpoint subtraction for ranking need not be enclosed;
-        # it chooses work only, never changes a reported enclosure.
         index = max(range(len(leaves)), key=lambda i: c.up.subtract(leaves[i][2].upper, leaves[i][2].lower))
         left, right, _, _ = leaves.pop(index)
         midpoint = c.near.divide(c.near.add(left, right), Decimal(2))
         leaves.extend([leaf(left, midpoint), leaf(midpoint, right)])
-    return {"V": V, "M": margin, "nodes": nodes, "stopping_reason": stop,
-            "lipschitz": lipschitz, "diameter": diameter, "integrated_H": integrated_H,
-            "error_method": "directed_decimal_nodes_plus_global_lipschitz_midpoint_remainder"}
+    return {"V": V, "M": margin, "signed_projected_integral": signed,
+            "direction_status": "unit_direction_enclosed_from_actual_delta",
+            "nodes": nodes, "stopping_reason": stop, "lipschitz": lipschitz,
+            "diameter": diameter, "integrated_H": integrated_H,
+            "error_method": "directed_decimal_signed_projection_nodes_plus_covariance_Lipschitz_remainder_positive_part_after_integral"}

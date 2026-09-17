@@ -13,7 +13,7 @@ NUMERICAL_POLICY = (
 )
 
 
-MEASUREMENT_FORMULA_VERSION = "manuscript-measurements-3.0"
+MEASUREMENT_FORMULA_VERSION = "manuscript-measurements-projected-gap-error-1"
 
 
 def _double(value: torch.Tensor, device=None) -> torch.Tensor:
@@ -342,7 +342,7 @@ def initial_distribution_diagnostics(
 
 def candidate_terminal_bound(
     conditional_error_l2,
-    unconditional_reference_error_l2,
+    branch_gap_error_l2,
     radius_l2,
     target_log_complement,
     *,
@@ -352,7 +352,7 @@ def candidate_terminal_bound(
     endpoint_error_l2,
     terminal_clean_update,
 ):
-    """Theorem-7 expression for a DECLARED candidate law, in raw L2 and RMSE.
+    """Projected branch-gap-error terminal bound, with signed raw and normalized error terms.
 
     No candidate input is claimed to identify the training law. The current
     conditional branch is interpreted under the single-target idealization.
@@ -366,14 +366,17 @@ def candidate_terminal_bound(
     unavailable = torch.full_like(template, torch.nan)
     result = {
         "candidate_terminal_bound_evidence": "candidate_distribution_diagnostic",
-        "candidate_terminal_bound_formula": "g*e_c+(g-1)*(e_u_K+R_K*(1-p_K))",
+        "candidate_terminal_measurement_contract": "projected-gap-error-1",
+        "candidate_terminal_branch_gap_error_definition": "signed_projected_branch_gap_reference_error",
+        "candidate_terminal_comparison_scope": "Signed projected error e_parallel=u dot (Delta-bar_Delta), u=Delta/||Delta||; zero gap uses u=0. Clean-update applicability and declared-law assumptions remain required",
+        "candidate_terminal_bound_formula": "e_c+(g-1)*(e_parallel+R_K*(1-p_K))",
         "candidate_terminal_bound_reference_scope": "declared_candidate_law_and_single_target_conditional_idealization_not_identified_training_law",
         "candidate_terminal_bound_status": "unavailable_reference",
         "candidate_terminal_bound_applies_to_endpoint": False,
     }
     for stem in (
         "candidate_terminal_conditional_term",
-        "candidate_terminal_unconditional_term",
+        "candidate_terminal_branch_gap_error_term",
         "candidate_terminal_concentration_term",
         "candidate_terminal_bound",
         "candidate_terminal_clean_bound_slack",
@@ -397,7 +400,7 @@ def candidate_terminal_bound(
         value is None
         for value in (
             conditional_error_l2,
-            unconditional_reference_error_l2,
+            branch_gap_error_l2,
             radius_l2,
             target_log_complement,
         )
@@ -409,29 +412,28 @@ def candidate_terminal_bound(
             "inapplicable_manuscript_guidance_domain_g_gt_1"
         )
         return result
-    ec, eu, radius, log_complement = [
+    ec, gap_error, radius, log_complement = [
         _double(value, template.device)
         for value in (
             conditional_error_l2,
-            unconditional_reference_error_l2,
+            branch_gap_error_l2,
             radius_l2,
             target_log_complement,
         )
     ]
     valid = (
         torch.isfinite(ec)
-        & torch.isfinite(eu)
+        & torch.isfinite(gap_error)
         & torch.isfinite(radius)
         & (ec >= 0)
-        & (eu >= 0)
         & (radius >= 0)
         & ~torch.isnan(log_complement)
         & (log_complement <= 0)
     )
     mass = log_complement.exp()
     terms = {
-        "candidate_terminal_conditional_term": g * ec,
-        "candidate_terminal_unconditional_term": (g - 1) * eu,
+        "candidate_terminal_conditional_term": ec,
+        "candidate_terminal_branch_gap_error_term": (g - 1) * gap_error,
         "candidate_terminal_concentration_term": (g - 1) * radius * mass,
     }
     bound = sum(terms.values())

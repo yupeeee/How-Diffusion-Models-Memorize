@@ -14,7 +14,7 @@ import torch
 from utils.common.io import canonical_hash, file_sha256, read_json, safe_torch_load
 from .support import FiniteSupport, _tensor_hash
 
-REFERENCE_LAW_VERSION = "direct-reference-law-1"
+REFERENCE_LAW_VERSION = "direct-reference-law-2"
 _SINGLE_TARGET = "assumed_single_target_conditional_idealization_not_inferred_from_SSCD"
 
 
@@ -124,6 +124,8 @@ class ReferenceLaw:
         support = FiniteSupport(
             self.support.atoms.to(device), self.support.atom_ids, self.support.aliases,
             weights=self.support.weights.to(device),
+            source_record_counts=(self.support.source_record_counts
+                                  or self.metadata.get("source_record_multiplicities")),
             candidate_chunk=self.support.candidate_chunk, query_chunk=self.support.query_chunk,
         )
         # Device placement must preserve the exact declared floating masses.
@@ -138,8 +140,9 @@ def reference_law_from_atoms(atoms, atom_ids, *, weights=None, provenance=None,
                              candidate_chunk_size=256, query_chunk_size=16, device=None):
     """Deduplicate exact atoms and aggregate supplied probability masses.
 
-    An omitted weight vector means equal mass per DISTINCT atom. Explicit
-    weights mean masses on supplied rows, summed when their atoms coincide.
+    An omitted weight vector means equal mass per supplied source record.
+    Explicit weights mean masses on supplied rows. Both aggregate the masses
+    of exact duplicate atoms without dropping source-record multiplicity.
     Zero-mass-only atoms are excluded from the mathematical support explicitly.
     """
     values = list(atoms)
@@ -172,13 +175,22 @@ def reference_law_from_atoms(atoms, atom_ids, *, weights=None, provenance=None,
         )
     if not bool((support.weights > 0).all() & torch.isfinite(support.weights).all()):
         raise ValueError("Normalized positive reference weights are not representable")
+    return _reference_law_from_support(
+        support, provenance=provenance, preprocessing=preprocessing, scope=scope,
+        excluded=excluded,
+    )
+
+
+def _reference_law_from_support(support, *, provenance=None, preprocessing=None,
+                                scope="declared_finite_reference_law", excluded=()):
+    """Attach a law receipt without re-deduplicating or reweighting its atoms."""
     metadata = {
         **support.metadata(), "version": REFERENCE_LAW_VERSION,
         "evidence": "declared_finite_reference_law",
         "reference_law_scope": scope,
         "preprocessing": preprocessing or {}, "provenance": provenance or {},
         "single_target_assumption": _SINGLE_TARGET,
-        "zero_mass_source_ids": excluded,
+        "zero_mass_source_ids": list(excluded),
         "mean_definition": "exact_declared_weighted_atom_mean_not_model_output_center",
         "mean_sha256": _tensor_hash(support.weights @ support.flat),
         "max_atom_norm_l2": float(_row_norm(support.flat).max()),
@@ -230,17 +242,22 @@ def build_reference_law(sources, config, device="cpu", *, allow_mean_compute=Fal
             raise ValueError("reference_manifest is forbidden for cached-targets law")
         from .reduce import build_support
         support, source_metadata, rows = build_support(sources, **chunks, device=device)
-        law = reference_law_from_atoms(
-            support.atoms, support.atom_ids,
+        # Keep the already aggregated empirical prior. Rebuilding from the
+        # distinct atom list would incorrectly replace multiplicities by 1/K.
+        placed = FiniteSupport(
+            support.atoms, support.atom_ids, support.aliases, weights=support.weights,
+            source_record_counts=support.source_record_counts,
+            candidate_chunk=chunks["candidate_chunk_size"], query_chunk=chunks["query_chunk_size"],
+        )
+        placed.weights = support.weights.clone()
+        placed.log_weights = placed.weights.log()
+        law = _reference_law_from_support(
+            placed,
             provenance={key: value for key, value in source_metadata.items()
                         if key not in {"candidate_chunk", "query_chunk", "complexity"}},
             preprocessing=preprocessing,
-            scope="D_K_all_compatible_complete_cached_targets_preselection_equal_distinct_atoms",
-            device=device, **chunks,
+            scope="D_K_all_compatible_complete_cached_source_records_preselection_empirical_multiplicity",
         )
-        # Retain all cache record aliases, including duplicate exact atoms.
-        law.support.aliases = dict(support.aliases)
-        law.metadata["aliases"] = dict(support.aliases)
     elif mode == "manifest":
         if manifest_path is None:
             raise ValueError("A reference manifest is required for manifest mode")

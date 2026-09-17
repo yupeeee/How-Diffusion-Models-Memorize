@@ -39,7 +39,7 @@ STYLE = {
     "legend.fontsize": 8,
     "text.usetex": False,
 }
-STYLE_VERSION = "theory-measurement-contract-8"
+STYLE_VERSION = "theory-projected-gap-error-10"
 DEFAULT_FIGURES = frozenset(
     {
         "initial_recovery",
@@ -75,8 +75,8 @@ SCATTER = {
     "posterior_feedback": (
         "candidate_condition_margin_rmse",
         "candidate_log_probability_gain",
-        "Candidate condition margin (RMSE)",
-        "Candidate log-probability gain",
+        r"$[\|\boldsymbol{\Delta}_t\|-e_t^{\parallel}(\boldsymbol{\Delta})-\mathcal{V}_t]/\sqrt{d}$",
+        r"$\log[p_{t-1}(\mathbf{x}_{t-1})/p_{t-1}(\mathbf{x}_{t-1}^{\mathrm{cf}})]$",
     ),
     "target_injection": (
         "a_parallel",
@@ -101,9 +101,11 @@ FORMULAS = {
         "y": "F_n(a) = count(distance <= a) / n for unique evaluation seeds",
     },
     "posterior_feedback": {
-        "x": "M_t^K / sqrt(d) = (||Delta_t|| - e_c,t - e_u,t^K - V_t^K) / sqrt(d)",
-        "y": "H_t^K = log p_next^K(x_next) - log p_next^K(x_cf)",
-        "variation": "V_t^K = integral_0^1 ||bar_x_next^K(x_cf + s g kappa_t Delta_t) - bar_x_t^K(x_t)|| ds",
+        "x": r"$[\|\boldsymbol{\Delta}_t\|-e_t^{\parallel}(\boldsymbol{\Delta})-\mathcal{V}_t]/\sqrt{d}$",
+        "branch_gap_error": r"$e_t^{\parallel}(\boldsymbol{\Delta})=\mathbf{u}_t^\top(\boldsymbol{\Delta}_t-\bar{\boldsymbol{\Delta}}_t)$",
+        "measurement_contract": "projected-gap-error-1",
+        "y": r"$\log[p_{t-1}(\mathbf{x}_{t-1})/p_{t-1}(\mathbf{x}_{t-1}^{\mathrm{cf}})]$",
+        "variation": "mathcal_V_t = max(0, integral_0^1 (Delta_t/||Delta_t||).(bar_x_next(x_cf + s g kappa_t Delta_t) - bar_x_t(x_t)) ds); t=2,...,T",
     },
     "target_synchronization": {
         "x": "SNR_t = alpha_t^2 / sigma_t^2 at each stored prediction",
@@ -121,7 +123,7 @@ FORMULAS = {
 CAPTIONS = {
     "initial_recovery": "Finite-noise initial recovery associated with terminal replication. Every retained prompt and evaluation seed contributes its initial prediction; color is that sample's terminal target SSCD. Equal target errors mean equal distances, not equal branch vectors. This does not measure the pair-specific forward-loss premise or convergence as initial SNR tends to zero.",
     "unconditional_center": "Initial unconditional dispersion around the reference center. One observation per unique evaluation seed around the explicitly declared fixed center. Repeated prompt evaluations do not multiply the sample count. Tight held-out model-output dispersion does not establish agreement with the training-data mean. These observations have no unique prompt-specific SSCD outcome.",
-    "posterior_feedback": "Matched posterior feedback under the candidate distribution. The fixed finite candidate law is not the unidentified training law. The condition uses the Equation-15 integral and the outcome is a destination-level log-probability gain. Quadrature convergence supports numerical estimates, not formal certification. Unresolved rows are hollow; negative gains and unmet conditions remain. The single-target conditional idealization is not verified by a paired cache.",
+    "posterior_feedback": "Matched posterior feedback under the candidate distribution. The fixed finite candidate law is not the unidentified training law. The condition uses the signed projected branch-gap error e_t^parallel(Delta)=u_t dot (Delta_t-bar{Delta}_t) and the positive part of the integrated signed reference projection; the outcome is a destination-level log-probability gain. Quadrature convergence supports numerical estimates, not formal certification. Unresolved rows are hollow; negative gains and unmet conditions remain. The single-target conditional idealization is not verified by a paired cache.",
     "target_synchronization": "Observed target-specific synchronization, conditional on the fixed seed bank. Branch/outcome-group curves show prompt-balanced medians with descriptive interquartile bands, not confidence intervals. Each represented prompt has equal total weight within an outcome group, divided among its member seeds. SSCD groups do not alter eligibility. Marginal medians do not establish small joint errors on the same samples or verify Lemma 6's Bayes-reference premises. The last point is the last stored prediction, not automatically a clean output; no extra terminal prediction is added.",
     "target_injection": "Finite-noise initial guidance projection around the explicitly recorded fixed center. Both axes are dimensionless. The point (g,0) is the limiting target-aligned reference; positive alignment alone does not establish agreement with that vector. Degenerate target-center directions remain undefined.",
     "terminal_terms": "The two terms of Equation 16 for structurally and numerically clean-update-applicable observations. Their vector sum may exhibit cancellation; the diagram does not verify Theorem 7's training-reference assumptions. A tolerance region is shown only when an independent latent tolerance is supplied.",
@@ -238,7 +240,7 @@ def _load_plotdata(bundle, figure_id):
     missing = required - set(frame.columns)
     if missing:
         qualifier = (
-            "The new Proposition-5 plot requires Equation-15 V; old candidate margins cannot be relabeled. "
+            "The new Proposition-5 plot requires projected branch-gap error and directional positive-part V; old candidate margins cannot be relabeled. "
             if figure_id == "posterior_feedback"
             else ""
         )
@@ -277,7 +279,7 @@ def validate_bundle(bundle, expected_config=None):
         or manifest.get("formula_version") != FORMULA_VERSION
     ):
         raise TheoryError(
-            f"Incomplete/incompatible scalar manifest: {bundle}/manifest.json. Old feedback scalars lack Equation-15 V and cannot be relabeled. Run {_recompute_command(manifest)}."
+            f"Incomplete/incompatible scalar manifest: {bundle}/manifest.json. Old feedback scalars lack projected branch-gap error and directional positive-part V and cannot be relabeled. Run {_recompute_command(manifest)}."
         )
     if expected_config is not None and manifest.get("config") != expected_config:
         raise TheoryError(f"Scalar bundle configuration differs: {bundle}")

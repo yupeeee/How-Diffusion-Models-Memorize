@@ -1,4 +1,4 @@
-"""Literal manuscript statements and honest cache-only applicability.
+"""Historical registry validation and explicitly revised scalar comparisons.
 
 No tensor or model imports: this module is also safe in a copied scalar bundle.
 The paper's ``e_t(empty)`` is a *reference* error, not unconditional target error.
@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 REGISTRY_SCHEMA_VERSION = 2
 FORMULA_VERSION = "revised-section3-v2-proposition5"
+MEASUREMENT_CONTRACT = "projected-gap-error-1"
 EVIDENCE_CLASSES = frozenset(
     {
         "algebraic_qa",
@@ -167,6 +168,9 @@ def paper_unavailable_metrics(
             "paper_conditional_reference_error_l2": None,
             "paper_conditional_reference_error_reason": "training-law single-target condition in Equation 6 is not verified",
             "observed_conditional_target_error_l2": conditional_target_error_l2,
+            "paper_branch_gap_error_l2": None,
+            "paper_branch_gap_error_reason": reason,
+            "paper_measurement_contract": MEASUREMENT_CONTRACT,
             "paper_unconditional_reference_error_l2": None,
             "paper_unconditional_reference_error_reason": reason,
             "paper_target_posterior": None,
@@ -186,7 +190,7 @@ def paper_unavailable_metrics(
             "paper_terminal_bound_l2": None,
             "paper_terminal_bound_rmse": None,
             "paper_terminal_conditional_term_l2": None,
-            "paper_terminal_unconditional_term_l2": None,
+            "paper_terminal_branch_gap_error_term_l2": None,
             "paper_terminal_concentration_term_l2": None,
             "paper_terminal_bound_status": "unavailable",
             "paper_terminal_bound_reason": reason
@@ -210,10 +214,11 @@ def _identified_inputs(
         return "missing identified paper input: " + ", ".join(
             key for key, value in values.items() if value is None
         )
-    if any(
-        not math.isfinite(float(value)) or float(value) < 0 for value in values.values()
-    ):
-        return "paper inputs must be finite and nonnegative"
+    if any(not math.isfinite(float(value)) for value in values.values()):
+        return "paper inputs must be finite"
+    if any(float(value) < 0 for key, value in values.items()
+           if key != "branch_gap_error_l2"):
+        return "norms, radii, probabilities and positive-part variation must be nonnegative"
     return None
 
 
@@ -223,22 +228,26 @@ def posterior_feedback_condition(
     unconditional_reference_error_l2: float | None,
     cross_step_reference_variation_l2: float | None,
     *,
+    branch_gap_error_l2: float | None = None,
     guidance: float,
     kappa: float,
     destination_sigma: float,
     identified_training_distribution: bool = False,
     single_target_verified: bool = False,
 ) -> dict[str, Any]:
-    """Proposition 5: ||Delta|| >= e(c) + e(empty) + V (raw L2).
+    """Projected condition: ||Delta|| >= e_parallel + V (unnormalized).
 
-    V must be Equation 15's identified integral, not a sampled-grid surrogate.
+    The signed error is u dot (Delta-reference_Delta), with u=Delta/||Delta||.
+    It may be negative; exactly zero Delta uses the explicit u=0 extension.
+
+    V is max(0, integral of the unit-gap projection of the cross-step
+    reference displacement), with the positive part applied after integration.
     ``destination_sigma > 0`` excludes the endpoint, where the proposition is
     not stated. Guidance and kappa restrictions follow the actual manuscript.
     """
     values = {
         "branch_gap_l2": branch_gap_l2,
-        "conditional_reference_error_l2": conditional_reference_error_l2,
-        "unconditional_reference_error_l2": unconditional_reference_error_l2,
+        "branch_gap_error_l2": branch_gap_error_l2,
         "cross_step_reference_variation_l2": cross_step_reference_variation_l2,
     }
     reason = _identified_inputs(
@@ -265,11 +274,7 @@ def posterior_feedback_condition(
             "status": "unavailable",
             "reason": reason,
         }
-    rhs = (
-        float(conditional_reference_error_l2)
-        + float(unconditional_reference_error_l2)
-        + float(cross_step_reference_variation_l2)
-    )
+    rhs = float(branch_gap_error_l2) + float(cross_step_reference_variation_l2)
     slack = float(branch_gap_l2) - rhs
     return {
         "lhs_l2": float(branch_gap_l2),
@@ -277,7 +282,9 @@ def posterior_feedback_condition(
         "slack_l2": slack,
         "satisfied": slack >= 0,
         "strictly_satisfied": slack > 0,
-        "status": "identified_paper_inputs",
+        "status": "identified_revised_comparison_inputs",
+        "measurement_contract": MEASUREMENT_CONTRACT,
+        "guarantee_scope": "signed_projected_gap_error_given_identified_inputs_and_original_applicability",
         "reason": None,
     }
 
@@ -288,13 +295,13 @@ def synchronization_bound(
     training_support_radius_l2: float | None,
     target_posterior: float | None,
     *,
+    branch_gap_error_l2: float | None = None,
     identified_training_distribution: bool = False,
     single_target_verified: bool = False,
 ) -> dict[str, Any]:
-    """Lemma 6: ||Delta|| <= e(c) + e(empty) + R (1-p)."""
+    """Projected synchronization bound: signed e_parallel plus R(1-p)."""
     values = {
-        "conditional_reference_error_l2": conditional_reference_error_l2,
-        "unconditional_reference_error_l2": unconditional_reference_error_l2,
+        "branch_gap_error_l2": branch_gap_error_l2,
         "training_support_radius_l2": training_support_radius_l2,
         "target_posterior": target_posterior,
     }
@@ -314,11 +321,11 @@ def synchronization_bound(
         }
     concentration = float(training_support_radius_l2) * (1 - float(target_posterior))
     return {
-        "bound_l2": float(conditional_reference_error_l2)
-        + float(unconditional_reference_error_l2)
-        + concentration,
+        "bound_l2": float(branch_gap_error_l2) + concentration,
         "concentration_term_l2": concentration,
-        "status": "identified_paper_inputs",
+        "status": "identified_revised_comparison_inputs",
+        "measurement_contract": MEASUREMENT_CONTRACT,
+        "guarantee_scope": "signed_projected_gap_error_given_identified_inputs_and_original_applicability",
         "reason": None,
     }
 
@@ -329,12 +336,13 @@ def terminal_reproduction_bound(
     training_support_radius_l2: float | None,
     target_posterior: float | None,
     *,
+    branch_gap_error_l2: float | None = None,
     guidance: float,
     terminal_clean_update: bool,
     identified_training_distribution: bool = False,
     single_target_verified: bool = False,
 ) -> dict[str, Any]:
-    """Theorem 7 literally, distinct from the operational affine scheduler bound.
+    """Terminal bound using the signed projected branch-gap reference error.
 
     Returns each summand. No endpoint observation is an input to this bound.
     """
@@ -343,10 +351,13 @@ def terminal_reproduction_bound(
         unconditional_reference_error_l2,
         training_support_radius_l2,
         target_posterior,
+        branch_gap_error_l2=branch_gap_error_l2,
         identified_training_distribution=identified_training_distribution,
         single_target_verified=single_target_verified,
     )
     reason = sync["reason"]
+    if conditional_reference_error_l2 is None or not math.isfinite(float(conditional_reference_error_l2)) or float(conditional_reference_error_l2) < 0:
+        reason = "conditional reference error must be finite and nonnegative"
     if not guidance_domain_status(guidance)["paper_guidance_domain_satisfied"]:
         reason = "Theorem 7 assumes g > 1; use separately named absolute-coefficient operational bound otherwise"
     if not terminal_clean_update:
@@ -357,19 +368,21 @@ def terminal_reproduction_bound(
         return {
             "bound_l2": None,
             "conditional_term_l2": None,
-            "unconditional_term_l2": None,
+            "branch_gap_error_term_l2": None,
             "concentration_term_l2": None,
             "status": "unavailable",
             "reason": reason,
         }
-    conditional = guidance * float(conditional_reference_error_l2)
-    unconditional = (guidance - 1) * float(unconditional_reference_error_l2)
+    conditional = float(conditional_reference_error_l2)
+    branch_gap_error = (guidance - 1) * float(branch_gap_error_l2)
     concentration = (guidance - 1) * sync["concentration_term_l2"]
     return {
-        "bound_l2": conditional + unconditional + concentration,
+        "bound_l2": conditional + branch_gap_error + concentration,
         "conditional_term_l2": conditional,
-        "unconditional_term_l2": unconditional,
+        "branch_gap_error_term_l2": branch_gap_error,
         "concentration_term_l2": concentration,
-        "status": "identified_paper_inputs",
+        "status": "identified_revised_comparison_inputs",
+        "measurement_contract": MEASUREMENT_CONTRACT,
+        "guarantee_scope": "signed_projected_gap_error_given_identified_inputs_and_original_applicability",
         "reason": None,
     }

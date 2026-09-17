@@ -287,7 +287,14 @@ def test_support_duplicate_atoms_aliases_and_identity_conflicts():
         [("01", target), ("alias", target.clone()), ("different", target + 1)]
     )
     assert bank.size == 2 and bank.aliases["01"] == bank.aliases["alias"]
-    assert bank.weights.tolist() == [0.5, 0.5]
+    assert bank.weights.tolist() == [2 / 3, 1 / 3]
+    assert bank.metadata()["source_record_multiplicities"] == [2, 1]
+    assert bank.metadata()["source_record_count"] == 3
+    repeated_listing = FiniteSupport.from_candidates(
+        [("01", target), ("01", target.clone()), ("different", target + 1)]
+    )
+    assert repeated_listing.weights.tolist() == [0.5, 0.5]
+    assert repeated_listing.metadata()["source_record_count"] == 2
     with pytest.raises(ValueError, match="conflicting"):
         FiniteSupport.from_candidates([("01", target), ("01", target + 1)])
     with pytest.raises(ValueError, match="conflicting"):

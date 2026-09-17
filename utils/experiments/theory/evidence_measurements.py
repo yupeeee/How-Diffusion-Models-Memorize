@@ -15,7 +15,7 @@ import torch
 
 from .metrics import clean_estimates
 
-EVIDENCE_MEASUREMENT_VERSION = "fixed-seven-evidence-vectors-1"
+EVIDENCE_MEASUREMENT_VERSION = "fixed-seven-evidence-projected-gap-error-1"
 DIRECTION_ROUNDOFF_MULTIPLIER = 64
 TERMINAL_QA_MULTIPLIER = 64
 DEFAULT_TERMINAL_NOISE_RUN_ALPHA = 0.05
@@ -129,7 +129,7 @@ def paired_target_metrics(mu, mc, target, reference_rhs_l2=None):
     conditional, unconditional = _norm(mc - target, ndim), _norm(mu - target, ndim)
     joint = torch.maximum(conditional, unconditional)
     result = {"evidence_joint_target_error_definition": "same_seed_maximum_before_any_aggregation",
-              "evidence_joint_bound_scope": "direct_triangle_consequence_not_verbatim_Lemma6"}
+              "evidence_joint_bound_scope": "projected_gap_error_plus_radius_tail_is_descriptive_for_joint_error_not_a_joint_bound"}
     _units(result, "evidence_joint_target_error", joint, dimension)
     if reference_rhs_l2 is not None:
         rhs = torch.as_tensor(reference_rhs_l2, dtype=torch.float64, device=mu.device)
@@ -213,9 +213,9 @@ def terminal_predictor_bounds(state, mu, mc, target, coeff, reference, *, final_
     defect_drift = coeff.A * state + (coeff.kappa - 1) * mg
     ec_vector, gap = _norm(mc - target, ndim), _norm(delta, ndim)
     ec = torch.as_tensor(reference.get("direct_conditional_error_l2", ec_vector), dtype=torch.float64, device=state.device).expand(count)
-    eu = torch.as_tensor(reference.get("direct_unconditional_reference_error_l2", torch.nan), dtype=torch.float64, device=state.device).expand(count)
+    branch_gap_error = torch.as_tensor(reference.get("direct_branch_gap_error_l2", torch.nan), dtype=torch.float64, device=state.device).expand(count)
     tail = torch.as_tensor(reference.get("direct_radius_tail_l2", torch.nan), dtype=torch.float64, device=state.device).expand(count)
-    B_obs, B_ref = ec + (g - 1) * gap, g * ec + (g - 1) * (eu + tail)
+    B_obs, B_ref = ec + (g - 1) * gap, ec + (g - 1) * (branch_gap_error + tail)
     structural_checks = {
         "final_update": bool(final_update), "affine_raw_clean": bool(coeff.affine),
         "zero_current_state_coefficient": coeff.A == 0,
@@ -282,13 +282,17 @@ def terminal_predictor_bounds(state, mu, mc, target, coeff, reference, *, final_
             reason = "unsupported_or_unverified_terminal_Gaussian_variance_contract:" + str(noise_contract.get("reason", "missing"))
     clean_error = _norm(mg - target, ndim)
     bound_order_tolerance = 256 * torch.finfo(torch.float64).eps * (
-        ec.abs() + eu.abs() + tail.abs() + B_obs.abs() + B_ref.abs() + clean_error)
+        ec.abs() + branch_gap_error.abs() + tail.abs() + B_obs.abs() + B_ref.abs() + clean_error)
     bound_order_finite = torch.isfinite(bound_order_tolerance)
     bound_order_consistent = (B_ref - B_obs >= -bound_order_tolerance) & (B_obs - clean_error >= -bound_order_tolerance)
     finite = torch.isfinite(B_obs) & torch.isfinite(B_ref) & torch.isfinite(delta_bound)
     available = finite & (scope != "unavailable_unsupported_terminal_contract")
     scalars = {
         "evidence_terminal_scope": scope,
+        "evidence_terminal_measurement_contract": "projected-gap-error-1",
+        "evidence_terminal_branch_gap_error_definition": "signed_projected_branch_gap_reference_error",
+        "evidence_terminal_reference_comparison_scope": "e_c+(g-1)*(e_parallel+radius_tail); signed unit-gap projection and posterior concentration under the reference contract",
+        "evidence_terminal_observable_bound_scope": "e_c+(g-1)*learned_gap; triangle upper bound with the separately justified update correction",
         "evidence_terminal_status": [reason if valid else "unavailable_nonfinite_preupdate_quantity" if scope != "unavailable_unsupported_terminal_contract" else reason for valid in finite.tolist()],
         "evidence_terminal_applicable": available,
         "evidence_terminal_correction_source": correction_source,
@@ -313,6 +317,7 @@ def terminal_predictor_bounds(state, mu, mc, target, coeff, reference, *, final_
         "evidence_terminal_clean_bound_order_slack_l2": B_ref - B_obs,
         "evidence_terminal_clean_error_l2": clean_error,
         "evidence_terminal_clean_bound_order_tolerance_l2": bound_order_tolerance,
+        "evidence_terminal_clean_bound_order_scope": "projected_gap_error_bound_ge_observable_triangle_bound_ge_clean_error",
         "evidence_terminal_clean_bound_order_status": [
             "not_applicable_guidance_domain" if not (math.isfinite(g) and g > 1) else
             "consistent_with_float64_estimate" if ok and finite_value else
@@ -322,7 +327,8 @@ def terminal_predictor_bounds(state, mu, mc, target, coeff, reference, *, final_
     }
     for name, value in (("B_obs", B_obs), ("B_ref", B_ref), ("defect_bound", delta_bound),
                         ("corrected_obs_bound", B_obs + delta_bound), ("corrected_ref_bound", B_ref + delta_bound),
-                        ("conditional_error", ec), ("residual_guidance", (g - 1) * gap),
+                        ("conditional_error", ec), ("branch_gap_error", branch_gap_error),
+                        ("residual_guidance", (g - 1) * gap),
                         ("deterministic_defect", _norm(defect_drift, ndim)),
                         ("noise_norm_bound", torch.full_like(ec, noise_norm_bound))):
         _units(scalars, "evidence_terminal_" + name, value, dimension)
@@ -440,7 +446,7 @@ def measure_evidence_record(preloaded, record, law, config, adapter,
     trajectory["evidence_joint_target_error_l2"] = joint
     trajectory["evidence_joint_target_error_rmse"] = joint / math.sqrt(dimension)
     trajectory["evidence_joint_target_error_definition"] = "same_seed_maximum_before_any_aggregation"
-    trajectory["evidence_joint_bound_scope"] = "direct_triangle_consequence_not_verbatim_Lemma6"
+    trajectory["evidence_joint_bound_scope"] = "projected_gap_error_plus_radius_tail_is_descriptive_for_joint_error_not_a_joint_bound"
     trajectory["evidence_joint_bound_slack_l2"] = trajectory_source.direct_lemma6_rhs_l2 - joint
     trajectory["evidence_joint_bound_slack_rmse"] = trajectory.evidence_joint_bound_slack_l2 / math.sqrt(dimension)
     coeff = adapter.coefficients(steps - 1)
@@ -456,7 +462,7 @@ def measure_evidence_record(preloaded, record, law, config, adapter,
         )
         for name in (
             "direct_conditional_error_l2",
-            "direct_unconditional_reference_error_l2",
+            "direct_branch_gap_error_l2",
             "direct_radius_tail_l2",
         )
     }

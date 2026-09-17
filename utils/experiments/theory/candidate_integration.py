@@ -12,6 +12,7 @@ import math
 import numpy as np
 import torch
 
+from .branch_gap import BRANCH_GAP_ERROR_DEFINITION, BRANCH_GAP_ZERO_CONVENTION
 from .feedback import _X, _WG, _WK, mean_distance_from_weights
 
 
@@ -45,9 +46,16 @@ class IntegrationConfig:
 DEFAULT_INTEGRATION = IntegrationConfig()
 WIDTHS = (0.0, -2.0, 2.0, -8.0, 8.0, -16.0, 16.0, -32.0, 32.0, -64.0, 64.0)
 INTEGRATION_POLICY = {
-    "version": "candidate-directional-integrals-1",
+    "version": "candidate-projected-gap-error-4",
+    "measurement_contract": "projected-gap-error-1",
+    "branch_gap_error_definition": BRANCH_GAP_ERROR_DEFINITION,
+    "branch_gap_error_zero_convention": BRANCH_GAP_ZERO_CONVENTION,
+    "original_margin": "D-branch_gap_error-max(0, integral unit_gap dot posterior_difference); equals combined-error margin",
+    "margin_order": "legacy_signed_le_legacy_projected_le_original_equals_combined_le_exact",
+    "variation_definition": "positive_part_after_integrated_unit_gap_projection",
+    "zero_gap_convention": "V=0_when_Delta_is_exactly_zero",
     **asdict(DEFAULT_INTEGRATION),
-    "method": "adaptive_Gauss_Kronrod_15_7_joint_V_Vparallel_W_H",
+    "method": "adaptive_Gauss_Kronrod_15_7_joint_norm_diagnostic_abs_projection_signed_projection_gain",
     "partition_widths": list(WIDTHS),
     "boundary_tails": "include_upper_envelope_crossings_outside_segment_when_width_neighborhood_overlaps",
     "error_scope": "embedded_estimate_plus_logged_roundoff_and_source_sensitivity_not_certified",
@@ -121,10 +129,18 @@ class _Segment:
             payload["delta_norm"], dtype=torch.float64, device=self.device
         )
         factor = payload["beta"] * payload["guidance"] * payload["kappa"] * self.D
-        self.projected_atoms = (
-            self.slopes
-            / torch.where(factor > 0, factor, torch.ones_like(factor))[:, None]
-        )
+        self.zero_gap = torch.as_tensor(payload.get("delta_exact_zero", self.D == 0), dtype=torch.bool, device=self.device)
+        if (self.zero_gap.shape != self.D.shape
+                or bool((self.zero_gap & (self.D != 0)).any())
+                or bool((self.zero_gap & (self.slopes != 0).any(dim=1)).any())):
+            raise ValueError("Exact-zero gap witness differs from saved gap norm")
+        self.projection_available = (torch.isfinite(self.D) & (self.D > 0)
+                                     & torch.isfinite(factor) & (factor > 0))
+        projected = self.slopes / torch.where(self.projection_available, factor, torch.ones_like(factor))[:, None]
+        self.projection_available &= torch.isfinite(projected).all(dim=1)
+        self.projected_atoms = torch.where(
+            self.zero_gap[:, None], torch.zeros_like(projected),
+            torch.where(self.projection_available[:, None], projected, torch.full_like(projected, torch.nan)))
         self.x = torch.as_tensor(_X, dtype=torch.float64, device=self.device)
         self.wk = torch.as_tensor(_WK, dtype=torch.float64, device=self.device)
         self.wg = torch.as_tensor(_WG, dtype=torch.float64, device=self.device)
@@ -268,6 +284,10 @@ def unavailable_integration(
             "margin_order_minimum_gap",
             "margin_order_allowance",
             "gram_roundoff_allowance_l2",
+            "projection_roundoff_allowance_l2",
+            "variation_positive_signed_integral_l2",
+            "variation_positive_signed_integral_error_l2",
+            "primary_to_exact_margin_gap_l2",
             "quadrature_evaluations",
             "quadrature_refinements",
         )
@@ -293,6 +313,13 @@ def unavailable_integration(
             "candidate_integration_reason": [reason] * count,
             "candidate_integration_identity_status": ["not_applicable"] * count,
             "candidate_margin_order_status": ["not_applicable"] * count,
+            "candidate_margin_order_scope": ["legacy_signed_le_legacy_projected_le_original_equals_combined_le_exact"] * count,
+            "candidate_measurement_contract": ["projected-gap-error-1"] * count,
+            "candidate_branch_gap_error_definition": [BRANCH_GAP_ERROR_DEFINITION] * count,
+            "candidate_branch_gap_error_zero_convention": [BRANCH_GAP_ZERO_CONVENTION] * count,
+            "candidate_variation_definition": ["positive_part_after_integrated_unit_gap_projection"] * count,
+            "candidate_zero_gap_convention": ["V=0_when_Delta_is_exactly_zero"] * count,
+            "candidate_variation_direction_status": ["unavailable_projection_denominator"] * count,
             "candidate_quadrature_budget_exhausted": torch.zeros(
                 count, dtype=torch.bool, device=device
             ),
@@ -308,6 +335,10 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
         return unavailable_integration(0, device=support.flat.device)
     if payload.get("schema_version") != 1 or payload.get("bank_hash") != bank_hash:
         raise ValueError("Integration payload schema/bank identity mismatch")
+    if (payload.get("measurement_contract") != "projected-gap-error-1"
+            or payload.get("branch_gap_error_definition") != BRANCH_GAP_ERROR_DEFINITION
+            or payload.get("branch_gap_error_zero_convention") != BRANCH_GAP_ZERO_CONVENTION):
+        raise ValueError("Integration payload requires the signed projected branch-gap error contract")
     if (
         payload.get("dimension") != support.dimension
         or not 0 <= int(payload["target_atom"]) < support.size
@@ -342,12 +373,11 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
     def tensor(name):
         return torch.as_tensor(payload[name], dtype=torch.float64, device=device)
 
-    D, ec, eu, combined, S, source = (
+    D, branch_gap_error, combined, S, source = (
         tensor(name)
         for name in (
             "delta_norm",
-            "conditional_error",
-            "unconditional_reference_error",
+            "branch_gap_error",
             "combined_reference_error",
             "signed_error_projection",
             "source_error_l2",
@@ -359,9 +389,14 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
     reconstruction = torch.as_tensor(
         payload["reconstruction_valid"], dtype=torch.bool, device=device
     )
-    V, Vparallel, W, integrated_H = values.unbind(dim=1)
+    Vnorm, Vparallel, W, integrated_H = values.unbind(dim=1)
+    primary_available = segment.projection_available | segment.zero_gap
+    # Apply the positive part only after signed integration, preserving cancellation.
+    W = torch.where(segment.zero_gap, torch.zeros_like(W), W)
+    V = torch.where(primary_available, W.clamp_min(0), torch.nan)
+    variation_error = torch.where(segment.zero_gap, torch.zeros_like(W), uncertainty[:, 2])
     raw_margins = torch.stack(
-        (D - ec - eu - V, D - combined - V, D + S - V, D + S - Vparallel, D + S - W),
+        (D - branch_gap_error - V, D - combined - V, D + S - Vnorm, D + S - Vparallel, D + S - W),
         dim=1,
     )
     projection_roundoff = (
@@ -370,10 +405,11 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
         * torch.maximum(torch.ones_like(D), segment.projected_atoms.abs().amax(dim=1))
         * support.size
     )
+    projection_roundoff = torch.where(segment.zero_gap, torch.zeros_like(D), projection_roundoff)
     margin_errors = torch.stack(
         (
-            uncertainty[:, 0] + segment.roundoff + source,
-            uncertainty[:, 0] + segment.roundoff + source,
+            variation_error + projection_roundoff + source,
+            variation_error + projection_roundoff + source,
             uncertainty[:, 0] + segment.roundoff + source + projection_roundoff,
             uncertainty[:, 1] + source + projection_roundoff,
             uncertainty[:, 2] + source + projection_roundoff,
@@ -395,9 +431,19 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
         + margin_errors[:, :-1]
         + 128
         * torch.finfo(torch.float64).eps
-        * (D + ec + eu + combined + V + Vparallel + W.abs())[:, None]
+        * (D + branch_gap_error.abs() + combined.abs() + V + Vparallel + W.abs())[:, None]
     )
-    order_bad = (gaps < -order_allowance).any(dim=1) & direction
+    # S=-E_parallel gives M_norm <= M_abs <= M_primary=M_combined <= A.
+    # Keep the saved adjacent gaps descriptive, but validate this actual order.
+    alias_bad = ((branch_gap_error - combined).abs() > order_allowance[:, 0]) | ((S + branch_gap_error).abs() > order_allowance[:, 0])
+    primary_exact_gap = raw_margins[:, 4] - raw_margins[:, 0]
+    primary_exact_allowance = margin_errors[:, 4] + margin_errors[:, 0] + order_allowance[:, 0]
+    projection_primary_gap = raw_margins[:, 0] - raw_margins[:, 3]
+    projection_primary_allowance = margin_errors[:, 0] + margin_errors[:, 3] + order_allowance[:, 0]
+    ordered_gaps = torch.stack((gaps[:, 0], gaps[:, 2], projection_primary_gap, primary_exact_gap), dim=1)
+    order_bad = (((gaps[:, 2] < -order_allowance[:, 2])
+                  | (projection_primary_gap < -projection_primary_allowance)
+                  | (primary_exact_gap < -primary_exact_allowance)) & direction) | alias_bad
     identity_bad = identity.abs() > identity_allowance
     directional_bad = (directional_identity.abs() > directional_allowance) & direction
     exhausted = torch.as_tensor(exhausted, dtype=torch.bool, device=device)
@@ -405,6 +451,9 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
         torch.isfinite(values).all(dim=1)
         & torch.isfinite(uncertainty).all(dim=1)
         & ~segment.invalid.bool()
+        & primary_available
+        & torch.isfinite(branch_gap_error)
+        & torch.isfinite(combined)
     )
     resolved = (
         valid
@@ -416,7 +465,7 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
     )
     result = unavailable_integration(count, device=device)
     for index, name in enumerate(VARIATIONS):
-        applicable = torch.ones_like(direction) if index == 0 else direction
+        applicable = torch.ones_like(direction) if index == 0 else primary_available
         result[f"candidate_variation_{name}_integral_l2"] = torch.where(
             applicable, values[:, index], torch.nan
         )
@@ -473,6 +522,14 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
         )
     result.update(
         {
+            "candidate_variation_positive_signed_integral_l2": V,
+            "candidate_variation_positive_signed_integral_error_l2": variation_error,
+            "candidate_projection_roundoff_allowance_l2": projection_roundoff,
+            "candidate_primary_to_exact_margin_gap_l2": torch.where(direction, primary_exact_gap, torch.nan),
+            "candidate_variation_direction_status": [
+                "zero_gap_convention" if zero else "finite_nonzero_gap_projection" if available
+                else "unavailable_projection_denominator"
+                for zero, available in zip(segment.zero_gap.tolist(), segment.projection_available.tolist())],
             "candidate_integrated_log_probability_gain": integrated_H,
             "candidate_integrated_log_probability_gain_error": uncertainty[:, 3],
             "candidate_integral_identity_residual": identity,
@@ -484,7 +541,7 @@ def integration_metrics(support, payload, *, bank_hash, config=None):
                 direction, directional_allowance, torch.nan
             ),
             "candidate_margin_order_minimum_gap": torch.where(
-                direction, gaps.min(dim=1).values, torch.nan
+                direction, ordered_gaps.min(dim=1).values, torch.nan
             ),
             "candidate_margin_order_allowance": order_allowance.max(dim=1).values,
             "candidate_gram_roundoff_allowance_l2": segment.roundoff,

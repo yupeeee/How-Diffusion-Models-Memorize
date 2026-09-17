@@ -197,6 +197,13 @@ def _draw_scatter(fig, ax, entry, frame, metadata, config):
         raise TheoryError("Available scatter has no finite coordinate pairs")
     classes = frame.get("marker_class", pd.Series("observed", index=frame.index)).fillna("numerically_unresolved").astype(str).to_numpy()
     styles = _MARKERS
+    value_only = entry.get("display_policy") == "finite_saved_values"
+    saved_classes = classes.copy()
+    if value_only:
+        # Saved coordinates are the observation. Audit classifications neither
+        # gate inclusion nor determine marker shape for this presentation.
+        classes = np.full(len(frame), "values", dtype=object)
+        styles = {"values": ("o", "_nolegend_")}
     neutral_identity = entry["stem"] == "lemma4_matched_displacement"
     if neutral_identity:
         column = "direct_lemma4_verification_source"
@@ -221,11 +228,16 @@ def _draw_scatter(fig, ax, entry, frame, metadata, config):
     colors = _number(frame, "terminal_sscd")
     colored = finite & np.isfinite(colors) & bool(entry.get("sscd")) & (not neutral_identity)
     visible_classes = set(classes[finite])
+    # The pooled condition scatter has an explicit opacity; all other
+    # scatter plots share the publication default.
+    scatter_alpha = SCATTER_ALPHA
+    if not entry.get("parent_figure"):
+        scatter_alpha = entry.get("pooled_scatter_alpha", SCATTER_ALPHA)
     for marker_class, (marker, label) in styles.items():
         selected = finite & (classes == marker_class)
         if not selected.any():
             continue
-        options = dict(s=SCATTER_SIZE, alpha=SCATTER_ALPHA, marker=marker, rasterized=True)
+        options = dict(s=SCATTER_SIZE, alpha=scatter_alpha, marker=marker, rasterized=True)
         if marker not in {"x", "+"}:
             options["edgecolors"] = "none"
         show_label = label if len(visible_classes) > 1 or marker_class != "observed" else "_nolegend_"
@@ -252,6 +264,14 @@ def _draw_scatter(fig, ax, entry, frame, metadata, config):
     else:
         ax.set_xlim(_finite_limits(x[finite], include_zero=entry.get("include_zero", False)))
         ax.set_ylim(_finite_limits(y[finite], include_zero=entry.get("include_zero", False)))
+    if value_only:
+        # Include the condition boundary without clipping any saved point, even
+        # when every margin at an individual timestep has the same sign.
+        lower, upper = min(float(x[finite].min()), 0.), max(float(x[finite].max()), 0.)
+        span = upper - lower
+        padding = .06 * span if span > 0 else .05
+        ax.set_xlim(lower - padding, upper + padding)
+        ax.set_ylim(_finite_limits(y[finite], include_zero=True))
     if entry.get("zero_guides"):
         ax.axhline(0, color=".65", linewidth=0.7, label="Zero gain" if entry.get("direct_statement") else "_nolegend_")
         ax.axvline(0, color=".65", linewidth=0.7, label="Zero condition margin" if entry.get("direct_statement") else "_nolegend_")
@@ -306,9 +326,18 @@ def _draw_scatter(fig, ax, entry, frame, metadata, config):
             continue
         axis.set_major_locator(MaxNLocator(nbins=5))
         _compact_ticks(axis)
-    _legend(ax, loc="lower right" if entry.get("terminal_applicability") or neutral_identity else None)
+    if not value_only:
+        _legend(ax, loc="lower right" if entry.get("terminal_applicability") or neutral_identity else None)
     return {
+        **({"display_policy": "finite_saved_values", "legend_placement": "none",
+            "marker": "o", "sign_classification_used_for_display": False,
+            "zero_padding_policy": "6% of the finite zero-inclusive margin span on both sides; no fabricated observations",
+            "zero_guide_labels": "caption_only",
+            "saved_marker_counts": {name: int((finite & (saved_classes == name)).sum())
+                                    for name in sorted(set(saved_classes[finite]))}}
+           if value_only else {}),
         "finite_pairs": int(finite.sum()),
+        "scatter_alpha": float(scatter_alpha),
         "missing_coordinate_pairs": int((~finite).sum()),
         "marker_counts": {name: int((finite & (classes == name)).sum()) for name in sorted(visible_classes)},
         "symlog_linthresh": float(metadata.get("symlog_linthresh", 0.001)) if entry.get("signed") else None,
@@ -679,6 +708,10 @@ def _draw_coverage(ax, frame, metadata):
 
 
 def _apply_saved_limits(ax, metadata, frame, entry):
+    if entry.get("display_policy") == "finite_saved_values":
+        # Combined and timestep views each retain every finite coordinate and
+        # both zero guides; historical pooled limits are not slice limits.
+        return
     if (entry["kind"] in {"four_terminal_grouped_cdf", "four_guidance_fit"}
             or (entry["kind"] == "four_prompt_chronological"
                 and entry.get("prediction_domain") == "positive_noise_transitions")):
@@ -898,6 +931,10 @@ def _active_presentation(ax, entry, metadata, stats, frame):
 
 
 def _draw(entry, frame, metadata, config):
+    if entry.get("parent_figure"):
+        # Timestep companions share the parent's axes and marker styling;
+        # parent_figure keeps pooled-only opacity separate from each slice.
+        entry = {**entry, "stem": entry["parent_figure"]}
     if entry["stem"] in RETIRED_RENDER_STEMS or entry["kind"] == "four_motion":
         raise TheoryError("Requested figure render is retired; its saved scientific measurements remain available")
     missing = set(entry["required_columns"]) - set(frame)
@@ -1011,7 +1048,7 @@ def _draw(entry, frame, metadata, config):
 def _caption(entry):
     metadata = json_value(entry["measurement_metadata"])
     text = [
-        f"## {entry['category']}/{entry['stem']}",
+        "## " + str(Path(entry.get("requested_outputs", entry["outputs"])["pdf"]).with_suffix("")),
         "",
         entry["semantic_question"],
         "",
@@ -1035,10 +1072,10 @@ def _caption(entry):
         "Weighting: " + str(metadata.get("weighting", entry["weighting"])),
         "Bands: "
         + str(
-            metadata.get(
+            entry.get("display_band_definition", metadata.get(
                 "band_definition",
                 metadata.get("band_meaning", entry["band_definition"]),
-            )
+            ))
         ),
         "Groups: " + entry["group_rule"],
     ]
@@ -1048,7 +1085,10 @@ def _caption(entry):
         text.append("Notation details: " + entry["notation_details"])
     support = list(zip(entry.get("supporting_figure_slots", []), entry.get("supporting_figure_ids", [])))
     if support:
-        text.append("Supporting figures (in order): " + ", ".join(f"[{slot}: {stem}](appendix/{stem}.pdf)" for slot, stem in support) + ".")
+        destinations = {item["stem"]: item["outputs"]["pdf"] for item in paper_registry()}
+        text.append("Supporting figures (in order): " + ", ".join(
+            f"[{slot}: {stem}]({destinations[stem]})" for slot, stem in support if stem in destinations
+        ) + ".")
     if entry.get("direct_statement"):
         for key in ("result_label", "manuscript_label", "x_definition", "y_definition", "input_source", "reference_law", "averaging_measure", "averaging_unit", "applicability_assumptions", "interpretation", "supporting_equation", "auxiliary_definitions", "manuscript_label_status", "source_label_status", "native_sweep_figure", "numerical_resolution_figure"):
             if key in entry:
@@ -1067,6 +1107,11 @@ def _caption(entry):
         "prediction_domain", "manuscript_domain", "excluded_terminal_prediction_rows",
         "numerical_scope", "numerical_status_counts", "measurement_audit_table",
         "reference_definition", "missing_measurement_fields",
+        "measurement_contract", "condition_formula", "comparison_interpretation",
+        "condition_assessment_counts", "condition_display_policy",
+        "display_policy", "timestep_slice", "timestep_export",
+        "variation_definition", "zero_gap_convention",
+        "reference_comparison_formula", "reference_comparison_scope",
         "missing_outcome_row_count", "chronological_schedule", "normalized_progress_definition", "denominator_column",
         "shape_group_counts", "shape_population", "shape_rule", "shape_table",
         "trajectory_peak_summary", "peak_summary_status", "peak_summary_details",
@@ -1201,6 +1246,69 @@ def _caption(entry):
     return "\n".join(text)
 
 
+def _value_display_metadata(metadata):
+    """Describe the artwork independently of saved numerical-sign audits."""
+    metadata = copy.deepcopy(metadata)
+    metadata.update(
+        display_policy="finite_saved_values",
+        condition_display_policy="Every finite saved x/y pair is displayed as a circular dot; no sign-resolution gate, marker distinction or status legend",
+        condition_interpretation="The scatter shows saved numerical values without claiming certified condition signs or implications",
+        endpoint_contract="x is the saved affine-path margin [||Delta||-e_t^parallel(Delta)-mathcal{V}]/sqrt(d), where e_t^parallel(Delta)=u_t dot (Delta_t-bar{Delta}_t) is signed and mathcal{V} is the positive part after the integrated unit-gap reference projection; y is the saved matched-endpoint log-probability gain. Sign classifications do not filter or alter the displayed values. Endpoint-transfer and scientific applicability remain separately recorded",
+    )
+    return metadata
+
+
+def _timestep_views(entry, frame, metadata, config):
+    """Slice immutable compact rows for additional figures; no new measurements."""
+    policy = entry["per_timestep_exports"]
+    column = policy["column"]
+    if column not in frame:
+        raise TheoryError(f"{entry['stem']}: per-timestep figures require saved {column}")
+    steps = _number(frame, column)
+    science = config.get("scientific_config", config)
+    count = science.get("num_inference_steps")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise TheoryError("Per-timestep figures require a positive integer saved prediction count")
+    if np.any(~np.isfinite(steps) | (steps < 0) | (steps >= count) | (steps != np.floor(steps))):
+        raise TheoryError("Per-timestep figures have invalid saved step_index values")
+    views = []
+    for step in sorted(set(steps.astype(int))):
+        selected = frame.loc[steps == step].copy()
+        x, y = _number(selected, "x"), _number(selected, "y")
+        finite = np.isfinite(x) & np.isfinite(y)
+        name = policy["filename_template"].format(step_index=int(step))
+        child = copy.deepcopy(entry)
+        child.pop("per_timestep_exports", None)
+        identity = entry["stem"] + "/" + name
+        child.update(stem=identity, figure_id=identity, stable_stem=identity,
+                     parent_figure=entry["stem"], paper_slot=None,
+                     section="per_timestep_companion",
+                     outputs={extension: policy["directory"] + "/" + name + "." + extension
+                              for extension in ("png", "pdf")},
+                     semantic_question=entry["semantic_question"] + f" Saved prediction k={int(step)}, manuscript t={count - int(step)}.")
+        # Aggregate population and status counts belong to the parent figure.
+        # Do not relabel those pooled receipts as statistics of this slice.
+        child_metadata = {key: copy.deepcopy(metadata[key]) for key in (
+            "symlog_linthresh", "normalization", "input_source", "measurement_contract",
+            "condition_formula", "comparison_interpretation", "formula_version",
+            "variation_definition", "zero_gap_convention",
+            "reference_law", "reference_law_hash", "mathematical_scope") if key in metadata}
+        child_metadata = _value_display_metadata(child_metadata)
+        child_metadata.update(
+            status="available" if finite.any() else "unavailable",
+            reason=None if finite.any() else "This saved timestep has no finite margin/gain coordinate pairs; no points are fabricated",
+            band_definition="None; individual saved values are shown as dots",
+            weighting="One dot per finite saved sample at this timestep; no timestep or seed aggregation",
+            timestep_slice={"step_index": int(step), "manuscript_t": count - int(step),
+                            "saved_rows": len(selected), "finite_pairs": int(finite.sum()),
+                            "nonfinite_pairs": int((~finite).sum()),
+                            "native_timesteps": sorted(set(_number(selected, "timestep")[np.isfinite(_number(selected, "timestep"))].tolist())),
+                            "snr_values": sorted(set(_number(selected, "snr")[np.isfinite(_number(selected, "snr"))].tolist()))},
+        )
+        views.append((child, selected, child_metadata))
+    return views
+
+
 def render_paper(stage: Path, *, diagnostics=False):
     """Export a complete staged paper set; caller owns the role lock/directory swap."""
     stage = Path(stage).absolute()
@@ -1219,20 +1327,28 @@ def render_paper(stage: Path, *, diagnostics=False):
             raise TheoryError(
                 "Owned figure_captions.md was modified outside the renderer"
             )
+    jobs = []
+    for specification in registry:
+        stem = specification["stem"]
+        frame = frames.get(stem, pd.DataFrame())
+        metadata = copy.deepcopy(summary["figures"][stem])
+        if specification.get("display_policy") == "finite_saved_values":
+            metadata = _value_display_metadata(metadata)
+        jobs.append((specification, frame, metadata))
     pending = []
-    entries = []
+    entries, timestep_entries = [], []
     try:
         with plt.rc_context(PLOT_STYLE), tqdm(
-            total=len(registry), desc="[Theory] Preparing figures", unit="figure",
+            total=len(jobs), desc="[Theory] Preparing figures", unit="figure",
             dynamic_ncols=True, leave=True, disable=False,
         ) as progress:
-            for specification in registry:
-                progress.set_postfix_str(f"{specification['category']}/{specification['stem']}", refresh=True)
+            for specification, frame, metadata in jobs:
+                progress.set_postfix_str(str(Path(specification["outputs"]["png"]).with_suffix("")), refresh=True)
                 entry = copy.deepcopy(specification)
                 stem = entry["stem"]
-                metadata = copy.deepcopy(summary["figures"][stem])
+                source_stem = entry.get("parent_figure", stem)
                 status = metadata["status"]
-                if status == "unavailable" and entry["category"] != "diagnostics" and not entry.get("allow_unavailable"):
+                if status == "unavailable" and not entry.get("parent_figure") and entry["category"] != "diagnostics" and not entry.get("allow_unavailable"):
                     raise TheoryError(
                         f"Required paper figure {stem} is unavailable: {metadata['reason']}. Run {recompute_command(config)}"
                     )
@@ -1254,7 +1370,7 @@ def render_paper(stage: Path, *, diagnostics=False):
                     ),
                     provenance=copy.deepcopy(config.get("provenance", {})),
                     source_analysis=copy.deepcopy(config.get("source_analysis", {})),
-                    plot_input=copy.deepcopy(summary.get("plot_data", {}).get(stem)),
+                    plot_input=copy.deepcopy(summary.get("plot_data", {}).get(source_stem)),
                     requested_outputs=entry["outputs"].copy(),
                     output_hashes={},
                 )
@@ -1269,18 +1385,19 @@ def render_paper(stage: Path, *, diagnostics=False):
                             raise TheoryError(
                                 f"Owned paper figure was modified outside the renderer: {relative}"
                             )
-                    fig, stats = _draw(entry, frames[stem], metadata, config)
+                    fig, stats = _draw(entry, frame, metadata, config)
                     pending.append((fig, entry["outputs"]))
                     entry["display_audit"] = json_value(stats)
                 else:
                     entry["outputs"] = {}
-                entries.append(entry)
+                (timestep_entries if entry.get("parent_figure") else entries).append(entry)
                 progress.update(1)
+        all_entries = [*entries, *timestep_entries]
         # Validate caption metadata before expensive PNG/PDF export. The same
         # native JSON values are retained in the eventual figure manifest.
         with StageProgress("Preparing figure captions"):
             captions = "# Fixed paper figure captions\n\n" + "\n".join(
-                _caption(entry) for entry in entries
+                _caption(entry) for entry in all_entries
             )
         with plt.rc_context(PLOT_STYLE), tqdm(
             total=sum(len(names) for _figure, names in pending),
@@ -1296,10 +1413,10 @@ def render_paper(stage: Path, *, diagnostics=False):
         with StageProgress("Writing figure captions and manifest"):
             files = {
                 relative: file_sha256(stage / relative)
-                for entry in entries
+                for entry in all_entries
                 for relative in entry["outputs"].values()
             }
-            for entry in entries:
+            for entry in all_entries:
                 entry["output_hashes"] = {
                     format: files[relative] for format, relative in entry["outputs"].items()
                 }
@@ -1323,8 +1440,10 @@ def render_paper(stage: Path, *, diagnostics=False):
                     "main": sum(e["category"] == "main" for e in registry),
                     "appendix": sum(e["category"] == "appendix" for e in registry),
                     "diagnostics": sum(e["category"] == "diagnostics" for e in registry),
+                    "timestep_figures": len(timestep_entries),
                 },
                 "figures": entries,
+                "timestep_figures": timestep_entries,
                 "files": files,
                 "preserved_files": {name: digest for name, digest in owned.items() if name not in files},
                 "render_retirements": list(RENDER_RETIREMENTS),

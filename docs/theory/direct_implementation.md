@@ -1,3 +1,5 @@
+> Historical mathematical context: the active contract is now `projected-gap-error-1`, documented in [four_stage_experiments.md](four_stage_experiments.md). It uses the signed projected gap error, and retains the positive part after signed directional integration. Norm-error/norm-integral formulas below describe preceding designs and are not active evaluated quantities. Historical numerical receipts are not relabeled.
+
 # Direct seven-statement implementation report
 
 This is a source-change report, not a validation receipt. No tests, project

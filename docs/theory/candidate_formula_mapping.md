@@ -1,5 +1,7 @@
 # Candidate discovery formula mapping
 
+The active contract is `projected-gap-error-1`: e_t^parallel(Delta)=u^T(Delta-bar{Delta}) is signed and mathcal{V} is the positive part after the unchanged signed unit-gap projection integral. Exactly zero gap extends u=0, e^parallel=0 and mathcal{V}=0 by convention without claiming a unit direction. The PDF formula table below is historical attribution; the active candidate margins use the revised formulas documented below. Run `bash run_all.sh --recompute-experiments`; historical gap-error norms cannot be relabeled as signed errors.
+
 ## Audited source and implementation
 
 | Item | Audit result |
@@ -51,8 +53,11 @@ All sensitive arithmetic promotes cached values before operations:
   substituted for the individual terminal outcome.
 
 The fixed candidate law has positive declared masses `pi_j` and exact distinct
-atoms. Exact latent duplicates are aggregated before evaluation; aliases remain
-traceable. Similar images are not merged. The candidate bank and masses are
+atoms. By default each compatible complete cached source record contributes equal
+mass before selection; an atom occurring n times among N source records has prior
+n/N. Exact latent duplicates have their masses summed before evaluation; aliases
+remain traceable. Explicit manifest weights retain their declared values after
+duplicate aggregation. Similar images are not merged. The candidate bank and masses are
 unchanged across endpoints, doses, controls, and integrals. Candidate quantities
 carry `candidate_` columns and superscript `K` in formula sidecars. The declared
 candidate law is not identified as the pretrained model's training law.
@@ -86,24 +91,20 @@ latent-dimension temperature.
 For `D>0`, put `u=Delta/D`, `S=u dot (r_u-r_c)`,
 `V_parallel=integral |u dot d(s)| ds`, and `W=integral u dot d(s) ds`.
 The following are explicitly new analysis refinements derived from the verified
-identities; only `M0` is the condition in Proposition 5:
+identities. Under `projected-gap-error-1`, revised `M0` and `M1` use mathcal{V}=[W]_+, with the positive part after the signed integral. The old norm integral V_norm and absolute-projection integral V_parallel remain separate diagnostics:
 
 | Name | Formula | Saved prefix |
 |---|---|---|
-| Original norm margin `M0` | `D-||r_c||-||r_u||-V` | `candidate_margin_original` |
-| Combined-error margin `M1` | `D-||r_c-r_u||-V` | `candidate_margin_combined` |
-| Signed-error margin `M2` | `D+S-V` | `candidate_margin_signed_error` |
+| Refined gap-error margin `M0` | `D-e_t^parallel(Delta)-[W]_+`, where `e_t^parallel(Delta)=u^T(r_c-r_u)=-S` | `candidate_margin_original` |
+| Signed projected-error alias `M1` | `D-e_t^parallel(Delta)-[W]_+` | `candidate_margin_combined` |
+| Signed-error margin `M2` | `D+S-V_norm` | `candidate_margin_signed_error` |
 | Projected-variation margin `M3` | `D+S-V_parallel` | `candidate_margin_projected_variation` |
 | Exact directional average `A` | `D+S-W` | `candidate_exact_directional_average` |
 
-The exact-arithmetic chain is `M0<=M1<=M2<=M3<=A`. Its four gaps are,
-respectively, `||r_c||+||r_u||-||r_c-r_u||`, `||r_c-r_u||+S`,
-`V-V_parallel`, and `V_parallel-W`; each is nonnegative. Equation 69 becomes
+Since e_t^parallel(Delta)=-S, the valid chain is `M2<=M3<=M0=M1<=A`: the norm and absolute-projection diagnostic integrals exceed [W]_+. The opposite M1<=M2 ordering is not asserted. Remaining diagnostic gaps are `V_norm-V_parallel` and `V_parallel-W`; `A-M0=[W]_+-W>=0`. Exactly zero gap extends u=0, E_parallel=0 and mathcal{V}=0 and never claims a unit direction. Equality of M0 and M1 is definitional, not an independent measured agreement. Equation 69 becomes
 `H=(alpha_next*g*kappa*D/sigma_next^2)*A`. Thus `A` characterizes the measured
 gain's sign and is not an independent predictive certificate. Numerical
-condition signs retain their integration uncertainty and status. Tests include
-large equal orthogonal residuals `r_c=r_u` for which `M0<0` while the branch
-gap points exactly toward the target reference.
+condition signs retain their integration uncertainty and status. Common-mode residuals `r_c=r_u` give zero gap error even when individual branch errors are large; the shared target error Q is therefore not bounded by the refined S.
 
 The endpoint test is another new finite-law derivation. With
 `beta=alpha_next/sigma_next^2`, fixed non-target atoms satisfy
@@ -204,7 +205,7 @@ new base designs. PNG/PDF are two formats of the same figure.
 | PF04 | `candidate_matched_log_odds` against `candidate_guided_log_odds` at fixed snapshots | Same destination noise, same law; `candidate_reference` |
 | PF05 | `candidate_current_alignment_cosine` | Equation-64 current alignment, not full-step sign; `candidate_reference` |
 | PF06 | `candidate_dose_log_probability_gain` on the complete fixed lambda grid | Local analytical reference intervention; `candidate_reference` |
-| PF07 | Original `M0` and derived `M1/M2/M3` positive coverage, compared with observed positive gain | Equation 72 plus labeled refinements; `derived_directional_condition` |
+| PF07 | Refined `M0=M1` and separately derived `M1/M2/M3` positive coverage, compared with observed positive gain | Requested signed projected-gap-error refinement plus separately labeled directional refinements; `derived_directional_condition` |
 | PF08 | `candidate_profile_class` and endpoint derivative `C0/C1` coverage | New concavity/endpoint test; `derived_directional_condition` |
 | PF09 | `candidate_next_reference_target_contraction_rmse` | Difference of destination candidate-mean target errors, measured independently of gain; `candidate_reference` |
 | PF10 | Early mean normalized gain versus subsequent actual learned `E_u` improvement; raw/within-prompt figure views and a saved all-time lag-one counterpart | Temporal descriptive association; `candidate_reference` |
@@ -238,7 +239,7 @@ cached Gaussian input tensors. No learned prediction is extrapolated to a new
 SNR.
 
 TR uses two different bounds: `B_obs=A+B` and
-`B_thm^K=[g*e_c+(g-1)*(e_u^K+R_K*(1-p_current^K))]/sqrt(d)`.
+`B_thm^K=[e_c+(g-1)*(e_t^parallel(Delta)+R_K*(1-p_current^K))]/sqrt(d)`.
 Actual endpoint certification requires the structural Equation-5 clean update
 and its numerical check. A final DDPM variance floor remains nonzero even if
 its measured residual rounds to zero. A candidate-bound ratio at zero endpoint

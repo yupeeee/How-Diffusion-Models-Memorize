@@ -151,13 +151,13 @@ def input_recipe():
     return {"payload_version": engine.PAYLOAD_VERSION, "batch_layout": INPUT_BATCH_SIZE,
             "construction_sources": {function.__name__: hashlib.sha256(inspect.getsource(function).encode()).hexdigest()
                                      for function in functions},
-            "support_sources": _sources("support.py", "scheduler_adapter.py", "reference_law.py", "cache_reader.py")}
+            "support_sources": _sources("support.py", "scheduler_adapter.py", "reference_law.py", "cache_reader.py", "branch_gap.py")}
 
 
 def policy_recipe(config):
     from .numerical_refinement import NumericalPolicy
     policy = NumericalPolicy(**{name.removeprefix("numerical_"): config[name] for name in NUMERICAL_KEYS})
-    return {"policy": policy.identity(), "source_code": _sources("numerical_reduce.py", "numerical_refinement.py", "gpu_refinement.py", "gpu_intervals.py", "numerical_screening.py")}
+    return {"policy": policy.identity(), "source_code": _sources("numerical_reduce.py", "numerical_refinement.py", "numerical_screening.py", "gpu_refinement.py", "gpu_intervals.py", "branch_gap.py")}
 
 
 def _input_complete(path, identity):
@@ -383,7 +383,9 @@ def run_precision_analysis(project_root, *, config, refine_only=False, device="a
         devices = tuple(_resolve_theory_devices(device)) if pending else ()
         count = worker_count_for_tasks(devices, len(pending)) if pending else 0
         context, receipts = get_context("spawn"), []
-        with RecordProgress(total=len(tasks), devices=count, context=context) as progress:
+        label = ("Posterior and condition interval refinement"
+                 if config["numerical_max_decimal_products"] > 0 else "Posterior and condition estimates")
+        with RecordProgress(total=len(tasks), devices=count, context=context, label=label) as progress:
             pending_ids = {task["task_hash"] for task in pending}
             for task in tasks:
                 if task["task_hash"] not in pending_ids:

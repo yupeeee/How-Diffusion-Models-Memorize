@@ -1,6 +1,8 @@
 # How Diffusion Models Memorize
 
-Diffusion memorization experiments with preserved generation, SSCD and proximity caches. The default theory stage measures **four main figures** for the mechanism experiments and sixteen mandatory appendix figures. Analysis may run missing learned denoiser probes; plotting uses saved compact scalars only.
+The active contract `projected-gap-error-1` uses the signed error $e_t^{\parallel}(\boldsymbol{\Delta})=\mathbf{u}_t^\top(\boldsymbol{\Delta}_t-\bar{\boldsymbol{\Delta}}_t)$, where $\mathbf{u}_t=\boldsymbol{\Delta}_t/\|\boldsymbol{\Delta}_t\|$ is computed from the actual learned gap. It may be negative and is never replaced by a norm, absolute value or clipped scalar. The margin is $\|\boldsymbol{\Delta}_t\|-e_t^{\parallel}(\boldsymbol{\Delta})-\mathcal{V}_t$. The variation remains $\mathcal{V}_t=[\int_0^1 \mathbf{u}_t^\top(\bar{\mathbf{x}}_{t-1}(\mathbf{x}^{\mathrm{cf}}_{t-1}+sg\kappa_t\boldsymbol{\Delta}_t,\varnothing)-\bar{\mathbf{x}}_t(\mathbf{x}_t,\varnothing))\,ds]_+$ for $t=2,\ldots,T$, with positive part after the signed integral. Exactly zero gap uses the explicit computational extension $\mathbf{u}_t=\mathbf{0}$, $e_t^{\parallel}=0$ and $\mathcal{V}_t=0$, without claiming a unit direction. Older bundles without this scientific contract require `bash run_all.sh --recompute-experiments`; historical gap-error norms cannot be relabeled by `--plot`. The six-figure placement and opacity update alone uses `--plot` on compatible current bundles. Compatible independent model probes and protected generation/SSCD/proximity data remain reusable.
+
+Diffusion memorization experiments with preserved generation, SSCD and proximity caches. The theory stage retains the full measurement suite and publishes **six selected figures** directly under each bundle’s `figures/` directory. Analysis may run missing learned denoiser probes; plotting uses saved compact scalars only.
 
 ## Run
 
@@ -10,14 +12,14 @@ python -m pip install -r requirements.txt
 ./run_all.sh                                 # All four supported configurations
 ./run_all.sh --model sdv1 --scheduler ddim    # One configuration
 ./run_all.sh --recompute-experiments          # Theory only, including missing learned probes
-./run_all.sh --refine-numerics                # Saved evidence arithmetic only; no learned probes
+./run_all.sh --refine-numerics                # Opt-in interval certification; no learned probes
 ./run_all.sh --plot                          # Saved proximity and paper figures
-./run_all.sh --plot --diagnostics            # Also export available behavioral diagnostics
+./run_all.sh --plot --diagnostics            # Compatibility flag; the same six theory figures
 ```
 
 Defaults remain guidance 7.5, 50 updates, 20 evaluation seeds and GMM selection. Supported pairs are SDv1/DDIM, SDv1/DDPM, SDv2/DDIM and RealVis/DDIM. Evaluation uses seeds `0..N-1`; reference selection uses `N..2N-1`. Every evaluation seed of each retained prompt remains included. All wrappers honor `PYTHON`.
 
-`--recompute-experiments` bypasses download, generation, SSCD and proximity. It resumes valid independent probe and analytical shards, and computes missing work. `--refine-numerics` resumes numerical signs and original-condition intervals from existing evidence, bypassing learned probes as well as upstream stages. Missing inputs report an exact recomputation command. Normal derived analysis includes the numerical policy automatically. `--overwrite` retains its explicit upstream regeneration meaning. Plot mode rejects these rebuilding options and never invokes models, raw tensor readers, posterior integration or scalar reducers. It validates all requested bundles before rendering and reports every incompatible configuration before stopping without changing figures. Bare `--plot` selects all four configurations: one stale bundle blocks the matrix even if the others are current. Use `./run_all.sh --model sdv1 --scheduler ddim --plot` to refresh just that saved bundle, or `--model sdv1 --plot` for both SDv1 schedulers. A measurement-source mismatch names the affected bundle and changed files. Missing measurements still require the printed analysis-only command; plotting cannot create a missing guidance-fit table.
+`--recompute-experiments` bypasses download, generation, SSCD and proximity. It resumes valid independent probe and analytical shards, and computes missing work. `--refine-numerics` opts into interval certification from existing evidence, bypassing learned probes as well as upstream stages. It reuses a saved positive operation budget or selects 2,000,000 operations per row when none is saved. Missing inputs report an exact recomputation command. Normal and `--recompute-experiments` analysis use numerical point estimates with interval work disabled, even if the previous bundle enabled it. An explicit `--numerical-max-products` overrides this mode choice; positive values enable intervals and zero disables them. Plotting and validation preserve the saved mode. `--overwrite` retains its explicit upstream regeneration meaning. Plot mode rejects these rebuilding options and never invokes models, raw tensor readers, posterior integration or scalar reducers. It validates all requested bundles before rendering and reports every incompatible configuration before stopping without changing figures. Bare `--plot` selects all four configurations: one stale bundle blocks the matrix even if the others are current. Use `./run_all.sh --model sdv1 --scheduler ddim --plot` to refresh just that saved bundle, or `--model sdv1 --plot` for both SDv1 schedulers. A measurement-source mismatch names the affected bundle and changed files. Missing measurements still require the printed analysis-only command; plotting cannot create a missing guidance-fit table.
 
 ## Direct measurement options
 
@@ -34,18 +36,22 @@ Defaults remain guidance 7.5, 50 updates, 20 evaluation seeds and GMM selection.
 | `--counterfactual-unconditional` | off | Separate learned empty-prompt comparison at matched next inputs; no rollout |
 | `--counterfactual-steps` | `0` | Fixed comma-separated chronological update indices for the enabled supplement |
 | `--probe-batch-size` | 8 | Execution batch size, with bounded CUDA OOM retry |
-| `--reference-law` | `cached-targets` | Uniform distinct compatible cached targets before selection, or `manifest` |
+| `--reference-law` | `cached-targets` | Equal mass per compatible complete cached source record before selection, with duplicate atom masses combined; or explicit `manifest` weights |
 | `--reference-manifest` | absent | Required local atoms/weights/provenance manifest for `manifest` mode |
 | `--reference-snr-decades` | 6 | Depth of the fixed 97-point analytical-only grid below initial SNR; no network calls there |
 | `--terminal-noise-run-alpha` | 0.05 | Predeclared simultaneous terminal Gaussian noise failure budget within one scientific run |
-| `--numerical-max-products` | 2000000 | CUDA interval-operation budget per row; old `--numerical-max-decimal-products` spelling remains an alias; zero disables interval refinement |
+| `--numerical-max-products` | 0 | Optional CUDA interval-operation budget per row; positive values enable certification work; old `--numerical-max-decimal-products` spelling remains an alias |
 | `--numerical-decimal-precision` | legacy metadata only | Computation rejects this override: the GPU enclosure backend uses binary64, not arbitrary Decimal digits |
 | `--numerical-max-variation-nodes` | 65 | Per-row variation enclosure node budget |
 | `--numerical-variation-absolute-width` | 1e-6 | Requested enclosure width in raw latent L2 units |
 
 Gaussian probes use a single fixed bank of the `N` evaluation seeds on every saved native timestep. These are distinct from generated trajectory states and independent forward-target/marginal loss draws. Theorem 1 shows pair-level conditional RMS and a matched unconditional control, with independent forward-loss scale and saved Monte Carlo bootstrap intervals. Pair means use mean terminal SSCD colors; raw seed tails remain in audit tables.
 
-Posterior references, target probabilities and radii use one declared law. By default, the comparison/injection vector `mu` is the average of 10,000 analytical unconditional posterior clean references evaluated at the smallest SNR in the existing analytical-only reference grid on independent standard Gaussian inputs. With `--reference-snr-decades 6`, this SNR is the initial native SNR multiplied by `10^-6`. Only the mean estimator uses this selected level; native prediction timesteps and the reference sweep stay unchanged. The vector is estimated once per bank/schedule/selected-SNR/seed identity, then reused at every measured timestep. Its computation uses every visible CUDA device with one coordinator progress bar; no denoiser or VAE inference is needed. `--mean-source cached-targets` explicitly selects the exact weighted bank mean instead. The cached-target law is qualified as `D_K`; it is not claimed to identify the checkpoint's full training distribution. Exact duplicate target atoms receive equal distinct-atom mass by default. The single-target conditional reference is an assumed idealization; repeated exact prompts with different targets are audited and retained. Legacy `--center` options never redefine this law's exact mean.
+Posterior references, target probabilities and radii use one declared law. By default, the comparison/injection vector `mu` is the average of 10,000 analytical unconditional posterior clean references evaluated at the smallest SNR in the existing analytical-only reference grid on independent standard Gaussian inputs. With `--reference-snr-decades 6`, this SNR is the initial native SNR multiplied by `10^-6`. Only the mean estimator uses this selected level; native prediction timesteps and the reference sweep stay unchanged. The vector is estimated once per bank/schedule/selected-SNR/seed identity, then reused at every measured timestep. Its computation uses every visible CUDA device with one coordinator progress bar; no denoiser or VAE inference is needed. `--mean-source cached-targets` explicitly selects the exact weighted bank mean instead. The cached-target law is qualified as `D_K`; it is not claimed to identify the checkpoint's full training distribution. Each compatible complete cached source record receives equal prior mass before retained-prompt selection. Exact duplicate latent atoms are merged computationally and receive the sum of their record masses: an atom appearing n times among N source records has prior n/N. A source record is counted once by source ID, independently of its number of generation seeds; repeated references to the same source ID do not create extra mass, while distinct source IDs with identical latents do; these frequencies describe the available cache, not unknown full-training frequencies. The single-target conditional reference is an assumed idealization; repeated exact prompts with different targets are audited and retained. Legacy `--center` options never redefine this law's exact mean.
+
+This is the empirical distribution of the available source records. It matches the manuscript's general atom-prior formulation: Equation 58 defines each atom's probability, and Equation 60 multiplies that prior by its Gaussian likelihood. Uniform distinct-atom weighting was a different prior. Explicit manifest weights remain authoritative and are summed when their atoms coincide. The conditional single-target reference remains a separately stated assumption.
+
+Reference-law version `direct-reference-law-2` records `source_record_count` and per-atom `source_record_multiplicities`. Its source-record prior changes the law identity. Posterior means, target probabilities, reference errors, directional variations, and dependent margins/bounds must be recomputed under it; the selected reference-based μ estimator is naturally invalidated by that identity and also reruns. The exact weighted bank mean can change, while the support-only maximum radius does not change when support atoms are unchanged. Run `bash run_all.sh --recompute-experiments` once. Protected generation, SSCD and proximity data remain intact; compatible independent learned measurements remain reusable. Plot-only mode cannot convert historical equal-distinct-atom results into the new prior.
 
 For this finite reference law, each analytical posterior mean converges to the exact weighted atom mean as SNR approaches zero. Using the smallest grid SNR reduces finite-SNR bias, while a finite SNR and sample count can still leave a nonzero offset. The estimator saves its Monte Carlo standard error, even/odd split agreement, selected analytical SNR and native initial noise level separately. The exact atom mean is retained for posterior identities and analytical limits, including the measured bank-to-selected-mean offset in `unconditional_reference_convergence`. Its uncertainty measures finite-sample error only. Neither vector identifies the full training-data mean from this finite bank.
 
@@ -69,11 +75,13 @@ PYTHON=/path/to/python ./run_all.sh --plot
 
 `auto` uses all visible CUDA devices. Theory computation requires NVIDIA CUDA and rejects CPU/MPS execution; there is no CPU numerical fallback. Saved plotting and validation remain available without CUDA. Workers follow the shared device/sharding conventions and send progress to one parent-owned bar per stage. Fast vector cores and four-stage response/motion shards finish before expensive integration. Inference and analytical pools never compete for full model replicas. The direct stage reads each unfinished protected record once for its vector comparisons and preserves independently resumable Proposition 5 integrals. Missing evidence supplements read the preserved record separately for initial/final vectors, without repeating those histories or integrals.
 
-Numerical policy `fixed-cache-numerics-cuda-3` batches the outward-rounded condition screen on the GPU, then refines unresolved rows with CUDA interval arithmetic. Raw input reconstruction, posterior/gain evaluation, variation enclosures, quadrature reductions, and learned-probe error reductions stay on the selected worker GPU. The exp/log enclosures use bounded series, not an assumed one-ULP bound on vendor transcendental kernels. Binary64 enclosures retain unresolved signs whenever precision or work limits prevent resolution; more work does not add decimal digits.
+Numerical policy `fixed-cache-numerics-cuda-8` displays ordinary float64 estimates by default. Condition signs use the saved margin `M=D-E-mathcal{V}`, assessed against the saved signed-integral embedded quadrature error, projection roundoff and float64 subtraction allowance. Clear positive or negative assessments contribute to figure fractions. Near-zero, invalid or missing assessments remain unresolved or unavailable in their audit classifications. The condition-margin scatter displays every finite saved pair as an ordinary dot regardless of that classification. These assessments are numerical estimates, not interval certificates, and do not enable certified implication claims. Turning off interval work does not remove the directional measurements or their quadrature uncertainty.
+
+Optional interval certification (`--refine-numerics`, or an explicit positive `--numerical-max-products`) encloses the current posterior for each saved seed batch once on the GPU. If `D_upper-E_lower<0`, with `E=e_t^parallel(Delta)` and `V>=0`, it certifies a negative condition before constructing endpoint intervals or evaluating their rigorous gains. Independently flagged gains and requested source-radius audits still receive refinement. Rows that continue reuse the same current-posterior/error enclosure. Exp/log enclosures use bounded series; binary64 precision or work limits can leave signs unresolved. Raw vector arithmetic, posterior/gain evaluation, interval quadrature and learned-probe error reductions stay on the selected worker GPU.
 
 Host work remains necessary for file I/O, worker scheduling, small control decisions, scalar table aggregation and plotting. Original seeded CPU random streams are retained as input generation and transferred before numerical evaluation, preserving existing experimental inputs. This is not a promise of zero CPU utilization. See [GPU execution and budget controls](docs/theory/gpu_theory_computation.md).
 
-Numerical receipts are checked before loading raw witnesses, and completed batches remain resumable. The GPU implementation has new source/policy identities; incompatible derived measurements are rebuilt while old caches and protected generation/SSCD/proximity observations remain preserved. `--refine-numerics` can rebuild analytical response shards when its GPU operation budget changes, but cannot backfill learned probes or missing core observations. The first migration from older source receipts may require `--recompute-experiments`.
+Numerical receipts are checked before loading raw witnesses, and completed batches remain resumable. In the optional interval mode, screen work is charged against the same per-row operation budget; an exhausted screen preserves an unresolved condition without restarting the posterior. Zero skips interval work and retains the assessed point-estimate signs. This policy change leaves sufficient-input recipes and compatible measured probes/integrals reusable. The GPU implementation has new source/policy identities; incompatible derived measurements are rebuilt while old caches and protected generation/SSCD/proximity observations remain preserved. `--refine-numerics` can rebuild analytical response shards when its GPU operation budget changes, but cannot backfill learned probes or missing core observations. The first migration from older source receipts may require `--recompute-experiments`.
 
 Probe tasks and analytical recipes have independent cache identities. An integrator change or missing integral does not repeat learned probes. Vector cores and integration payloads have separate completion markers. Missing or changed quadrature reads saved sufficient statistics; within the direct stage, only incomplete vector cores require raw-record reloads. Successful records remain reusable. Changing loss draw count gives new probe task identities; the deterministic RNG prefix is preserved, but partial prefix reuse is not implemented. Rendering styles do not invalidate numerical task caches.
 
@@ -92,119 +100,39 @@ run_config.json, summary.json, audit.json, theory_mean.json
 registry.json, figure_manifest.json, figure_captions.md, figure_retirement.json
 initial.csv, terminal.csv, failed.csv, logical_tables.json
 plot_data/*.csv, audit_data/*.csv
-main/*.png, main/*.pdf
-appendix/*.png, appendix/*.pdf
-diagnostics/                 # Available optional behavioral figures
+figures/<selected-basename>.png, figures/<selected-basename>.pdf
 ```
 
-| Experiment | Main figure stem |
-|---|---|
-| Initial conditional recovery and unconditional baseline | `initial_loss_recovery` |
-| Retained branch-gap contribution and matched evidence, fixed first update | `branch_gap_posterior_response` |
-| Branch-gap dynamics and joint target accuracy | `branch_gap_synchronization` |
-| Actual, observable-bound and reference-bound coverage over latent tolerances | `terminal_bound_coverage` |
+The active paper publisher exports exactly six PNG/single-page-PDF pairs directly in the bundle’s `figures/` directory (12 images). There are no appendix, per-timestep or diagnostic figure exports; `--diagnostics` does not expand this selection. `measurement_registry()` retains the complete 20-measurement inventory and optional scalar audits, while `paper_registry()` selects only these six render entries. Scientific formulas, scalar tables, sample populations and cache identities are unchanged by this curation.
 
-The sixteen mandatory appendix figures have this fixed order:
+| Order | File basename in `figures/` | Saved measurement stem |
+|---|---|---|
+| M1 | `initial_loss_recovery` | `initial_loss_recovery` |
+| M2 | `unconditional_reference_convergence` | `unconditional_reference_convergence` |
+| M3 | `guidance_scale_vs_loss` | `corollary3_guidance_scale_vs_loss` |
+| M4 | `posterior_feedback_condition_margin` | `posterior_feedback_condition_margin` |
+| M5 | `synchronization_bound` | `synchronization_bound` |
+| M6 | `terminal_bound_coverage` | `terminal_bound_coverage` |
 
-| Appendix | Stable stem |
-|---|---|
-| A1 | `initial_unconditional_mean_concentration` |
-| A2 | `unconditional_reference_convergence` |
-| A3 | `posterior_feedback_over_time` |
-| A4 | `posterior_feedback_condition_margin` |
-| A5 | `branch_target_errors` |
-| A6 | `synchronization_bound` |
-| A7 | `branch_gap_peak_step` |
-| A8 | `terminal_observable_bound` |
-| A9 | `final_reproduction_bound` |
-| A10 | `branch_gap_per_prompt` |
-| A11 | `conditional_reference_error_per_prompt` |
-| A12 | `unconditional_reference_error_per_prompt` |
-| A13 | `target_probability_per_prompt` |
-| A14 | `reference_branch_gap_per_prompt` |
-| A15 | `corollary3_guidance_scale_vs_loss` |
-| A16 | `reference_variation_per_prompt` |
+`posterior_feedback_condition_margin` shows every finite saved margin/gain pair from all saved timesteps as an ordinary dot, with terminal SSCD colors where available. Its opacity is exactly 0.01; the shared scatter opacity is 0.8. Numerical signs do not filter points or create Observed/Unresolved markers or legends. Only the pooled PNG/PDF are exported; there are no per-timestep figures. Sign, uncertainty, endpoint-transfer and implication receipts remain unchanged in the audit tables.
 
-A fully eligible default configuration exports twenty PNG/single-page-PDF
-pairs (40 image files): eight in `main/` and thirty-two in `appendix/`, plus
-`figure_captions.md` (41 owned publication files). Missing inputs
-and mathematical inapplicability retain distinct statuses rather than fabricated
-plots. Corollary 3 has the additional fitted-coefficient view A15; its vector audits and the Lemma 4 audits remain. The two
-`branch_gap_motion_high_sscd` and `branch_gap_motion_lower_sscd` render families
-are retired, including from `--diagnostics`; their scalar contributions, identity
-checks and provenance remain. Other explicitly supported saved diagnostics remain
-optional.
+`guidance_scale_vs_loss` changes only the published filename: its compact table and scientific ID remain `corollary3_guidance_scale_vs_loss`. It displays `sqrt(saved x)` for `saved x=L_T(c)/(d*SNR_T)` against the signed joint least-squares guidance coefficient. The square root follows averaging the forward loss over draws; the fitted coefficient and mean-terminal-SSCD color retain the same complete seed cohort. The horizontal reference remains the configured guidance scale.
 
-The two zero-vector companion figures are retired from the default suite and diagnostics; their saved scalar measurements remain intact. New runs reject `--no-mu` and `--center zero`; historical saved configurations remain readable. The selected theory mean still defaults to `reference-min-snr`. The convergence figure keeps its offset guide and caption/audit value without a “Reference limit” legend entry.
+`synchronization_bound` shows only the learned gap norm (solid) and the signed projected-error reference bound (dashed), against chronological `T-t`. The vertical label is `\cdot/\sqrt{d}`. `unconditional_reference_convergence` retains its selected-μ reference comparison and offset guide without a “Reference limit” legend entry.
 
-The new A16 compact table requires one analysis update. Run the following to reduce the saved variation measurements and update the recorded analysis-source receipts:
+`terminal_bound_coverage` retains the same-seed terminal-SSCD groups, three common-population curves per group, prompt-balanced weights, complete tolerance range, independent sampler correction and probability qualifications. Missing scores, empty groups, zero mass and infinite-bound mass remain audited. The baseline, posterior response, branch trajectories, shape/motion, error curves, condition fractions, terminal scatter comparisons and optional counterfactual measurements remain saved but are not exported as additional figures.
+
+The `--counterfactual-unconditional` option remains an explicit analytical/learned measurement task. It does not add a publication figure, even with `--diagnostics`. No new rollout or decode is introduced by this output curation. Selected μ still defaults to `reference-min-snr`; new runs reject `--no-mu` and `--center zero`.
+
+For an otherwise compatible bundle with current scientific receipts, this presentation-only update uses:
 
 ```bash
-bash run_all.sh --recompute-experiments
+bash run_all.sh --model sdv1 --scheduler ddim --plot
 ```
 
-This update reuses compatible saved probes and variation integrals; A16 adds no new integration or model inference. Existing hash guards remain in force. The earlier A15 square-root display alone did not change its saved loss ratio or `corollary3-guidance-fit-1`. After the required compact tables and source receipts are current, `bash run_all.sh --plot` renders them without scientific computation. The command skips upstream generation, SSCD and selection rebuilding. Owned obsolete figure files are retired only after successful publication and ownership/hash checks.
+Omit `--model` and `--scheduler` to request the full configuration matrix; every requested bundle must pass preflight. Copied bundles use `./theory_validation.sh --bundle /path/to/experiment_S0_N20 --plot`. A bundle missing required selected-figure scalars or carrying an outdated scientific contract still requires the reported `--recompute-experiments` command. Plotting does not reconstruct measurements, fit coefficients, evaluate posteriors, or run models.
 
-The baseline report is saved as `initial_baseline_summary.csv` and `.json`.
-The posterior response retains the fixed grid `j/40` plus `1/g`, signed H,
-negative responses and fixed prompt-balanced SSCD groups. Synchronization uses
-chronological prediction indices (0 is initialization), paired D and Q, and no
-fabricated prediction at the final output. Temporal shape is measured, not assumed.
-
-`appendix/branch_gap_per_prompt` shows one curve per retained prompt–target pair: the mean of the saved per-seed branch-gap norms divided by `sqrt(d)`, versus chronological prediction index `T-t`. Color is mean terminal SSCD over the same complete seed population, on the fixed [0,1] scale. Missing or nonfinite seed trajectories are reported explicitly; they are not silently averaged over fewer seeds. This adds a compact scalar reduction without new model inference. Older bundles missing this table require analysis-only reduction via `--recompute-experiments` before `--plot`; compatible measurements are reused.
-
-A11–A13 add the conditional reference error, unconditional reference error, and target posterior probability for each prompt–target pair over chronological pre-update predictions `T-t`. Each curve uses the same full fixed seed cohort at every step and a fixed color from those seeds' mean terminal SSCD. The error curves average saved per-seed normalized norms, with no second division by `sqrt(d)`. Unconditional error compares the learned clean estimate with the posterior clean reference, not with the target. Probability is `mean(exp(direct_target_log_probability))`, computed per seed before averaging, on the actual saved generated trajectory state; `exp(mean(log_probability))` would be a different quantity. Missing or invalid trajectories exclude the entire pair from that figure and are audited; no curve averages a changing subset of seeds. These are compact reductions of existing scalar measurements, with no new posterior or network evaluation.
-
-A14 `reference_branch_gap_per_prompt` shows $\|\bar{\mathbf{x}}_t(c)-\bar{\mathbf{x}}_t(\varnothing)\|/\sqrt{d}$ against $T-t$. The analytical reference difference is conditional minus unconditional at the same actual saved trajectory state and noise level. Under the existing single-target conditional assumption, $\bar{\mathbf{x}}_t(c)=\mathbf{x}^{\star}$, so its norm equals the saved opposite-sign distance $\|\bar{\mathbf{x}}_t(\varnothing)-\mathbf{x}^{\star}\|$. It therefore averages `direct_reference_target_error_rmse` once across the same complete fixed seed cohort, with a fixed color from those seeds' mean terminal SSCD. The learned branch gap, differences of error norms, and the radius-tail upper bound are different quantities and are not used. This adds no posterior or network evaluation; exclusions remain in `audit_data/reference_branch_gap_per_prompt_cohort.csv`.
-
-Older bundles missing A11–A14 require `bash run_all.sh --recompute-experiments` to save their compact tables before `--plot`; compatible existing measurements are reused. Plot-only never reconstructs these summaries.
-
-A15 `corollary3_guidance_scale_vs_loss` plots `sqrt(L_T(c)/(d*SNR_T))` against the signed least-squares guidance coefficient for Corollary 3, Equation 54. The compact `x` remains the genuine forward-target loss mean `L_T(c)/(d*SNR_T)`; only its display takes one square root, after averaging the loss over draws. It is not the mean of per-draw roots. For each prompt–target pair, the fit minimizes `sum_seed ||(xhat_T(c;g)-mu)-a*(x_star-mu)||^2` over one scalar `a`, using the full fixed saved initial seed cohort at the actual first-prediction states. Gaussian-bank match status is recorded separately and is not assumed for this fit. Its shared target direction makes the joint coefficient equal to the arithmetic mean of the signed per-seed coefficients. Color is mean terminal SSCD over exactly those seeds; the labeled horizontal guide shows the actual configured `g`. The fit uses the selected reference mean, retains negative coefficients, and excludes incomplete cohorts or unidentifiable directions with saved reasons. It is a projection of the full guided clean estimate around μ, not a projection of `g*Delta_T`, and it does not estimate or change the configured generation guidance.
-
-A16 `reference_variation_per_prompt` shows $V_t/\sqrt{d}$ against $T-t$, using the saved Equation-15 cross-step reference-variation norm-integral estimates `direct_prop5_variation_rmse` from `matched_updates`. The integrand is defined relative to the current unconditional posterior reference $\bar{\mathbf{x}}_t(\varnothing)$, not the selected global μ. Each prompt–target curve averages the already normalized estimates over the same complete fixed seed cohort at every positive-noise transition, with a fixed color from those seeds’ mean terminal SSCD. Its domain is $t=2,\ldots,T$, or $T-t=0,\ldots,T-2$; no final-prediction or output value is inserted, and a one-step schedule is not applicable. Finite nonnegative original estimates are retained when condition signs or the quadrature budget remain unresolved; refined interval midpoints are not substituted. A missing, invalid or structurally inapplicable required estimate excludes the entire curve with an explicit reason. `audit_data/reference_variation_per_prompt_cohort.csv` records cohort exclusions and numerical-status counts, while `audit_data/feedback_endpoints.csv` retains the source status, error estimates and bounds. These are numerical estimates, not certified exact integrals. The new compact reduction performs no integration, posterior evaluation or model inference.
-
-The compact fit table and `audit_data/corollary3_guidance_scale_vs_loss_cohort.csv` are written during analysis; `--plot` never joins losses, fits vectors, or silently substitutes the old standalone Corollary 3 output.
-
-The terminal primary compares same-seed terminal SSCD > 0.75 and SSCD <= 0.75.
-Gold/purple identify the groups; solid/dashed/dash-dot lines identify actual error,
-the corrected observable bound, and the corrected reference bound. Each group uses
-one common eligible sample population and prompt-balanced weights for its three
-curves; both groups share the full tolerance axis. Group probabilities normalize
-separately, with equal mass per represented prompt divided among its eligible seeds.
-Exact-threshold scores belong to the lower group. Missing scores, empty groups,
-zero mass and infinite-bound mass retain explicit audits. The original pooled
-curves remain in `audit_data/terminal_pooled_cdf.csv`. Older bundles containing
-only pooled coverage require `--recompute-experiments` to save the group summaries
-from compatible cached measurements before `--plot`; plotting never computes them. A8 and A9 retain the separate observable/reference scatter
-comparisons, including loose bounds. Non-clean samplers require the independently
-qualified finite-step correction; supported Gaussian corrections retain their
-saved probability contract. Row-level inequalities remain numerical audits;
-curve ordering alone does not establish them.
-
-The optional learned supplement is a separate, explicit inference task:
-
-```bash
-./run_all.sh --model sdv1 --scheduler ddim --recompute-experiments --device auto --counterfactual-unconditional
-```
-
-It uses matched next inputs at a fixed snapshot, not a new rollout or decode.
-`--plot --diagnostics` renders this supplement under `diagnostics/` only when
-counterfactual analysis was enabled in the saved bundle and its data are available.
-It never adds an appendix figure or backfills inference; the paper suite stays
-four main figures and sixteen appendices.
-
-Existing learned tasks and direct analytical/integration caches retain their
-identities. New bounded analytical tasks use
-`theory_measurements/reference_analytical/<hash>/`; additive geometry/terminal
-scalars use `theory_measurements/evidence_supplements/<hash>/`. Missing supplements
-read only preserved vectors and existing scalars; they do not repeat compatible
-model probes or original variation integration. No active stage creates `theory_v2`.
-Numerical sufficient inputs and policy retries are separately resumable under
-`theory_measurements/numerical_refinement/`; old classifications remain preserved.
-Paper bundle schema 5 and compact metric schema `four-stage-evidence-1` remain
-unchanged for this curation. Presentation registry `four-stage-paper-curation-13`
-reuses compatible saved `plot_data/<stable_stem>.csv` and scientific hashes.
-Placement and legend changes alone do not require measurement recomputation.
+The `projected-gap-error-1` scientific contract, empirical source-record prior, numerical-policy identities and compact metric schema `four-stage-evidence-projected-gap-error-1` are unchanged by the six-figure selection. Presentation registry `four-stage-paper-curation-20` reuses the existing `plot_data/<scientific-stem>.csv` files. The earlier signed-error or prior-law changes still require analysis when their receipts are absent; the opacity and output-path changes alone do not.
 
 Theory uses one parent-owned tqdm bar for live record progress, without periodic “still running” messages. Aggregation, plot-input, and publication stages report their start and completion once, including elapsed time on completion. Saving scalar tables and publication metadata uses one progress bar that advances per completed file and shows the current filename. Figure preparation has its own progress bar; PNG/PDF export advances once per saved file and shows the current filename.
 

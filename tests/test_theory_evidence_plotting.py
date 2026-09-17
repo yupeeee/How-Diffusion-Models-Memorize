@@ -11,7 +11,7 @@ import pytest
 from utils.experiments.plotting import PLOT_STYLE
 from utils.experiments.theory import paper_plotting as plotting
 from utils.experiments.theory.contracts import TheoryError
-from utils.experiments.theory.paper_contracts import load_paper_inputs
+from tests.test_theory_paper_plotting import load_measurement_inputs as load_paper_inputs
 from utils.experiments.theory.paper_registry import evidence_registry as paper_registry
 from tests.test_theory_paper_plotting import compact_fixture
 
@@ -235,6 +235,29 @@ def test_synchronization_draws_all_three_quantities_and_only_joint_error_iqr(tmp
         assert ax.get_ylabel() == "Target error, gap, or bound (RMSE)"
         assert audit["shaded_quantities"] == ["joint_error"]
         assert len([artist for artist in ax.get_children() if isinstance(artist, Legend)]) == 2
+    finally:
+        plt.close(fig)
+
+
+def test_synchronization_renderer_preserves_Q_above_tightened_D_bound(tmp_path):
+    data = inputs(tmp_path)
+    stem = "lemma6_target_specific_synchronization"
+    frame = data[2][stem].copy(deep=True)
+    values = np.where(frame.metric.eq("joint_error"), 4., 0.)
+    for column in ("median", "q25", "q75", "minimum", "maximum"):
+        frame[column] = values
+    metadata = deepcopy(data[1]["figures"][stem])
+    metadata.pop("y_limits", None)
+    before = frame.copy(deep=True)
+    fig, audit = draw(data, stem, frame=frame, metadata=metadata)
+    try:
+        ax = fig.axes[0]
+        for line, expected in zip(ax.lines[:6], (4., 0., 0., 4., 0., 0.), strict=True):
+            assert np.asarray(line.get_ydata()).size > 0
+            np.testing.assert_array_equal(line.get_ydata(), np.full_like(line.get_ydata(), expected))
+        assert ax.get_ylim()[0] == 0 and ax.get_ylim()[1] > 4.
+        assert audit["shaded_quantities"] == ["joint_error"]
+        assert frame.equals(before)
     finally:
         plt.close(fig)
 

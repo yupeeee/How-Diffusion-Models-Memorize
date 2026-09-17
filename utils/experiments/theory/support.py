@@ -1,4 +1,4 @@
-"""Explicit uniform finite-support Gaussian posterior; no learned posterior claim.
+"""Explicit weighted finite-support Gaussian posterior; no learned posterior claim.
 
 Storage is O(M*d). Evaluation uses candidate and query chunks with matrix
 multiplication: O(Q*M*d) work and O(query_chunk*(candidate_chunk+d)) scratch.
@@ -32,6 +32,7 @@ class FiniteSupport:
         candidate_chunk=256,
         query_chunk=32,
         weights=None,
+        source_record_counts=None,
     ):
         self.atoms = torch.as_tensor(atoms).detach().to(dtype=torch.float64)
         self.latent_shape = tuple(self.atoms.shape[1:])
@@ -44,6 +45,10 @@ class FiniteSupport:
         self.candidate_chunk, self.query_chunk = int(candidate_chunk), int(query_chunk)
         if min(self.candidate_chunk, self.query_chunk) < 1:
             raise ValueError("Support chunk sizes must be positive")
+        self.weight_definition = (
+            "predeclared_uniform_unique_atoms" if weights is None
+            else "predeclared_explicit_weights"
+        )
         if weights is None:
             self.weights = torch.full(
                 (self.size,),
@@ -62,6 +67,24 @@ class FiniteSupport:
                     "Every declared support weight must be finite and positive"
                 )
             self.weights = self.weights / self.weights.sum()
+        self.source_record_counts = None
+        if source_record_counts is not None:
+            counts = list(source_record_counts)
+            if len(counts) != self.size or any(type(value) is not int or value < 1 for value in counts):
+                raise ValueError("Source-record multiplicities must be positive integers per atom")
+            observed = [0] * self.size
+            for index in self.aliases.values():
+                if index < 0 or index >= self.size:
+                    raise ValueError("Source-record alias points outside the declared support")
+                observed[index] += 1
+            if observed != counts:
+                raise ValueError("Source-record multiplicities differ from distinct source-ID aliases")
+            expected = torch.tensor(counts, dtype=torch.float64, device=self.flat.device)
+            expected = expected / expected.sum()
+            if not torch.allclose(self.weights, expected, rtol=4 * torch.finfo(torch.float64).eps, atol=0):
+                raise ValueError("Support weights differ from source-record empirical multiplicities")
+            self.source_record_counts = counts
+            self.weight_definition = "equal_mass_per_source_record_aggregated_by_exact_latent"
         self.log_weights = self.weights.log()
 
     @classmethod
@@ -75,6 +98,10 @@ class FiniteSupport:
     ):
         """Collapse identical latent atoms; conflicting repeated IDs/identities fail.
 
+        With omitted weights each distinct source ID contributes equal mass.
+        Exact duplicate atoms aggregate these masses; repeating the same ID does
+        not introduce another source record. Explicit weights retain the caller's
+        existing per-deduplicated-atom weight convention.
         Identities, when provided, map candidate IDs to target-image identities.
         Different aliases for one identity must have identical cached latents.
         """
@@ -117,6 +144,12 @@ class FiniteSupport:
                 atoms.append(atom.contiguous())
                 atom_ids.append(key)
             aliases[key] = hashes[digest]
+        if kwargs.get("weights") is None:
+            counts = [0] * len(atoms)
+            for index in aliases.values():
+                counts[index] += 1
+            kwargs["weights"] = counts
+            kwargs["source_record_counts"] = counts
         return cls(torch.stack(atoms), atom_ids, aliases, **kwargs)
 
     def metadata(self):
@@ -130,11 +163,11 @@ class FiniteSupport:
             "atom_ids": self.atom_ids,
             "aliases": self.aliases,
             "weights": self.weights.detach().cpu().tolist(),
-            "weight_definition": (
-                "predeclared_uniform_unique_atoms"
-                if bool(torch.all(self.weights == self.weights[0]))
-                else "predeclared_explicit_weights"
+            "weight_definition": self.weight_definition,
+            "source_record_count": (
+                None if self.source_record_counts is None else sum(self.source_record_counts)
             ),
+            "source_record_multiplicities": self.source_record_counts,
             "deduplication": "exact_float64_latent_values_and_consistent_target_identity",
             "tensor_sha256": _tensor_hash(self.atoms),
             "source_qualification": "all_compatible_recovered_cached_targets; not_known_training_distribution",

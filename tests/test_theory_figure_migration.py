@@ -10,7 +10,7 @@ from utils.experiments.theory import paper_contracts as contracts, paper_plottin
 from utils.experiments.theory.contracts import TheoryError
 from utils.experiments.theory.paper_registry import (
     FIGURE_RETIREMENTS, REGISTRY_VERSION, RETIRED_RENDER_STEMS,
-    paper_registry, previous_paper_registry, _ZERO_BASELINE_FIGURES,
+    paper_registry, measurement_registry, previous_paper_registry, _ZERO_BASELINE_FIGURES,
 )
 
 
@@ -26,18 +26,30 @@ def _old_bundle(bundle, *, diagnostics=False):
                     saved_prompt_curve=True, saved_grouped_coverage=True, saved_zero_baselines=True,
                     saved_prompt_reference_curves=True, saved_reference_gap_curve=True, saved_guidance_fit=True, saved_reference_variation=True)
     files = {}
-    for entry in [*previous_paper_registry(diagnostics=diagnostics), *_ZERO_BASELINE_FIGURES]:
+    historical = [*previous_paper_registry(diagnostics=diagnostics),
+                  *measurement_registry(diagnostics=diagnostics), *_ZERO_BASELINE_FIGURES]
+    for entry in historical:
         for name in entry["outputs"].values():
             path = bundle / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(("old reviewed export: " + name).encode())
             files[name] = file_sha256(path)
+    companions = []
+    for step in (0, 1):
+        outputs = {suffix: f"appendix/posterior_feedback_condition_margin/step_{step:03d}.{suffix}"
+                   for suffix in ("png", "pdf")}
+        for name in outputs.values():
+            path = bundle / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(("old reviewed timestep: " + name).encode())
+            files[name] = file_sha256(path)
+        companions.append({"stem": f"posterior_feedback_condition_margin/step_{step:03d}", "outputs": outputs})
     (bundle / "figure_captions.md").write_text("Previous reviewed captions\n")
     files["figure_captions.md"] = file_sha256(bundle / "figure_captions.md")
-    previous = {"complete": True, "registry_version": "four-stage-evidence-1", "files": files}
+    previous = {"complete": True, "registry_version": "four-stage-paper-curation-19", "files": files,
+                "figures": historical, "timestep_figures": companions}
     atomic_write_json(bundle / "figure_manifest.json", previous)
-    atomic_write_json(bundle / "registry.json", {"version": "four-stage-evidence-1",
-                                                 "figures": previous_paper_registry(diagnostics=diagnostics)})
+    atomic_write_json(bundle / "registry.json", {"version": "four-stage-paper-curation-19", "figures": historical})
     return previous
 
 
@@ -55,9 +67,9 @@ def _small_exports(monkeypatch, *, fail_pdf=False):
     monkeypatch.setattr(paper_plotting.plt, "close", lambda figure: None)
 
 
-def test_saved_fifteen_figure_bundle_migrates_without_touching_science_and_is_idempotent(tmp_path, monkeypatch):
+def test_saved_twenty_figure_bundle_migrates_to_six_without_touching_science_and_is_idempotent(tmp_path, monkeypatch):
     bundle = tmp_path / "paper"
-    _old_bundle(bundle)
+    previous = _old_bundle(bundle)
     _small_exports(monkeypatch)
     for name in ("plot_data/branch_gap_motion_high_sscd.csv", "audit_data/branch_motion.csv",
                  "cached_images/keep.png", "proximity.csv", "user_notes.txt"):
@@ -70,20 +82,27 @@ def test_saved_fifteen_figure_bundle_migrates_without_touching_science_and_is_id
                  and not name.startswith(("main/", "appendix/", "diagnostics/"))}
     manifest = contracts.render_saved_paper(bundle)
     images = {name for name in manifest["files"] if Path(name).suffix in {".png", ".pdf"}}
-    assert len(images) == 40
-    assert sum(name.startswith("main/") for name in images) == 8
-    assert sum(name.startswith("appendix/") for name in images) == 32
-    for specification in FIGURE_RETIREMENTS:
-        for suffix in ("png", "pdf"):
-            assert not (bundle / specification["old_category"] / f"{specification['stem']}.{suffix}").exists()
+    expected = {name for entry in paper_registry() for name in entry["outputs"].values()}
+    assert images == expected and len(images) == 12
+    assert all(name.startswith("figures/") for name in images)
+    assert len(manifest["figures"]) == 6 and not manifest.get("timestep_figures", [])
+    assert "figures/guidance_scale_vs_loss.png" in images
+    assert "figures/corollary3_guidance_scale_vs_loss.png" not in images
+    old_images = {name for name in previous["files"] if Path(name).suffix in {".png", ".pdf"}}
+    assert all(not (bundle / name).exists() for name in old_images)
     assert {name: _snapshot(bundle)[name] for name in protected} == protected
     ledger = read_json(bundle / "figure_retirement.json")
     removed = [row for row in ledger["records"] if row["status"] == "removed"]
-    assert len(removed) == 12  # two moved pairs and four retired pairs
-    assert {row["stable_stem"] for row in removed} == {
-        "terminal_bound_coverage", "final_reproduction_bound", *RETIRED_RENDER_STEMS}
+    assert {row["old_path"] for row in removed} == old_images
     assert all(row["sha256"] for row in removed)
-    assert read_json(bundle / "registry.json")["version"] == REGISTRY_VERSION
+    alias_move = next(row for row in removed if row["old_path"] == "appendix/corollary3_guidance_scale_vs_loss.png")
+    assert alias_move["destination"] == "figures/guidance_scale_vs_loss.png"
+    registry = read_json(bundle / "registry.json")
+    assert registry["version"] == REGISTRY_VERSION
+    assert len(registry["figures"]) == 6
+    assert registry["measurement_inventory"] == measurement_registry(diagnostics=True)
+    assert {"branch_gap_per_prompt", "reference_variation_per_prompt"}.issubset(
+        entry["stem"] for entry in registry["measurement_inventory"])
     first = _snapshot(bundle)
     contracts.render_saved_paper(bundle)
     assert _snapshot(bundle) == first
@@ -150,7 +169,7 @@ def test_migration_rollback_preserves_previous_images_and_publication_metadata(t
 
 def test_moved_files_require_both_owned_hash_valid_replacement_formats(tmp_path):
     old = "appendix/terminal_bound_coverage"
-    new = "main/terminal_bound_coverage"
+    new = "figures/terminal_bound_coverage"
     previous = {"files": {}}
     current = {"complete": True, "files": {}}
     for stem, manifest in ((old, previous), (new, current)):
@@ -180,20 +199,23 @@ def test_unrecognized_presentation_metadata_is_preserved_and_rolls_back(tmp_path
     assert _snapshot(bundle) == before
 
 
-def test_dormant_owned_diagnostic_can_be_requested_again(tmp_path, monkeypatch):
+def test_unselected_owned_diagnostics_retire_even_when_diagnostics_requested(tmp_path, monkeypatch):
     bundle = tmp_path / "paper"
     _old_bundle(bundle, diagnostics=True)
     _small_exports(monkeypatch)
-    entries = [entry for entry in paper_registry(diagnostics=True) if entry["category"] == "diagnostics"]
+    entries = [entry for entry in measurement_registry(diagnostics=True) if entry["category"] == "diagnostics"]
     assert entries
-    dormant = next(iter(entries[0]["outputs"].values()))
-    before = file_sha256(bundle / dormant)
-    first = contracts.render_saved_paper(bundle)
-    assert first["preserved_files"][dormant] == before
-    assert file_sha256(bundle / dormant) == before
+    previous_images = {name for entry in entries for name in entry["outputs"].values()}
+    scientific_before = {name: digest for name, digest in _snapshot(bundle).items()
+                         if name.startswith(("plot_data/", "audit_data/"))}
+    first = contracts.render_saved_paper(bundle, diagnostics=True)
+    assert len(first["figures"]) == 6
+    assert all(not (bundle / name).exists() for name in previous_images)
+    assert previous_images.isdisjoint(first["preserved_files"])
+    assert {name: _snapshot(bundle)[name] for name in scientific_before} == scientific_before
     second = contracts.render_saved_paper(bundle, diagnostics=True)
-    assert dormant in second["files"] and dormant not in second["preserved_files"]
-    assert not any(Path(name).stem in RETIRED_RENDER_STEMS for name in second["files"])
+    assert set(second["files"]) == set(first["files"])
+    assert not any(name.startswith("diagnostics/") for name in second["files"])
 
 
 def test_copied_nondefault_bundle_migrates_without_devices_models_raw_reads_or_reduction(tmp_path, monkeypatch):
@@ -263,18 +285,19 @@ def test_required_missing_scalar_is_distinct_from_mathematical_inapplicability(t
     _old_bundle(bundle)
     _small_exports(monkeypatch)
     summary = read_json(bundle / "summary.json")
-    summary["figures"]["final_reproduction_bound"].update(status=status, reason="explicit saved scope reason")
+    summary["figures"]["terminal_bound_coverage"].update(status=status, reason="explicit saved scope reason")
     atomic_write_json(bundle / "summary.json", summary)
     if status == "unavailable":
-        with pytest.raises(TheoryError, match=r"final_reproduction_bound.*explicit saved scope reason.*--recompute-experiments"):
+        with pytest.raises(TheoryError, match=r"terminal_bound_coverage.*explicit saved scope reason.*--recompute-experiments"):
             contracts.render_saved_paper(bundle)
     else:
         manifest = contracts.render_saved_paper(bundle)
-        entry = next(row for row in manifest["figures"] if row["stem"] == "final_reproduction_bound")
+        entry = next(row for row in manifest["figures"] if row["stem"] == "terminal_bound_coverage")
         assert entry["status"] == "not_applicable" and entry["outputs"] == {}
-        assert (bundle / "main/final_reproduction_bound.png").exists()
+        assert (bundle / "main/terminal_bound_coverage.png").exists()
         ledger = read_json(bundle / "figure_retirement.json")
-        assert any(row["decision"] == "preserved_missing_replacement_pair" for row in ledger["records"])
+        assert any(row["old_path"] == "main/terminal_bound_coverage.png"
+                   and row["decision"] == "preserved_missing_replacement_pair" for row in ledger["records"])
 
 
 @pytest.mark.parametrize("category", ["main", "diagnostics"])
@@ -320,28 +343,22 @@ def test_peak_descriptive_reduction_keeps_unresolved_mass_and_original_histogram
     assert frame.equals(before)
 
 
-def test_legacy_bundle_missing_prompt_curve_requires_explicit_analysis_without_plot_computation(tmp_path, monkeypatch):
+def test_unselected_missing_prompt_curve_does_not_block_selected_publication(tmp_path, monkeypatch):
     bundle = compact_fixture(tmp_path / "old", previous_registry=True, saved_grouped_coverage=True,
-                             saved_zero_baselines=True, saved_prompt_reference_curves=True, saved_reference_gap_curve=True, saved_guidance_fit=True, saved_reference_variation=True)
-    before = _snapshot(bundle)
-    def forbidden(*args, **kwargs):
-        raise AssertionError("missing saved prompt curve triggered plotting or numerical reduction")
-    monkeypatch.setattr(paper_plotting, "_draw", forbidden)
-    with pytest.raises(TheoryError, match="branch_gap_per_prompt") as captured:
-        contracts.render_saved_paper(bundle)
-    assert "--recompute-experiments" in str(captured.value)
-    assert "--model sdv1" in str(captured.value)
-    assert _snapshot(bundle) == before
+                             saved_zero_baselines=True, saved_prompt_reference_curves=True, saved_reference_gap_curve=True,
+                             saved_guidance_fit=True, saved_reference_variation=True)
+    assert "branch_gap_per_prompt" not in read_json(bundle / "summary.json")["plot_data"]
+    _assert_unselected_inputs_remain_unneeded(bundle, monkeypatch)
 
 
-def test_previous_curated_registry_migrates_when_prompt_curve_is_already_saved(tmp_path, monkeypatch):
+def test_previous_curated_registry_migrates_without_drawing_unselected_prompt_curves(tmp_path, monkeypatch):
     bundle = compact_fixture(tmp_path / "curated")
-    old_entries = [entry for entry in paper_registry() if entry["stem"] != "branch_gap_per_prompt"]
-    atomic_write_json(bundle / "registry.json", {"version": "four-stage-paper-curation-2", "figures": old_entries})
+    atomic_write_json(bundle / "registry.json", {"version": "four-stage-paper-curation-19", "figures": measurement_registry()})
     _small_exports(monkeypatch)
     manifest = contracts.render_saved_paper(bundle)
-    assert manifest["requested_counts"] == {"main": 4, "appendix": 16, "diagnostics": 0}
-    assert "appendix/branch_gap_per_prompt.png" in manifest["files"]
+    assert manifest["requested_counts"] == {"main": 6, "appendix": 0, "diagnostics": 0, "timestep_figures": 0}
+    assert "appendix/branch_gap_per_prompt.png" not in manifest["files"]
+    assert "branch_gap_per_prompt" in read_json(bundle / "summary.json")["plot_data"]
     assert read_json(bundle / "registry.json")["version"] == REGISTRY_VERSION
 
 
@@ -417,96 +434,47 @@ def test_missing_retired_zero_measurements_do_not_block_saved_plotting(tmp_path,
         raise AssertionError("Missing retired zero norms triggered scientific recomputation")
     monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", forbidden)
     manifest = contracts.render_saved_paper(bundle)
-    assert manifest["requested_counts"] == {"main": 4, "appendix": 16, "diagnostics": 0}
+    assert manifest["requested_counts"] == {"main": 6, "appendix": 0, "diagnostics": 0, "timestep_figures": 0}
     assert zero_stems.isdisjoint(entry["stem"] for entry in manifest["figures"])
     assert {name: _snapshot(bundle)[name] for name in before} == before
     assert not list(bundle.parent.glob(".old_zero.stage-*"))
 
 
-def test_legacy_bundle_missing_prompt_reference_curves_requires_analysis_and_preserves_bundle(tmp_path, monkeypatch):
-    from utils.experiments.theory import four_stage_figures
-
+def test_unselected_missing_prompt_reference_curves_do_not_trigger_analysis(tmp_path, monkeypatch):
     bundle = compact_fixture(tmp_path / "old_prompt_references", previous_registry=True,
                              saved_prompt_curve=True, saved_grouped_coverage=True,
-                             saved_zero_baselines=True, saved_prompt_reference_curves=False, saved_reference_gap_curve=True, saved_guidance_fit=True, saved_reference_variation=True)
-    expected_command = contracts.recompute_command(read_json(bundle / "run_config.json"))
-    before = _snapshot(bundle)
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Missing per-prompt reference scalars triggered rendering or scientific work")
-
-    monkeypatch.setattr(paper_plotting, "_draw", forbidden)
-    monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", forbidden)
-    monkeypatch.setattr(contracts, "staged_publication", forbidden)
-    with pytest.raises(TheoryError, match="conditional_reference_error_per_prompt") as captured:
-        contracts.render_saved_paper(bundle)
-    assert str(captured.value).endswith("Run " + expected_command)
-    assert "--recompute-experiments" in expected_command
-    assert _snapshot(bundle) == before
-    assert not list(bundle.parent.glob(".old_prompt_references.stage-*"))
-    assert not list(bundle.parent.glob(".old_prompt_references.backup-*"))
+                             saved_zero_baselines=True, saved_prompt_reference_curves=False,
+                             saved_reference_gap_curve=True, saved_guidance_fit=True, saved_reference_variation=True)
+    _assert_unselected_inputs_remain_unneeded(bundle, monkeypatch)
 
 
 @pytest.mark.parametrize("stem", ["conditional_reference_error_per_prompt",
                                   "unconditional_reference_error_per_prompt",
                                   "target_probability_per_prompt",
                                   "reference_branch_gap_per_prompt"])
-def test_each_prompt_reference_curve_requires_its_own_saved_values(tmp_path, monkeypatch, stem):
-    """A branch-gap curve cannot stand in for one of the added measurements."""
+def test_unselected_prompt_reference_columns_are_not_required_for_publication(tmp_path, monkeypatch, stem):
     import pandas as pd
 
     bundle = compact_fixture(tmp_path / "missing_prompt_values")
     summary = read_json(bundle / "summary.json")
-    entry = next(entry for entry in paper_registry() if entry["stem"] == stem)
+    entry = next(entry for entry in measurement_registry() if entry["stem"] == stem)
     path = bundle / entry["source_table"]
     wrong = pd.read_csv(path).rename(columns={entry["value_column"]: "mean_gap_rmse"})
     specification = contracts.write_plot_table(wrong, path)
     summary["plot_data"][stem] = {"path": entry["source_table"], **specification}
     summary["numerical_files"][entry["source_table"]] = specification["sha256"]
     atomic_write_json(bundle / "summary.json", summary)
-    before = _snapshot(bundle)
-    expected_command = contracts.recompute_command(read_json(bundle / "run_config.json"))
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("A missing scalar column reached the renderer or publication")
-
-    monkeypatch.setattr(paper_plotting, "_draw", forbidden)
-    monkeypatch.setattr(contracts, "staged_publication", forbidden)
-    with pytest.raises(TheoryError, match="Missing required paper columns for " + stem) as captured:
-        contracts.render_saved_paper(bundle)
-    assert entry["value_column"] in str(captured.value)
-    assert str(captured.value).endswith("Run " + expected_command)
-    assert _snapshot(bundle) == before
+    _assert_unselected_inputs_remain_unneeded(bundle, monkeypatch)
 
 
 
-def test_saved_prompt_reference_curves_do_not_substitute_for_missing_reference_gap(tmp_path, monkeypatch):
-    from utils.experiments.theory import four_stage_figures
-
+def test_unselected_missing_reference_gap_does_not_trigger_analysis(tmp_path, monkeypatch):
     bundle = compact_fixture(tmp_path / "old_reference_gap", previous_registry=True,
                              saved_prompt_curve=True, saved_grouped_coverage=True,
                              saved_zero_baselines=True, saved_prompt_reference_curves=True,
                              saved_reference_gap_curve=False, saved_guidance_fit=True, saved_reference_variation=True)
-    summary = read_json(bundle / "summary.json")
-    assert {"conditional_reference_error_per_prompt", "unconditional_reference_error_per_prompt",
-            "target_probability_per_prompt"}.issubset(summary["plot_data"])
-    assert "reference_branch_gap_per_prompt" not in summary["plot_data"]
-    before = _snapshot(bundle)
-    expected_command = contracts.recompute_command(read_json(bundle / "run_config.json"))
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Missing saved reference gap triggered rendering, scientific work, or publication")
-
-    monkeypatch.setattr(paper_plotting, "_draw", forbidden)
-    monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", forbidden)
-    monkeypatch.setattr(contracts, "staged_publication", forbidden)
-    with pytest.raises(TheoryError, match="reference_branch_gap_per_prompt") as captured:
-        contracts.render_saved_paper(bundle)
-    assert str(captured.value).endswith("Run " + expected_command)
-    assert "--recompute-experiments" in expected_command
-    assert _snapshot(bundle) == before
-    assert not list(bundle.parent.glob(".old_reference_gap.stage-*"))
-    assert not list(bundle.parent.glob(".old_reference_gap.backup-*"))
+    assert "reference_branch_gap_per_prompt" not in read_json(bundle / "summary.json")["plot_data"]
+    _assert_unselected_inputs_remain_unneeded(bundle, monkeypatch)
 
 
 @pytest.mark.parametrize("stem", ["initial_unconditional_mean_concentration_zero",
@@ -563,26 +531,54 @@ def test_missing_guidance_fit_requires_analysis_and_never_reuses_injection_plot(
     assert not list(bundle.parent.glob(".missing_guidance_fit.backup-*"))
 
 
-def test_missing_reference_variation_requires_saved_transition_reduction(tmp_path, monkeypatch):
-    from utils.experiments.theory import four_stage_figures
-
+def test_unselected_missing_reference_variation_does_not_trigger_reduction(tmp_path, monkeypatch):
     bundle = compact_fixture(tmp_path / "missing_reference_variation", previous_registry=True,
                              saved_prompt_curve=True, saved_grouped_coverage=True,
                              saved_prompt_reference_curves=True, saved_reference_gap_curve=True,
                              saved_guidance_fit=True, saved_reference_variation=False)
-    before = _snapshot(bundle)
-    expected_command = contracts.recompute_command(read_json(bundle / "run_config.json"))
+    assert "reference_variation_per_prompt" not in read_json(bundle / "summary.json")["plot_data"]
+    _assert_unselected_inputs_remain_unneeded(bundle, monkeypatch)
 
+
+def _assert_unselected_inputs_remain_unneeded(bundle, monkeypatch):
+    from utils.experiments.theory import four_stage_figures
+
+    protected = {name: digest for name, digest in _snapshot(bundle).items()
+                 if name.startswith(("plot_data/", "audit_data/"))
+                 or name in {"run_config.json", "summary.json", "audit.json"}}
+    _small_exports(monkeypatch)
     def forbidden(*args, **kwargs):
-        raise AssertionError("Missing variation curve triggered integration, reduction or publication")
-
-    monkeypatch.setattr(paper_plotting, "_draw", forbidden)
+        raise AssertionError("Unselected compact inputs triggered scientific reduction")
     monkeypatch.setattr(four_stage_figures, "build_four_stage_plot_inputs", forbidden)
-    monkeypatch.setattr(contracts, "staged_publication", forbidden)
-    with pytest.raises(TheoryError, match="reference_variation_per_prompt") as captured:
-        contracts.render_saved_paper(bundle)
-    assert str(captured.value).endswith("Run " + expected_command)
-    assert "--recompute-experiments" in expected_command
-    assert _snapshot(bundle) == before
-    assert not list(bundle.parent.glob(".missing_reference_variation.stage-*"))
-    assert not list(bundle.parent.glob(".missing_reference_variation.backup-*"))
+    manifest = contracts.render_saved_paper(bundle)
+    assert len(manifest["figures"]) == 6
+    assert not manifest.get("timestep_figures", [])
+    assert {name: _snapshot(bundle)[name] for name in protected} == protected
+
+
+@pytest.mark.parametrize("disposition", ["unowned", "modified"])
+def test_old_timestep_exports_retire_only_with_matching_ownership(tmp_path, monkeypatch, disposition):
+    bundle = tmp_path / "old_steps"
+    previous = _old_bundle(bundle)
+    relative = "appendix/posterior_feedback_condition_margin/step_000.png"
+    if disposition == "unowned":
+        del previous["files"][relative]
+    else:
+        (bundle / relative).write_bytes(b"user-edited step image")
+    atomic_write_json(bundle / "figure_manifest.json", previous)
+    protected = (bundle / relative).read_bytes()
+    unknown = bundle / "appendix/posterior_feedback_condition_margin/notes.png"
+    unknown.write_bytes(b"user image in a historical timestep folder")
+    _small_exports(monkeypatch)
+    manifest = contracts.render_saved_paper(bundle)
+    assert (bundle / relative).read_bytes() == protected
+    assert unknown.read_bytes() == b"user image in a historical timestep folder"
+    assert not (bundle / "appendix/posterior_feedback_condition_margin/step_000.pdf").exists()
+    assert not manifest.get("timestep_figures", [])
+    assert len(manifest["figures"]) == 6
+    rows = {row["old_path"]: row for row in read_json(bundle / "figure_retirement.json")["records"]}
+    assert rows[relative]["decision"] == "preserved_" + disposition
+    assert unknown.relative_to(bundle).as_posix() not in rows
+    first = _snapshot(bundle)
+    contracts.render_saved_paper(bundle)
+    assert _snapshot(bundle) == first
