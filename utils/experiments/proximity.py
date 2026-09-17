@@ -55,6 +55,7 @@ from .figure_paths import publication_directory
 from .plotting import (
     AnalysisStatistics,
     EXPERIMENT_SPEARMAN_COLUMN,
+    FIGURE_DPI,
     PROXIMITY_FIGURES,
     PROXIMITY_PDF_FIGURES,
     PROXIMITY_PDF_FILENAMES,
@@ -1549,14 +1550,14 @@ def _example_pdf(content: bytes) -> bytes:
     with Image.open(io.BytesIO(content)) as source:
         source.load()
         width, height = source.size
-        figure = Figure(figsize=(width / 150., height / 150.), dpi=150, facecolor="white")
+        figure = Figure(figsize=(width / FIGURE_DPI, height / FIGURE_DPI), dpi=FIGURE_DPI, facecolor="white")
         FigureCanvasAgg(figure)
         try:
             axes = figure.add_axes((0., 0., 1., 1.))
             axes.imshow(source, interpolation="none", aspect="equal")
             axes.set_axis_off()
             buffer = io.BytesIO()
-            figure.savefig(buffer, format="pdf", dpi=150, bbox_inches="tight", pad_inches=.05,
+            figure.savefig(buffer, format="pdf", dpi=FIGURE_DPI, bbox_inches="tight", pad_inches=.05,
                            facecolor="white", metadata={"CreationDate": None, "ModDate": None})
             return buffer.getvalue()
         finally:
@@ -1760,7 +1761,7 @@ def _write_examples(
         "format": "pdf",
         "figure_directory": _display_path(output, paths.project_root),
         "image_export": {
-            "format": "pdf", "pdf_dpi": 150, "pad_inches": .05,
+            "format": "pdf", "pdf_dpi": FIGURE_DPI, "pad_inches": .05,
             "generated_scale": _EXAMPLE_GENERATED_SCALE,
             "training_max_edge": _EXAMPLE_TRAINING_MAX_EDGE,
             "resampling": "lanczos", "png_optimize": True,

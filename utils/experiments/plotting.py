@@ -28,6 +28,7 @@ import pandas as pd
 from utils.common.io import atomic_write_frame_csv
 from utils.data.proximity_gmm import COMPONENT_NAMES
 from . import proximity_style
+from .publication_style import FIGURE_DPI
 
 __all__ = [
     "AnalysisStatistics",
@@ -60,7 +61,6 @@ _KIND_COLORS = {
     "Other / unlabeled": "#7F7F7F",
 }
 FIGURE_SIZE = (4.0, 4.0)
-FIGURE_DPI = 150
 TEXT_FONT_SIZE = 15
 AXIS_LABEL_FONT_SIZE = 18
 AXIS_NUMBER_FONT_SIZE = 15
@@ -121,6 +121,7 @@ _GMM_ELLIPSE_STANDARD_DEVIATIONS = (1.0, 2.0)
 
 PLOT_STYLE = {
     "figure.figsize": FIGURE_SIZE,
+    "figure.dpi": FIGURE_DPI,
     "savefig.dpi": FIGURE_DPI,
     "font.family": "STIXGeneral",
     "font.size": TEXT_FONT_SIZE,

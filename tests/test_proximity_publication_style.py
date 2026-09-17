@@ -202,7 +202,7 @@ def test_paired_views_share_data_rectangle_limits_ticks_and_summary_without_chan
     assert r"$\rho < 0$: 1/1 (100.0%)" in summary.get_text()
     assert options["export_options"]
     for _figure, names in figures:
-        assert options["export_options"][names["pdf"]]["dpi"] == 600
+        assert options["export_options"][names["pdf"]]["dpi"] == 150
         assert set(names) == {"pdf"}
         assert options["formats"] == ("pdf",)
     pd.testing.assert_frame_equal(frame, before)
@@ -474,7 +474,7 @@ def test_gmm_duplicate_coordinates_keep_each_fitted_observation():
         plt.close(figure)
 
 
-def test_gmm_export_uses_local_pdf_600_dpi_and_preserves_other_publisher_defaults(tmp_path, monkeypatch):
+def test_gmm_export_uses_shared_pdf_150_dpi_and_preserves_other_publisher_defaults(tmp_path, monkeypatch):
     from pathlib import Path
 
     frame, configuration = _gmm_style_inputs()
@@ -493,7 +493,7 @@ def test_gmm_export_uses_local_pdf_600_dpi_and_preserves_other_publisher_default
     assert output == tmp_path / "published"
     assert len(items) == 1 and items[0][1] == {"pdf": "proximity_vs_sscd_gmm_fit.pdf"}
     assert options["formats"] == ("pdf",)
-    assert options["export_options"]["proximity_vs_sscd_gmm_fit.pdf"]["dpi"] == 600
+    assert options["export_options"]["proximity_vs_sscd_gmm_fit.pdf"]["dpi"] == 150
     assert plotting.FIGURE_DPI == 150 and plotting.FIGURE_PAD_INCHES == .05
     assert dict(matplotlib.rcParams) == rc_before
     assert set(plt.get_fignums()) == before_figures

@@ -51,8 +51,8 @@ ellipse extents included. Existing negative scores remain visible.
 
 The reference PDF is saved at
 `figures/<canonical_run>/proximity/reference_S<N>_N<N>/proximity_vs_sscd_gmm_fit.pdf`.
-Only its points are rasterized, at the same 600-DPI setting as the other
-proximity PDFs. Ellipses, means, legend and axes remain vector artwork. Tight
+Only its points are rasterized, at the shared 150-DPI setting used by the other
+figures. Ellipses, means, legend and axes remain vector artwork. Tight
 bounds and 0.05-inch padding remain in effect. The current source-only styling
 change has not rendered figures or executed tests.
 
@@ -72,7 +72,7 @@ figures/<canonical_run>/proximity/<role>_S<seed_start>_N<N>/
 
 `experiment` is the evaluation role and `reference` is the frozen selection role. Each exports only `proximity_vs_sscd_all_prompts.pdf` and `proximity_vs_sscd.pdf`. Reference-role GMM diagnostics are also PDF-only in this publication tree; any active strategy namespace is preserved. Manuscript attachment prefixes do not create renamed or duplicate outputs. Each PDF remains one page; no combined six-panel image is generated.
 
-No PNG is exported. The proximity scatter point collection alone is rasterized in PDF at **600 DPI**, as explicitly requested for this family; labels, axes, ticks, legend and statistics stay vector-based. This local PDF setting does not change the six theory figures' 150-DPI raster exports or unrelated publisher defaults. Exports use `bbox_inches="tight"` and `pad_inches=0.05`, with no invisible canvas-expanding artist. Explicit PDF format, staging of both views, atomic installation, rollback and figure closing remain in use. Existing cache PNGs/PDFs are left in place; this source change does not move or delete prior artifacts.
+No PNG is exported. The proximity scatter point collection alone is rasterized in PDF at the shared **150 DPI**; labels, axes, ticks, legend and statistics stay vector-based. The common `publication_style.FIGURE_DPI` setting is 150 for all figures, including proximity, GMM, examples and the six theory figures. Exports use `bbox_inches="tight"` and `pad_inches=0.05`, with no invisible canvas-expanding artist. Explicit PDF format, staging of both views, atomic installation, rollback and figure closing remain in use. Existing cache PNGs/PDFs are left in place; this source change does not move or delete prior artifacts.
 
 The retained/discarded examples are also exported in both normal and `--plot`
 execution:

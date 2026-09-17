@@ -25,4 +25,5 @@ SSCD_CMAP = ListedColormap(
 SSCD_NORM = Normalize(vmin=0., vmax=1., clip=True)
 SSCD_TICKS = tuple(index / 5 for index in range(6))
 
+FIGURE_DPI = 150
 PLOT_BOX_INCHES = 3.1

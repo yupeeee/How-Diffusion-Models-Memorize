@@ -1637,7 +1637,7 @@ def test_gmm_fit_figure_writes_only_pdf_from_all_fitted_reference_rows(
     assert points.get_alpha() == .35 and points.get_rasterized() is True
     assert len(export_calls) == 1
     assert export_calls[0]["formats"] == ("pdf",)
-    assert export_calls[0]["export_options"][plotting_module.SELECTION_GMM_FIGURES["pdf"]]["dpi"] == 600
+    assert export_calls[0]["export_options"][plotting_module.SELECTION_GMM_FIGURES["pdf"]]["dpi"] == 150
 
     fit = configuration["gmm_fit"]
     assert isinstance(fit, dict)
@@ -2200,13 +2200,13 @@ def test_analysis_outputs_publish_prompt_level_summary_from_saved_seed_rows(
     assert save_calls == [
         {
             "format": "pdf",
-            "dpi": 600,
+            "dpi": 150,
             "bbox_inches": "tight",
             "pad_inches": 0.05,
         },
         {
             "format": "pdf",
-            "dpi": 600,
+            "dpi": 150,
             "bbox_inches": "tight",
             "pad_inches": 0.05,
         },
