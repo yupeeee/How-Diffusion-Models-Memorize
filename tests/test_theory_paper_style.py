@@ -133,7 +133,7 @@ def test_common_bounds_attach_renderer_to_direct_figures_and_include_external_ke
             ax = fig.subplots()
             style.apply_layout(fig, ax)
             ax.plot([0., 1.], [0., 1.])
-            ax.set_xlabel(r"$L_T/(d\,\mathrm{SNR}_T)$")
+            ax.set_xlabel(r"$\mathcal{L}_T/(d\,\mathrm{SNR}_T)$")
             ax.set_ylabel("Long mathematical quantity " + str(index))
             if index % 2:
                 group = ax.legend([Line2D([], [], color="red")], ["SSCD > 0.75"],

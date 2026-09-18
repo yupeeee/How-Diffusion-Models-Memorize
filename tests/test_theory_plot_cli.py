@@ -355,12 +355,19 @@ def _run_all_stub(tmp_path, arguments=(), **environment):
     project.mkdir()
     runner = project / "run_all.sh"
     runner.write_bytes((ROOT / "run_all.sh").read_bytes())
+    scripts = project / "scripts"
+    scripts.mkdir()
+    (scripts / "run_all_summary.py").write_bytes((ROOT / "scripts/run_all_summary.py").read_bytes())
     fake = """#!/usr/bin/env bash
 set -Eeuo pipefail
 wrapper_name="$(basename -- "$0")"
 { printf '%s' "$wrapper_name"; printf '\\t%s' "$@"; printf '\\n'; } >> "$RUN_ALL_LOG"
 if [[ "$wrapper_name" == download_webster.sh ]]; then exit "$DOWNLOAD_EXIT_CODE"; fi
 if [[ "$wrapper_name" == "$FAIL_WRAPPER" && " $* " == *" --model $FAIL_MODEL "* ]]; then exit 17; fi
+if [[ -n "${RUN_ALL_ARTIFACT_PATH:-}" && " $* " != *" --validate-only "* ]]; then
+    mkdir -p -- "$(dirname -- "$RUN_ALL_ARTIFACT_PATH")"
+    printf 'fixture artifact' > "$RUN_ALL_ARTIFACT_PATH"
+fi
 """
     for name in (
         "download_webster",
@@ -372,10 +379,18 @@ if [[ "$wrapper_name" == "$FAIL_WRAPPER" && " $* " == *" --model $FAIL_MODEL "* 
         wrapper = project / f"{name}.sh"
         wrapper.write_text(fake)
         wrapper.chmod(0o755)
-    # Stub only the CUDA availability preflight; stage commands remain logged
-    # independently. These routing fixtures must never import a numerical stack.
+    # The standard-library summary helper runs normally. Only the CUDA stdin
+    # preflight is stubbed; stage and summary logs stay separate, and no model
+    # or numerical stack is imported by this routing harness.
     interpreter = project / "python-preflight"
-    interpreter.write_text('#!/bin/sh\ncat >/dev/null\nexit "${CUDA_PREFLIGHT_EXIT_CODE:-0}"\n')
+    interpreter.write_text("""#!/bin/sh
+if [ "$1" = "-B" ] && [ "${2##*/}" = "run_all_summary.py" ]; then
+    printf '%s\\n' "$3" >> "$RUN_ALL_SUMMARY_LOG"
+    exec "$RUN_ALL_REAL_PYTHON" "$@"
+fi
+cat >/dev/null
+exit "${CUDA_PREFLIGHT_EXIT_CODE:-0}"
+""")
     interpreter.chmod(0o755)
     log = tmp_path / "calls.log"
     result = subprocess.run(
@@ -385,6 +400,9 @@ if [[ "$wrapper_name" == "$FAIL_WRAPPER" && " $* " == *" --model $FAIL_MODEL "* 
             **os.environ,
             "RUN_ALL_LOG": str(log),
             "PYTHON": str(interpreter),
+            "RUN_ALL_REAL_PYTHON": sys.executable,
+            "RUN_ALL_SUMMARY_LOG": str(tmp_path / "summary_calls.log"),
+            "RUN_ALL_ARTIFACT_PATH": "",
             "DOWNLOAD_EXIT_CODE": "0",
             "FAIL_WRAPPER": "",
             "FAIL_MODEL": "",

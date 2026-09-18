@@ -7,7 +7,7 @@ with the model's complete training marginal.
 """
 
 MANUSCRIPT_SHA256 = "fd447e263b921e94203558e6b03e2a9aabaa03ab8deb5cec7545427aed4f112f"
-NOTATION_VERSION = "four-stage-manuscript-notation-17"
+NOTATION_VERSION = "four-stage-manuscript-notation-18"
 
 NORM_AXIS = r"$\|\cdot\|/\sqrt{d}$"
 INITIAL_BRANCH_LABELS = (r"$b=c$", r"$b=\varnothing$")
@@ -51,9 +51,9 @@ TERMINAL_LABELS = {name: "$" + value + "$" for name, value in TERMINAL_EXPRESSIO
 
 PAPER_AXES = {
     "reference_variation_per_prompt": {"x": r"$T-t$", "y": r"$\mathcal{V}_t/\sqrt{d}$"},
-    "corollary3_guidance_scale_vs_loss": {"x": r"$\sqrt{L_T(c)/(d\,\mathrm{SNR}_T)}$", "y": r"$\widehat{g}$"},
+    "corollary3_guidance_scale_vs_loss": {"x": r"$\sqrt{\mathcal{L}_T(c)/(d\,\mathrm{SNR}_T)}$", "y": r"$\widehat{g}$"},
     "initial_loss_recovery": {
-        "x": r"$\sqrt{L_T(c)/(d\,\mathrm{SNR}_T)}$",
+        "x": r"$\sqrt{\mathcal{L}_T(c)/(d\,\mathrm{SNR}_T)}$",
         "y": r"$\sqrt{\mathbb{E}_{\mathbf{x}_T}[\|\hat{\mathbf{x}}_T(b)-\mathbf{x}^{\star}\|^2]/d}$",
     },
     "branch_gap_posterior_response": {

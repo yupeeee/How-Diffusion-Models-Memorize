@@ -1167,7 +1167,7 @@ _PROMPT_REFERENCE_VARIATION = _four_stage(
 _GUIDANCE_FIT = _four_stage(
     "corollary3_initial_cfg_amplification", "corollary3_guidance_scale_vs_loss", "appendix", "four_guidance_fit",
     "How does the fitted initial guidance coefficient vary with genuine conditional forward loss?",
-    r"$\sqrt{L_T(c)/(d\,\mathrm{SNR}_T)}$", r"$\widehat{g}$",
+    r"$\sqrt{\mathcal{L}_T(c)/(d\,\mathrm{SNR}_T)}$", r"$\widehat{g}$",
     "Corollary 3, Equation 54: one signed no-intercept least-squares coefficient per prompt-target pair minimizes the sum over the complete evaluation seed cohort of ||(hat{x}_T(c;g)-mu)-a(x_star-mu)||^2. With the same target direction for every seed, this joint coefficient equals the arithmetic mean of the individual signed seed fits. The saved x remains the genuine forward-target loss mean L_T(c)/(d*SNR_T). The display takes one square root of that saved ratio, after the loss has been averaged over draws; it is not a mean of per-draw roots. Color is mean terminal SSCD across exactly the same complete seed cohort. Fits use actual saved first-prediction states, with Gaussian-bank match status audited separately. The selected reference-based mu is used; neither zero centering nor a coefficient fitted to g*Delta_T is substituted. The horizontal reference is the configured guidance scale g; negative fits remain visible and are not clipped.",
     ["run_id", "original_index", "record_id", "target_id", "x", "y", "mean_terminal_sscd",
      "seed_count", "seed_ids_json", "latent_dimension", "snr", "guidance_scale",

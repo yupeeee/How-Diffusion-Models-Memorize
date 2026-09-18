@@ -37,7 +37,7 @@ def test_comprehensive_measurement_inventory_retains_all_twenty_notation_contrac
             assert "unresolved condition signs" in entry["notation_details"]
             continue
         if entry["stem"] == "corollary3_guidance_scale_vs_loss":
-            assert entry["axes"] == {"x": r"$\sqrt{L_T(c)/(d\,\mathrm{SNR}_T)}$", "y": r"$\widehat{g}$"}
+            assert entry["axes"] == {"x": r"$\sqrt{\mathcal{L}_T(c)/(d\,\mathrm{SNR}_T)}$", "y": r"$\widehat{g}$"}
             assert entry["formula_version"] == "corollary3-guidance-fit-1"
             assert entry["requires_theory_mean"] is True
             assert entry["saved_x_definition"] == "L_T(c)/(d*SNR_T)"
@@ -85,7 +85,7 @@ def test_comprehensive_measurement_inventory_retains_all_twenty_notation_contrac
                 assert entry[key] == previous[entry["stem"]][key]
     by_stem = {entry["stem"]: entry for entry in entries}
     initial = by_stem["initial_loss_recovery"]["axes"]
-    assert initial["x"] == r"$\sqrt{L_T(c)/(d\,\mathrm{SNR}_T)}$"
+    assert initial["x"] == r"$\sqrt{\mathcal{L}_T(c)/(d\,\mathrm{SNR}_T)}$"
     assert initial["y"] == r"$\sqrt{\mathbb{E}_{\mathbf{x}_T}[\|\hat{\mathbf{x}}_T(b)-\mathbf{x}^{\star}\|^2]/d}$"
     margin = by_stem["posterior_feedback_condition_margin"]["axes"]
     assert all(term in margin["x"] for term in (r"\boldsymbol{\Delta}_t", r"-\mathcal{E}_t", r"-\mathcal{V}_t"))
@@ -243,7 +243,7 @@ def test_caption_defines_manuscript_symbols_and_preserves_empirical_scope(tmp_pa
             assert "not selected global mu" in caption
         if stem == "corollary3_guidance_scale_vs_loss":
             assert "Normalization: " + entry["normalization"] in caption
-            assert entry["axes"]["x"] == r"$\sqrt{L_T(c)/(d\,\mathrm{SNR}_T)}$"
+            assert entry["axes"]["x"] == r"$\sqrt{\mathcal{L}_T(c)/(d\,\mathrm{SNR}_T)}$"
             assert entry["axes"]["x"] in caption
             assert entry["axes"]["y"] == r"$\widehat{g}$"
             assert entry["axes"]["y"] in caption

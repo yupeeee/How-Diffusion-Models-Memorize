@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+RUN_ALL_STARTED_SECONDS=$SECONDS
+
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODEL="all"
 SCHEDULER="all"
@@ -148,6 +150,9 @@ Plot mode inherits omitted measurement settings from each saved bundle.
 --evaluation-source and --num-baseline-seeds remain unsupported.
 Legacy theorem/gallery/baseline wrappers remain explicitly invokable utilities.
 The PYTHON environment variable is honored. Any failed stage stops the matrix.
+Successful completion prints total elapsed time and the final size of new or
+updated files under data/, logs/, outputs/, figures/, and checkpoints/. Unchanged
+cached files are excluded; the size is logical file bytes, not net disk growth.
 EOF
 }
 
@@ -496,6 +501,25 @@ PAIR_TOTAL=${#MODEL_SCHEDULER_PAIRS[@]}
 printf 'Experiment matrix: %s model/scheduler pairs, center %s\n' "$PAIR_TOTAL" "$CENTER"
 RUN_CONTEXT="matrix preflight"
 trap 'status=$?; printf "run_all.sh: pipeline failed for %s (exit %s)\n" "$RUN_CONTEXT" "$status" >&2; exit "$status"' ERR
+
+# Record metadata only: reused caches must not count as newly produced files.
+RUN_ALL_SUMMARY_STATE=""
+RUN_ALL_SUMMARY_READY=0
+cleanup_run_all_summary() {
+    local exit_status=$?
+    trap - EXIT
+    if [[ -n "$RUN_ALL_SUMMARY_STATE" ]]; then
+        rm -f -- "$RUN_ALL_SUMMARY_STATE" || :
+    fi
+    exit "$exit_status"
+}
+trap cleanup_run_all_summary EXIT
+if RUN_ALL_SUMMARY_STATE="$(mktemp "${TMPDIR:-/tmp}/run-all-summary.XXXXXXXXXX")"; then
+    if "${PYTHON:-python}" -B "$PROJECT_ROOT/scripts/run_all_summary.py" snapshot \
+        --project-root "$PROJECT_ROOT" --state "$RUN_ALL_SUMMARY_STATE"; then
+        RUN_ALL_SUMMARY_READY=1
+    fi
+fi
 # Validate the entire matrix before any renderer can write a figure.
 if ((PLOT_ONLY)); then
     PREFLIGHT_STATUS=0
@@ -549,3 +573,19 @@ for pair in "${MODEL_SCHEDULER_PAIRS[@]}"; do
     run_model_scheduler
 done
 printf 'Experiment matrix complete (%s configurations).\n' "$PAIR_TOTAL"
+
+# Accounting failures must not turn a completed experiment into a failed run.
+RUN_ALL_SIZE_SUMMARY="Total produced file size: unavailable (initial snapshot failed)."
+if ((RUN_ALL_SUMMARY_READY)); then
+    if RUN_ALL_SIZE_SUMMARY="$("${PYTHON:-python}" -B "$PROJECT_ROOT/scripts/run_all_summary.py" report --state "$RUN_ALL_SUMMARY_STATE")"; then
+        :
+    else
+        RUN_ALL_SIZE_SUMMARY="Total produced file size: unavailable (final scan failed)."
+    fi
+fi
+RUN_ALL_ELAPSED_SECONDS=$((SECONDS - RUN_ALL_STARTED_SECONDS))
+printf 'Total elapsed time: %02d:%02d:%02d (%d seconds)\n' \
+    "$((RUN_ALL_ELAPSED_SECONDS / 3600))" \
+    "$((RUN_ALL_ELAPSED_SECONDS / 60 % 60))" \
+    "$((RUN_ALL_ELAPSED_SECONDS % 60))" "$RUN_ALL_ELAPSED_SECONDS"
+printf '%s\n' "$RUN_ALL_SIZE_SUMMARY"
